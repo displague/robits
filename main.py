@@ -8,13 +8,12 @@ escape_codes = {}
 class Role:
     def __init__(self, name, template):
         self.name = name
-        self.template = template + " You are part of an organization, and you have to collaborate with other members."
-        self.conversation_history = []
-
+        self.template = template + f"You are part of an organization, {self.name}, and you have to collaborate with other members."
+        self.conversation_history = [f"{self.template}\n"]
 
     def interact(self, prompt):
         self.conversation_history.append(prompt)
-        full_prompt = self.template + "\n\n" + "\n".join(self.conversation_history) + f"\nAs a {self.name}, {prompt}"
+        full_prompt = "\n".join(self.conversation_history)
         
         response = openai.Completion.create(
             engine="text-davinci-002",  # Replace with the GPT-4 model once available
@@ -23,7 +22,9 @@ class Role:
             n=1,
             stop=None,
             temperature=0.8,
-        ).choices[0].text.strip()
+        )
+        # print(response)
+        response = response.choices[0].text.strip()
 
         self.conversation_history.append(response)
         return response
@@ -106,7 +107,7 @@ class Human(Role):
     def __init__(self):
         pass
 
-    def interact(self, message):
+    def interact(self, prompt):
         return input("Enter message: ")
 
 def main():
@@ -122,15 +123,17 @@ def main():
     ]
 
     receiver = Human()
-    message = receiver.interact("")
-        
+    last_receiver = "Human"
+    last_response = "Welcome to the organization. Start a conversation."
+    
     while True:
-        sender = random.choice(employees)
         receiver = random.choice(employees)
 
-        message = receiver.interact(message)
-        print(f"{receiver.name} responds {message}")
-
+        print(f"Message to {receiver.name}: {last_response}")
+        response = receiver.interact(f"{last_receiver}: {last_response}\n{receiver}: ")
+        print(f"{receiver.name} responds: {response}")
+        last_response = response
+        last_receiver = receiver
         time.sleep(3)
 
 if __name__ == "__main__":
