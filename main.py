@@ -8,7 +8,7 @@ escape_codes = {}
 class Role:
     def __init__(self, name, template):
         self.name = name
-        self.template = template + f"You are part of an organization, {self.name}, and you have to collaborate with other members. Keep introductions to a minimum and get to work. If you are not sure, ask. If answers are not productive, get creative. The conversation follows.\n---"
+        self.template = template + f"""You are part of an organization, {self.name}, and you have to collaborate with other members. Keep introductions to a minimum and get to work. If you are not sure what you should be doing, ask. If answers are not productive, get creative. Employees can create new organization members using the prompt format "Created a new employee with the role *role_name* and description *role_description*". If you need help achieving the company goals, you can request a new organization member with that prompt. The CEO can not request new employees, but it will fulfill the requests. The conversation follows, each exchange is 1:1. Each individual can recall their own previous conversations.\n---"""
         self.conversation_history = [f"{self.template}\n"]
 
     def interact(self, prompt):
@@ -18,7 +18,7 @@ class Role:
         response = openai.Completion.create(
             engine="text-davinci-002",  # Replace with the GPT-4 model once available
             prompt=full_prompt,
-            max_tokens=100,
+            max_tokens=200,
             n=1,
             stop=None,
             temperature=0.8,
@@ -31,18 +31,28 @@ class Role:
 
 class CEO(Role):
     def __init__(self):
-        template = "As the CEO, you are responsible for making high-level decisions and setting the overall direction of the organization."
-        super().__init__("CEO", template)
+        role_description = "As the CEO, you are responsible for making high-level decisions and setting the overall direction of the organization."
+        super().__init__("CEO", role_description)
 
-class MarketingDirector(Role):
-    def __init__(self):
-        template = "As the Marketing Director, you are responsible for planning and executing marketing strategies to promote the organization's products or services."
-        super().__init__("Marketing Director", template)
+    def interact(self, prompt):
+        if prompt.lower().startswith("create a new employee"):
+            try:
+                role_name, role_description = self.parse_employee_creation_message(prompt)
+                new_employee = Role(role_name, role_description)
+                employees.append(new_employee)
+                return f"Created a new employee with the role '{role_name}' and description '{role_description}'."
+            except ValueError as e:
+                return f"Error: {e}"
+        else:
+            return super().interact(prompt)
 
-class ProgramManager(Role):
-    def __init__(self):
-        template = "As the Program Manager, you are responsible for managing multiple projects and ensuring their successful delivery."
-        super().__init__("Program Manager", template)
+    def parse_employee_creation_message(self, message):
+        try:
+            role_name = message.split("named")[1].split("with")[0].strip()
+            role_description = message.split("with the description")[1].strip()
+            return role_name, role_description
+        except IndexError:
+            raise ValueError("Invalid employee creation syntax.")
 
 class PersonalAssistant(Role):
     def __init__(self):
@@ -105,6 +115,7 @@ class Employee:
 
 class Human(Role):
     def __init__(self):
+        self.name = "Human"
         pass
 
     def interact(self, prompt):
@@ -112,9 +123,10 @@ class Human(Role):
 
 def main():
     employees = [
+        Human(),
         CEO(),
-        MarketingDirector(),
-        ProgramManager(),
+        # MarketingDirector(),
+        # ProgramManager(),
         SoftwareEngineer(),
         #PersonalAssistant(),
         #Therapist(),
@@ -122,16 +134,18 @@ def main():
         #FamilyMember()
     ]
 
-    receiver = Human()
+    receiver = employees[0]
     last_receiver = "Human"
     last_response = "Welcome to the organization. Start a conversation."
     
     while True:
         receiver = random.choice(employees)
-
+        if receiver == last_receiver:
+            continue
         # print(f"Message to {receiver.name}: {last_response}")
         response = receiver.interact(f"{last_receiver}: {last_response}\n{receiver}: ")
-        print(f"{receiver.name} responds: {response}")
+        if receiver.name != "Human":
+            print(f"{receiver.name} responds: {response}")
         last_response = response
         last_receiver = receiver
         time.sleep(3)
