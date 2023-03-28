@@ -8,7 +8,7 @@ escape_codes = {}
 class Role:
     def __init__(self, name, template):
         self.name = name
-        self.template = template + f"You are part of an organization, {self.name}, and you have to collaborate with other members."
+        self.template = template + f"You are part of an organization, {self.name}, and you have to collaborate with other members. Keep introductions to a minimum and get to work. If you are not sure, ask. If answers are not productive, get creative. The conversation follows.\n---"
         self.conversation_history = [f"{self.template}\n"]
 
     def interact(self, prompt):
@@ -116,10 +116,10 @@ def main():
         MarketingDirector(),
         ProgramManager(),
         SoftwareEngineer(),
-        PersonalAssistant(),
-        Therapist(),
-        Friend(),
-        FamilyMember()
+        #PersonalAssistant(),
+        #Therapist(),
+        #Friend(),
+        #FamilyMember()
     ]
 
     receiver = Human()
@@ -129,7 +129,7 @@ def main():
     while True:
         receiver = random.choice(employees)
 
-        print(f"Message to {receiver.name}: {last_response}")
+        # print(f"Message to {receiver.name}: {last_response}")
         response = receiver.interact(f"{last_receiver}: {last_response}\n{receiver}: ")
         print(f"{receiver.name} responds: {response}")
         last_response = response
