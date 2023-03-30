@@ -4,37 +4,64 @@ import time
 import os
 import json
 import re
+import yaml
+from datetime import datetime
+from termcolor import colored
+import sys
 
-openai.api_key = os.environ['OPENAI_API_KEY']
+try:
+    openai.api_key = os.environ["OPENAI_API_KEY"]
+except KeyError:
+    print("Error: OPENAI_API_KEY environment variable not set.")
+    sys.exit(1)
+
 escape_codes = {}
+
+
 class Role:
-    def __init__(self, name, template):
+    def __init__(self, name, template, employee_dict, group_template_additions=""):
         self.name = name
-        self.template = template + f"""You are part of an organization, {self.name}, and you have to collaborate with other members. Keep introductions to a minimum and get to work. If you are not sure what you should be doing, ask. If answers are not productive, get creative. Employees can create new organization members using the prompt format "Create a new role *role_name*". The current members of the org are HR, SE, Ops, and CEO. If you need help achieving the company goals, you can request a new organization member with that prompt. The conversation follows, each exchange is 1:1. Each individual can recall their own previous conversations.\n---"""
-        self.conversation_history = [f"{self.template}\n"]
+        self.template = template + group_template_additions
+        self.conversation_history = {name: [] for name in employee_dict}
+        self.group_conversation_history = []
+        self.global_conversation_history = []
+        self.temperature = 0.1 * random.randint(1, 9)
+        self.max_tokens = random.randint(250, 400)
 
     def interact(self, prompt):
-        self.conversation_history.append(prompt)
-        full_prompt = "\n".join(self.conversation_history)
-        
+        if not self.name in self.conversation_history:
+            self.conversation_history[self.name] = []
+
+        self.conversation_history[self.name].append(prompt)
+        full_prompt = "\n".join(self.conversation_history[self.name])
+
         response = openai.Completion.create(
-            engine="text-davinci-002",  # Replace with the GPT-4 model once available
+            engine="text-davinci-002",
             prompt=full_prompt,
-            max_tokens=200,
+            max_tokens=self.max_tokens,
             n=1,
             stop=None,
-            temperature=0.8,
+            temperature=self.temperature,
         )
-        # print(response)
         response = response.choices[0].text.strip()
 
-        self.conversation_history.append(response)
+        self.conversation_history[self.name].append(response)
         return response
+
+    def update_global_conversations(self, message):
+        self.global_conversation_history.append(message)
+
+    def update_group_conversations(self, message):
+        self.group_conversation_history.append(message)
+
 
 class System(Role):
     def __init__(self):
-        role_description = "As the System, you can parse JSON blobs and store escape codes, as well as execute them when required."
-        super().__init__("System", role_description)
+        self.name = "System"
+        self.template = "As the System, you can parse JSON blobs and store escape codes, as well as execute them when required."
+        self.conversation_history = {}
+        self.temperature = 0.1 * random.randint(1, 9)
+        self.max_tokens = random.randint(250, 400)
 
     def interact(self, prompt):
         if prompt.startswith("{"):
@@ -64,31 +91,48 @@ class System(Role):
         else:
             return super().interact(prompt)
 
+
 class Ops(Role):
-    def __init__(self):
+    def __init__(self, employee_dict):
         role_description = """As the Ops role, you recognize when other organization members need escape codes executed and send the appropriate escape code. You can also request new code from the Software Engineer. To execute code, you send a JSON blob on a new line. You will recognize when other organization members need escape codes executed and will send the appropriate escape code, the format is a JSON object: {"exec":"escape_code_name_here", "args":[]})"""
-        super().__init__("Ops", role_description)
+        group_template_additions = "You are part of the Operations group."
+        super().__init__(
+            "Ops", role_description, employee_dict, group_template_additions
+        )
 
     def interact(self, prompt):
         if prompt.lower().startswith("request code"):
-            return f"{self.name}: {{\"exec\": \"request_code\", \"args\": []}}"
+            return f'{self.name}: {{"exec": "request_code", "args": []}}'
         else:
             return super().interact(prompt)
 
+
 class HR(Role):
-    def __init__(self):
+    max_organization_members = 16
+
+    def __init__(self, employee_dict):
+        self.employee_dict = employee_dict
         role_description = "As the HR, you are responsible for managing AI resources and creating new roles within the organization. Maintaining a productive, sustainable, and respectful workforce and culture in the organization."
-        super().__init__("HR", role_description)
+        group_template_additions = "You are part of the Human Resources group."
+        super().__init__(
+            "HR", role_description, employee_dict, group_template_additions
+        )
 
     def interact(self, prompt):
         role_creation_pattern = r"(?i)(create|add)\s+(a\s+)?(new\s+)?role\s+(.+)"
         match = re.match(role_creation_pattern, prompt)
         if match:
             role_name = match.group(4).strip()
-            if role_name not in employee_dict:
-                new_role = Role(role_name, f"As a {role_name}, you are responsible for performing tasks related to the {role_name} role.")
-                employee_dict[role_name] = new_role
-                return f"Created a new role: {role_name}"
+            if role_name not in self.employee_dict:
+                if len(self.employee_dict) < HR.max_organization_members:
+                    new_role = Role(
+                        role_name,
+                        f"As a {role_name}, you are responsible for performing tasks related to the {role_name} role.",
+                    )
+                    self.employee_dict[role_name] = new_role
+                    return f"Created a new role: {role_name}"
+                else:
+                    return f"Error: The organization has reached its maximum size of {HR.max_organization_members} members."
             else:
                 return f"Error: Role '{role_name}' already exists."
         else:
@@ -102,49 +146,31 @@ class HR(Role):
         except IndexError:
             raise ValueError("Invalid employee creation syntax.")
 
+
 class SoftwareEngineer(Role):
-    def __init__(self):
-        template = """As a Software Engineer (SE), you are responsible for designing, developing, and maintaining software applications. You can also create escape codes when requested by others in your organization. To create an escape code, on a newline write a JSON object with fields, code_name, args, and code. The code_name is the name of the escape code, the args are a list of parameters the code will receive, code must be valid python function that accepts the parameters. For example, a create an exit code that fetches a URL, you may post on a newline a JSON blob like {"code_name": "crawl", "args":[{"name":"url"}], "code":"python code here that fetches that URL and returns the output."}"""
-        super().__init__("SE", template)
+    def __init__(self, employee_dict):
+        template = """As a Software Engineer (SE), you are responsible for designing, developing, and maintaining software applications. You primarily create escape codes when requested by others in your organization. To create an escape code, on a newline write a JSON object with the fields: code_name, args, and code. The code_name is the name of the escape code, the args are a list of objects which name the parameter the code will receive, the code must be a valid python function that accepts the parameters. For example, to create an exit code that fetches a URL, you may post on a newline a JSON blob like {"code_name": "crawl", "args":[{"name":"url"}], "code":"python code here that fetches that URL and returns the output."}. The code, code_name, and args should be tailored to the specific need."""
+        group_template_additions = "You are part of the Engineering group."
+        super().__init__("SE", template, employee_dict, group_template_additions)
 
-    def interact(self, prompt):
-        if prompt.startswith("!new"):
-            # Create a new escape code
-            try:
-                code_name, args, code = self.parse_new_escape_code_message(prompt)
-                escape_codes[code_name] = {"args": args, "code": code}
-                return f"Created a new escape code '{code_name}' with args '{args}'."
-            except ValueError as e:
-                return f"Error: {e}"
-        else:
-            return super().interact(prompt)
-
-    def parse_new_escape_code_message(self, message):
-        try:
-            command, code_name, args = message.split("(", 1)[0].split(maxsplit=2)
-            code = message.split("(", 1)[1].rsplit(")", 1)[0]
-            return code_name.strip(), args.strip(), code.strip()
-        except IndexError:
-            raise ValueError("Invalid escape code creation syntax.")
 
 class Human(Role):
     def __init__(self):
         self.name = "CEO"
         self.template = "As CEO, you are responsible for making high-level decisions and setting the overall direction of the organization."
 
-        pass
-
     def interact(self, prompt):
         return input("Enter message: ")
 
+
 def main():
-    global employee_dict
-    employee_dict = {
-        "CEO": Human(),
-        "HR": HR(),
-        "SE": SoftwareEngineer(),
-        "Ops": Ops(),
-    }
+    employee_dict = {}
+
+    employee_dict["CEO"] = Human()
+    employee_dict["Ops"] = Ops(employee_dict)
+    employee_dict["SE"] = SoftwareEngineer(employee_dict)
+    employee_dict["HR"] = HR(employee_dict)
+
     system = System()
 
     last_receiver = employee_dict["CEO"]
@@ -159,22 +185,24 @@ def main():
         else:
             while True:
                 new_receiver = employee_dict[random.choice(list(employee_dict))]
-                if new_receiver != receiver:
+                if new_receiver != last_receiver:
                     receiver = new_receiver
                     break
 
         system_response = system.interact(last_response)
         if system_response.startswith("Error:"):
-            print(f"System responds: {system_response}")
+            print(colored(f"System responds: {system_response}", "red"))
             continue
 
-        # print(f"Message to {receiver.name}: {last_response}")
-        response = receiver.interact(f"{last_receiver.name}: {last_response}\n{receiver}: ")
+        response = receiver.interact(
+            f"{last_receiver.name}: {last_response}\n{receiver}: "
+        )
         if receiver.name != "CEO":
-            print(f"{receiver.name} responds: {response}")
+            print(colored(f"{receiver.name} responds: {response}", "cyan"))
         last_response = response
         last_receiver = receiver
         time.sleep(3)
+
 
 if __name__ == "__main__":
     main()
