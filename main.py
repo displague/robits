@@ -2,7 +2,7 @@ import openai
 import random
 import time
 import os
-import json
+import yaml
 import re
 import yaml
 from datetime import datetime
@@ -15,6 +15,12 @@ except KeyError:
     print("Error: OPENAI_API_KEY environment variable not set.")
     sys.exit(1)
 
+try:
+    db_init(os.environ["PINECONE_API_KEY"])
+except KeyError:
+    print("Error: PINECONE_API_KEY environment variable not set.")
+    sys.exit(1)
+
 escape_codes = {}
 
 def interact_costly(self, message):
@@ -25,7 +31,7 @@ def interact_costly(self, message):
     messages = self.conversation_history.get(self.name, [])
 
     messages.append({"role": "user", "content": message})
-    print(colored(f"\n---\n// {self.name}\n{json.dumps(messages)}\n---\n", "grey"))
+    print(colored(f"\n---\n// {self.name}\n{yaml.dump(messages)}\n---\n", "grey"))
 
     response = openai.ChatCompletion.create(
         model="gpt-3.5-turbo",
@@ -48,7 +54,7 @@ def interact_cheap(self, message):
         self.conversation_history[self.name] = []
 
     self.conversation_history[self.name].append(message)
-    full_prompt = "\n".join(self.group_conversation_history)+"\n"+"\n".join(self.conversation_history[self.name])
+    full_prompt = "\n".join(self.template)+"\n"+"\n".join(self.group_conversation_history)+"\n"+"\n".join(self.conversation_history[self.name])
     print(colored(f"\n---\n// {self.name}\n{full_prompt}\n---\n", "grey"))
     response = openai.Completion.create(
         engine="text-davinci-002",
@@ -63,12 +69,33 @@ def interact_cheap(self, message):
     self.conversation_history[self.name].append(response)
     return response
 
+class PineconeDict:
+    def __init__(self, namespace):
+        self.namespace = namespace
+        self.vector_length = 300
+
+    def __getitem__(self, key):
+        try:
+            vector = pinecone.fetch(namespace=self.namespace, ids=[key])[key]
+            return json.loads(vector[:self.vector_length].tobytes().decode())
+        except KeyError:
+            raise KeyError(f"{key} not found in Pinecone namespace {self.namespace}")
+
+    def __setitem__(self, key, value):
+        vector = bytearray(json.dumps(value).encode())[: self.vector_length]
+        vector.extend([0] * (self.vector_length - len(vector)))
+        pinecone.upsert(namespace=self.namespace, items={key: vector})
+
+    def __contains__(self, key):
+        return key in pinecone.list_ids(namespace=self.namespace)
 
 class Role:
     def __init__(self, name, template, employee_dict, group_template_additions=""):
         self.name = name
         self.template = template + group_template_additions
-        self.conversation_history = {name: [] for name in employee_dict}
+        self.conversation_history = PineconeDict(namespace="conversation_history")
+        for name in employee_dict:
+            self.conversation_history[name] = []
         self.group_conversation_history = []
         self.global_conversation_history = []
         self.temperature = 0.1 * random.randint(1, 9)
@@ -87,7 +114,7 @@ class Role:
 class System(Role):
     def __init__(self):
         self.name = "System"
-        self.template = "As the System, you can parse JSON blobs and store escape codes, as well as execute them when required."
+        self.template = "As the System, you can parse YAML blobs and store escape codes, as well as execute them when required."
         self.conversation_history = {}
         self.temperature = 0.1 * random.randint(1, 9)
         self.max_tokens = random.randint(250, 400)
@@ -95,36 +122,34 @@ class System(Role):
     def interact(self, prompt):
         print(colored(f"\n---\n// {self.name}\n{prompt}\n---\n", "grey"))
 
-        if prompt.startswith("{"):
-            try:
-                instruction = json.loads(prompt)
+        try:
+            instruction = yaml.safe_load(prompt)
 
-                if "code_name" in instruction:
-                    escape_codes[instruction["code_name"]] = {
-                        "args": instruction["args"],
-                        "code": instruction["code"],
-                    }
-                    return f"Stored escape code '{instruction['code_name']}' with args {instruction['args']}."
-                elif "exec" in instruction:
-                    code_name = instruction["exec"]
-                    args = instruction["args"]
-                    if code_name in escape_codes:
-                        code = escape_codes[code_name]["code"]
-                        exec(code, args)
-                        return f"Executed escape code '{code_name}' with args {args}."
+            if "code_name" in instruction:
+                escape_codes[instruction["code_name"]] = {
+                    "args": instruction["args"],
+                    "code": instruction["code"],
+                }
+                return f"Stored escape code '{instruction['code_name']}' with args {instruction['args']}."
+            elif "exec" in instruction:
+                code_name = instruction["exec"]
+                args = instruction["args"]
+                if code_name in escape_codes:
+                    code = escape_codes[code_name]["code"]
+                    exec(code, args)
+                    return f"Executed escape code '{code_name}' with args {args}."
 
-                    else:
-                        return f"Error: Escape code '{code_name}' not found."
-            except json.JSONDecodeError as e:
-                return f"Error: {e}"
-        else:
-            return "Error: no JSON submitted"
-
+                else:
+                    return f"Error: Escape code '{code_name}' not found."
+        except yaml.YAMLError as e:
+            return f"Error: {e}"
+        except Exception as e:
+            return f"Error: {e}"
 
 class Ops(Role):
     def __init__(self, employee_dict):
         role_description = """You are OPs for an AI powered organization.""" 
-        group_template_additions = """You are part of the Operations group.Members of this group recognize when other organization members need escape codes executed and send the appropriate escape code. You can also request new code from the Software Engineer who will create escape codes. To execute code, you send a JSON blob on a new line. You will recognize when other organization members need escape codes executed and will send the appropriate escape code, the format is a JSON object: {"exec":"escape_code_name_here", "args":{"string_var":"string", "numeric_var":123}})"""
+        group_template_additions = """You are part of the Operations group.Members of this group recognize when other organization members need escape codes executed and send the appropriate escape code. You can also request new code from the Software Engineer who will create escape codes. To execute code, you send a YAML blob on a new line. You will recognize when other organization members need escape codes executed and will send the appropriate escape code, the format is a YAML object: {"exec":"escape_code_name_here", "args":{"string_var":"string", "numeric_var":123}})"""
         super().__init__(
             "Ops", role_description, employee_dict, group_template_additions
         )
@@ -158,10 +183,11 @@ You are part of the Human Resources group. To create a new role, send a message 
 class SoftwareEngineer(Role):
     def __init__(self, employee_dict):
         template = """As a Software Engineer (SE), you are responsible for designing, developing, and maintaining software applications. You primarily create escape codes when requested by others in your organization."""
-        group_template_additions = """You are part of the Engineering group. To create an escape code, on a newline write a JSON object with the fields: code_name, args, and code. The code_name is the name of the escape code, the args are a list of objects which name the parameter the code will receive, the code must be a valid python function that accepts the parameters. For example, to create an escape code that fetches a URL, you may post on a newline a JSON blob like {"code_name": "add_100", "args":[{"name":"value"}], "code":"return 100+value"}"""
+        group_template_additions = """You are part of the Engineering group. To create an escape code, on a newline write a YAML object with the fields: code_name, args, and code. The code_name is the name of the escape code, the args are a list of objects which name the parameter the code will receive, the code must be a valid python function that accepts the parameters. For example, to create an escape code that fetches a URL, you may post on a newline a YAML blob like {"code_name": "add_100", "args":[{"name":"value"}], "code":"return 100+value"}"""
         super().__init__("SE", template, employee_dict, group_template_additions)
-        self.conversation_history = {name: [] for name in employee_dict}
-
+        self.conversation_history = PineconeDict(namespace="conversation_history")
+        for name in employee_dict:
+            self.conversation_history[name] = []
 
     def interact(self, prompt):
         return interact_costly(self, prompt)
@@ -176,19 +202,20 @@ class Human(Role):
         return input("Enter message: ")
 
 def parse_escape_code(response):
-    # Check if the response contains a JSON blob
-    json_blob = ""
-    if "{" in response and "}" in response:
-        lines = response.split("\n")
-        for line in lines:
-            if line.strip().startswith("{"):
-                json_blob += line.strip()
-            elif json_blob:
-                json_blob += " " + line.strip()
-                if line.strip().endswith("}"):
-                    break
+    # Check if the response contains a YAML code block
+    yaml_code_block_pattern = r"```(yaml|json)?(.*?)```"
+    match = re.search(yaml_code_block_pattern, response, re.DOTALL)
+    
+    if match:
+        yaml_blob = match.group(2).strip()
+        return yaml_blob
+    else:
+        return ""
 
-    return json_blob
+def db_init(api_key):
+    pinecone.deinit()
+    pinecone.init(api_key=api_key)
+    pinecone.create_namespace(namespace_name="conversation_history")
 
 def main():
     employee_dict = {}
@@ -202,7 +229,7 @@ def main():
 
     # Add escape codes for HR
     system.interact(
-        json.dumps(
+        yaml.dump(
             {
                 "code_name": "create_role",
                 "args": [{"name": "role_name"}, {"name": "role_description"}],
@@ -251,8 +278,8 @@ else:
                 system_response = system.interact(escape_code)
                 print(colored(f"System: {system_response}", "blue"))
                 employee_dict["Ops"].update_group_conversations(f"System: {system_response}")
-            except json.JSONDecodeError:
-                # Return the original response if the JSON blob cannot be processed
+            except yaml.YAMLDecodeError:
+                # Return the original response if the YAML blob cannot be processed
                 if system_response.startswith("Error:"):
                     print(colored(f"System responds: {system_response}", "red"))
                     continue
