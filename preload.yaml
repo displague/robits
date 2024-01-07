@@ -1,0 +1,22 @@
+- code_name: create_role
+  args:
+    - name: role_name
+    - name: role_description
+  code: |
+    # role_name = args["role_name"]
+    # role_description = args["role_description"]
+    hr = employee_dict["HR"]
+
+    if role_name not in hr.employee_dict:
+        if len(hr.employee_dict) < HR.max_organization_members:
+            new_role = Role(
+                role_name,
+                role_description,
+                hr.employee_dict
+            )
+            hr.employee_dict[role_name] = new_role
+            response = f"Created a new role: {role_name}"
+        else:
+            response = f"Error: The organization has reached its maximum size of {HR.max_organization_members} members."
+    else:
+        response = f"Error: Role '{role_name}' already exists."
