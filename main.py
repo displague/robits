@@ -1,4 +1,6 @@
-import openai
+#!/usr/bin/env python3
+from openai import OpenAI
+
 import random
 import time
 import os
@@ -9,13 +11,15 @@ from datetime import datetime
 from termcolor import colored
 import sys
 
-try:
-    openai.api_key = os.environ["OPENAI_API_KEY"]
-except KeyError:
-    print("Error: OPENAI_API_KEY environment variable not set.")
-    sys.exit(1)
-
+client = OpenAI(
+    organization=os.environ.get("OPENAI_ORG", ""),
+    api_key=os.environ.get("OPENAI_API_KEY", "bogus"),
+    base_url=os.environ.get("OPENAI_API_BASE", "https://api.openai.com"),
+)
+costly_model = "gpt-3.5-turbo"
+cheap_model = "text-davinci-002"
 escape_codes = {}
+
 
 def interact_costly(self, message):
     if not self.name in self.conversation_history:
@@ -27,13 +31,12 @@ def interact_costly(self, message):
     messages.append({"role": "user", "content": message})
     print(colored(f"\n---\n// {self.name}\n{json.dumps(messages)}\n---\n", "grey"))
 
-    response = openai.ChatCompletion.create(
-        model="gpt-3.5-turbo",
+    response = client.chat.completions.create(
+        model=costly_model,
         messages=messages,
         max_tokens=self.max_tokens,
         n=1,
         temperature=0.8,
-        # temperature=self.temperature,
     )
     generated_text = response.choices[0].message.content.strip()
     self.conversation_history[self.name].append(
@@ -48,17 +51,21 @@ def interact_cheap(self, message):
         self.conversation_history[self.name] = []
 
     self.conversation_history[self.name].append(message)
-    full_prompt = "\n".join(self.group_conversation_history)+"\n"+"\n".join(self.conversation_history[self.name])
+    full_prompt = (
+        "\n".join(self.group_conversation_history)
+        + "\n"
+        + "\n".join(self.conversation_history[self.name])
+    )
     print(colored(f"\n---\n// {self.name}\n{full_prompt}\n---\n", "grey"))
-    response = openai.Completion.create(
-        engine="text-davinci-002",
+    response = client.chat.completions.create(
+        model=cheap_model,
         prompt=full_prompt,
         max_tokens=self.max_tokens,
         n=1,
         stop=None,
         temperature=0.8,
-        # temperature=self.temperature,
     )
+    print(response)
     response = response.choices[0].text.strip()
     self.conversation_history[self.name].append(response)
     return response
@@ -123,11 +130,12 @@ class System(Role):
 
 class Ops(Role):
     def __init__(self, employee_dict):
-        role_description = """You are OPs for an AI powered organization.""" 
+        role_description = """You are OPs for an AI powered organization."""
         group_template_additions = """You are part of the Operations group.Members of this group recognize when other organization members need escape codes executed and send the appropriate escape code. You can also request new code from the Software Engineer who will create escape codes. To execute code, you send a JSON blob on a new line. You will recognize when other organization members need escape codes executed and will send the appropriate escape code, the format is a JSON object: {"exec":"escape_code_name_here", "args":{"string_var":"string", "numeric_var":123}})"""
         super().__init__(
             "Ops", role_description, employee_dict, group_template_additions
         )
+
 
 class HR(Role):
     max_organization_members = 16
@@ -145,7 +153,6 @@ You are part of the Human Resources group. To create a new role, send a message 
     def interact(self, prompt):
         return super().interact(prompt)
 
-
     def parse_employee_creation_message(self, message):
         try:
             role_name = message.split("named")[1].split("with")[0].strip()
@@ -162,7 +169,6 @@ class SoftwareEngineer(Role):
         super().__init__("SE", template, employee_dict, group_template_additions)
         self.conversation_history = {name: [] for name in employee_dict}
 
-
     def interact(self, prompt):
         return interact_costly(self, prompt)
 
@@ -174,6 +180,7 @@ class Human(Role):
 
     def interact(self, prompt):
         return input("Enter message: ")
+
 
 def parse_escape_code(response):
     # Check if the response contains a JSON blob
@@ -189,6 +196,7 @@ def parse_escape_code(response):
                     break
 
     return json_blob
+
 
 def main():
     employee_dict = {}
@@ -250,7 +258,9 @@ else:
             try:
                 system_response = system.interact(escape_code)
                 print(colored(f"System: {system_response}", "blue"))
-                employee_dict["Ops"].update_group_conversations(f"System: {system_response}")
+                employee_dict["Ops"].update_group_conversations(
+                    f"System: {system_response}"
+                )
             except json.JSONDecodeError:
                 # Return the original response if the JSON blob cannot be processed
                 if system_response.startswith("Error:"):
