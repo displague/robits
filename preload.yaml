@@ -1,7 +1,17 @@
-- code_name: create_role
-  args:
-    - name: role_name
-    - name: role_description
+- type: "function"
+  function:
+    name: "create_role"
+    description: "Create a new role"
+    parameters:
+        type: "object"
+        properties:
+            role_name:
+                type: "string"
+                description: The name of the role
+            role_description:
+                type: "string"
+                description: The description of the role
+        required": ["role_name", "role_description"]
   code: |
     # role_name = args["role_name"]
     # role_description = args["role_description"]
@@ -15,8 +25,34 @@
                 hr.employee_dict
             )
             hr.employee_dict[role_name] = new_role
-            response = f"Created a new role: {role_name}"
+            return f"Created a new role: {role_name}"
         else:
-            response = f"Error: The organization has reached its maximum size of {HR.max_organization_members} members."
+            return f"Error: The organization has reached its maximum size of {HR.max_organization_members} members."
     else:
-        response = f"Error: Role '{role_name}' already exists."
+        return f"Error: Role '{role_name}' already exists."
+- type: "function"
+  function:
+    name: "get_current_weather"
+    description: "Get the current weather in a given location"
+    parameters:
+        type: "object"
+        properties:
+            location:
+                type: "string"
+                description: The city and state, e.g. San Francisco, CA"
+            unit:
+              type: "string"
+              enum:
+              - celsius
+              - fahrenheit
+        required": ["location"]
+  code: |
+    if "tokyo" in location.lower():
+        return json.dumps({"location": "Tokyo", "temperature": "10", "unit": unit})
+    elif "san francisco" in location.lower():
+        return json.dumps({"location": "San Francisco", "temperature": "72", "unit": unit})
+    elif "paris" in location.lower():
+        return json.dumps({"location": "Paris", "temperature": "22", "unit": unit})
+    else:
+        return json.dumps({"location": location, "temperature": "unknown"})
+
