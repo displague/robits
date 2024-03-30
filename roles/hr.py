@@ -1,4 +1,6 @@
 from .role import Role
+
+
 class HR(Role):
     max_organization_members = 16
 
@@ -13,4 +15,3 @@ You are part of the Human Resources group. To create a new role, send a message 
             employee_dict,
             group_template_additions,
         )
-

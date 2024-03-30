@@ -1,4 +1,6 @@
 from .role import Role
+
+
 class SoftwareEngineer(Role):
     def __init__(self, employee_dict):
         template = """As a Software Engineer (SE), you are responsible for designing, developing, and maintaining software applications. You primarily create tools when requested by others in your organization."""
@@ -9,4 +11,3 @@ class SoftwareEngineer(Role):
 
     def interact(self, sender, prompt):
         return interact_costly(self, sender, prompt)
-

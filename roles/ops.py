@@ -1,5 +1,6 @@
 from .role import Role
 
+
 class Ops(Role):
     def __init__(self, employee_dict):
         role_description = """You are OPs for an AI powered organization."""

@@ -1,5 +1,6 @@
 from .role import Role
 
+
 class Human(Role):
     def __init__(self):
         self.name = "CEO"

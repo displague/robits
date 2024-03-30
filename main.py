@@ -47,7 +47,7 @@ def interact(self, model, sender, message):
         n=1,
         temperature=self.temperature,
         user=f"robits_{self.name}",
-        tools = [{k: v for k, v in tool.items() if k != "code"} for tool in tools],
+        tools=[{k: v for k, v in tool.items() if k != "code"} for tool in tools],
         tool_choice="auto",
         stream=do_stream,
     )
@@ -73,10 +73,10 @@ def interact(self, model, sender, message):
             code = tool["code"]
             response = exec(code, globals(), tool_args)
             tool_message = {
-                    "tool_call_id": tool_call.id,
-                    "role": "tool",
-                    "name": tool_name,
-                    "content": response,
+                "tool_call_id": tool_call.id,
+                "role": "tool",
+                "name": tool_name,
+                "content": response,
             }
             messages.append(tool_message)
             self.conversation_history[self.name].append(tool_message)
@@ -106,7 +106,6 @@ def interact_cheap(self, sender, message):
 
 def interact_costly(self, sender, message):
     return interact(self, costly_model, sender, message)
-
 
 
 def parse_tool(s):

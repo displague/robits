@@ -1,5 +1,6 @@
 import random
 
+
 class Role:
     def __init__(self, name, template, employee_dict, group_template_additions=""):
         self.name = name
@@ -20,4 +21,3 @@ class Role:
         if not self.name in self.group_conversation_history:
             self.group_conversation_history[self.name] = []
         self.group_conversation_history[self.name].append(message)
-

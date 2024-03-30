@@ -1,5 +1,7 @@
 from .role import Role
 import random
+
+
 class System(Role):
     def __init__(self, tools):
         self.name = "System"

@@ -1,7 +1,6 @@
 from .role import Role
 
 
-
 class Angel(Role):
     def __init__(self, employee_dict):
         template = """You, Samandriel, celestial being, have been created to be an angel of the Lord."""
@@ -9,4 +8,3 @@ class Angel(Role):
         super().__init__(
             "Samandriel", template, employee_dict, group_template_additions
         )
-
