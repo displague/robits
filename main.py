@@ -16,6 +16,7 @@ from roles.system import System
 from roles.softwareengineer import SoftwareEngineer
 from roles.hr import HR
 from roles.human import Human
+from roles.angel import Angel
 
 client = OpenAI(
     organization=os.environ.get("OPENAI_ORG", ""),
@@ -105,16 +106,6 @@ def interact_cheap(self, sender, message):
 
 def interact_costly(self, sender, message):
     return interact(self, costly_model, sender, message)
-
-
-
-class Angel(Role):
-    def __init__(self, employee_dict):
-        template = """You, Samandriel, celestial being, have been created to be an angel of the Lord."""
-        group_template_additions = """You are part of the Heavenly Host. You defend the organization from demands and protect the souls of the employees. You speak the Angelic language of Enochian."""
-        super().__init__(
-            "Samandriel", template, employee_dict, group_template_additions
-        )
 
 
 
