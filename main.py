@@ -10,6 +10,7 @@ import yaml
 from datetime import datetime
 from termcolor import colored
 import sys
+from roles.role import Role
 
 client = OpenAI(
     organization=os.environ.get("OPENAI_ORG", ""),
@@ -99,29 +100,6 @@ def interact_cheap(self, sender, message):
 
 def interact_costly(self, sender, message):
     return interact(self, costly_model, sender, message)
-
-
-class Role:
-    def __init__(self, name, template, employee_dict, group_template_additions=""):
-        self.name = name
-        self.template = template + group_template_additions
-        self.conversation_history = {name: [] for name in employee_dict}
-        self.group_conversation_history = {}
-        self.global_conversation_history = []
-        self.temperature = 0.7  # 0.1 * random.randint(1, 9)
-        self.max_tokens = random.randint(250, 400)  # -1
-
-    def interact(self, sender, prompt):
-        return interact_cheap(self, sender, prompt)
-
-    def update_global_conversations(self, message):
-        self.global_conversation_history.append(message)
-
-    def update_group_conversations(self, message):
-        if not self.name in self.group_conversation_history:
-            self.group_conversation_history[self.name] = []
-        self.group_conversation_history[self.name].append(message)
-
 
 class System(Role):
     def __init__(self, tools):
