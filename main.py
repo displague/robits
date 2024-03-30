@@ -15,6 +15,7 @@ from roles.ops import Ops
 from roles.system import System
 from roles.softwareengineer import SoftwareEngineer
 from roles.hr import HR
+from roles.human import Human
 
 client = OpenAI(
     organization=os.environ.get("OPENAI_ORG", ""),
@@ -115,14 +116,6 @@ class Angel(Role):
             "Samandriel", template, employee_dict, group_template_additions
         )
 
-
-class Human(Role):
-    def __init__(self):
-        self.name = "CEO"
-        self.template = "As CEO, you are responsible for making high-level decisions and setting the overall direction of the organization."
-
-    def interact(self, *_):
-        return input(f"{self.name}: ")
 
 
 def parse_tool(s):
