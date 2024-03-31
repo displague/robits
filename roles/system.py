@@ -1,6 +1,8 @@
-from .role import Role
 import random
+
+from .role import Role
 from termcolor import colored
+
 
 class System(Role):
     def __init__(self, tools):

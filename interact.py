@@ -1,7 +1,7 @@
-from termcolor import colored
 import json
-from openai import OpenAI
 import os
+
+from openai import OpenAI
 from termcolor import colored
 
 client = OpenAI(
@@ -35,7 +35,11 @@ class Interact:
             n=1,
             temperature=role.temperature,
             user=f"robits_{role.name}",
-            tools=[{k: v for k, v in tool.items() if k != "code"} for tool in tools] if tools else None,
+            tools=(
+                [{k: v for k, v in tool.items() if k != "code"} for tool in tools]
+                if tools
+                else None
+            ),
             tool_choice="auto" if tools else None,
             stream=do_stream,
         )

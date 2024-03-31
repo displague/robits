@@ -1,11 +1,18 @@
 #!/usr/bin/env python3
 
 import random
-import time
 import re
-from datetime import datetime
 import sys
-from roles import Human, Ops, SoftwareEngineer, HR, Angel, System
+import time
+
+from datetime import datetime
+from roles import Angel
+from roles import HR
+from roles import Human
+from roles import Ops
+from roles import SoftwareEngineer
+from roles import System
+from termcolor import colored
 from tools import Tools
 
 
