@@ -1,0 +1,49 @@
+- type: function
+  function:
+    name: add_100
+      description: Add 100 to an integer
+      parameters:
+        - type: object
+          properties:
+            value:
+              type: integer
+              description: The value to add 100 to
+      required:
+        - value
+      code: |
+        return 100+int(args.get('value', '0'))
+- type: function
+  function:
+    name: create_role
+    description: Creates a new role within the organization if it doesn't already exist and the organization has not reached its maximum number of members.
+    parameters:
+      type: object
+      properties:
+        role_name:
+          type: string
+          description: The name of the new role to be created.
+        role_description:
+          type: string
+          description: A brief description of the new role's responsibilities and duties.
+      required:
+      - role_name
+      - role_description
+    code: |
+      # role_name = args["role_name"]
+      # role_description = args["role_description"]
+      hr = employee_dict["HR"]
+
+      if role_name not in hr.employee_dict:
+          if len(hr.employee_dict) < HR.max_organization_members:
+              new_role = Role(
+                  role_name,
+                  role_description,
+                  hr.employee_dict
+              )
+              hr.employee_dict[role_name] = new_role
+              response = f"Created a new role: {role_name}"
+          else:
+              response = f"Error: The organization has reached its maximum size of {HR.max_organization_members} members."
+      else:
+          response = f"Error: Role '{role_name}' already exists."
+      return response
