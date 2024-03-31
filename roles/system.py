@@ -24,6 +24,19 @@ class System(Role):
             return f"Error: Tool '{tool_name}' not found."
 
     def interact(self, prompt):
+        """
+        Interacts with the system by processing the given json prompt object containing either "code" or "exec".
+
+        Args:
+            prompt (str): The prompt to process.
+
+        Returns:
+            str: The result of processing the prompt.
+
+        Raises:
+            json.JSONDecodeError: If the prompt is not a valid JSON.
+            Exception: If an error occurs while processing the prompt.
+        """
         print(colored(f"\n---\n// {self.name}\n{prompt}\n---\n", "grey"))
 
         if prompt is not None and prompt.startswith("{"):

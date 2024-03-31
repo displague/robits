@@ -1,5 +1,7 @@
 import random
 
+from interact import Interact
+
 
 class Role:
     def __init__(self, name, template, employee_dict, group_template_additions=""):
@@ -12,7 +14,7 @@ class Role:
         self.max_tokens = random.randint(250, 400)  # -1
 
     def interact(self, sender, prompt):
-        return interact_cheap(self, sender, prompt)
+        return Interact.interact_cheap(self, sender, prompt)
 
     def update_global_conversations(self, message):
         self.global_conversation_history.append(message)

@@ -1,4 +1,5 @@
 from .role import Role
+from interact import Interact
 
 
 class SoftwareEngineer(Role):
@@ -10,4 +11,4 @@ class SoftwareEngineer(Role):
         )
 
     def interact(self, sender, prompt):
-        return interact_costly(self, sender, prompt)
+        return Interact.interact_costly(self, sender, prompt)
