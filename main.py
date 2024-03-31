@@ -18,7 +18,7 @@ def main():
     employee_dict["HR"] = HR(employee_dict)
     employee_dict["Samandriel"] = Angel(employee_dict)
 
-    tools = Tools.load("preload.yaml")
+    tools = Tools.load("tools.yaml")
     system = System(tools)
     last_receiver = employee_dict["CEO"]
     receiver = last_receiver
