@@ -2,6 +2,7 @@ from termcolor import colored
 import json
 from openai import OpenAI
 import os
+from termcolor import colored
 
 client = OpenAI(
     organization=os.environ.get("OPENAI_ORG", ""),
@@ -34,8 +35,8 @@ class Interact:
             n=1,
             temperature=role.temperature,
             user=f"robits_{role.name}",
-            tools=[{k: v for k, v in tool.items() if k != "code"} for tool in tools],
-            tool_choice="auto",
+            tools=[{k: v for k, v in tool.items() if k != "code"} for tool in tools] if tools else None,
+            tool_choice="auto" if tools else None,
             stream=do_stream,
         )
         message = {"role": "assistant", "content": "", "name": role.name}
