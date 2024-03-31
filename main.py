@@ -10,13 +10,7 @@ import yaml
 from datetime import datetime
 from termcolor import colored
 import sys
-from roles.role import Role
-from roles.ops import Ops
-from roles.system import System
-from roles.softwareengineer import SoftwareEngineer
-from roles.hr import HR
-from roles.human import Human
-from roles.angel import Angel
+from roles import Human, Ops, SoftwareEngineer, HR, Angel, System
 
 client = OpenAI(
     organization=os.environ.get("OPENAI_ORG", ""),
