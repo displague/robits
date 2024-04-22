@@ -1,13 +1,18 @@
 from .role import Role
-
+from interact import Interact
+import json
 
 class Ops(Role):
-    def __init__(self, employee_dict):
+    def __init__(self, employee_dict, tools):
         role_description = """You are OPs for an AI powered organization."""
         group_template_additions = """You are part of the Operations group.Members of this group recognize when other organization members need tools executed and send the appropriate tool. You can also request new code from the Software Engineer who will create tools. To execute code, you send a JSON blob on a new line. You will recognize when other organization members need tools executed and will send the appropriate tool, the format is a JSON object: {"exec":"tool_name_here", "args":{"string_var":"string", "numeric_var":123}})"""
+        self.tools = tools
         super().__init__(
             self.__class__.__name__,
             role_description,
             employee_dict,
-            group_template_additions,
+            group_template_additions
         )
+
+    def interact(self, sender, prompt):
+        return Interact.interact_cheap(self, sender, prompt, self.tools)

@@ -4,6 +4,7 @@ import random
 import re
 import sys
 import time
+import json
 
 from datetime import datetime
 from roles import Angel
@@ -18,10 +19,10 @@ from tools import Tools
 
 def main():
     employee_dict = {}
-
+    tools = {}
     employee_dict["CEO"] = Human()
-    employee_dict["Ops"] = Ops(employee_dict)
-    employee_dict["SE"] = SoftwareEngineer(employee_dict)
+    employee_dict["Ops"] = Ops(employee_dict, tools)
+    employee_dict["SE"] = SoftwareEngineer(employee_dict, tools)
     employee_dict["HR"] = HR(employee_dict)
     employee_dict["Samandriel"] = Angel(employee_dict)
 

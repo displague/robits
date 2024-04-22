@@ -1,4 +1,5 @@
 import random
+import json
 
 from .role import Role
 from termcolor import colored
