@@ -88,6 +88,7 @@ class System(Role):
         self.conversation_history = {}
         self.temperature = 0.1 * random.randint(1, 9)
         self.max_tokens = random.randint(250, 400)
+        self.employee_dict = None  # Store employee_dict for escape code execution
 
     def interact(self, prompt):
         print(colored(f"\n---\n// {self.name}\n{prompt}\n---\n", "grey"))
@@ -97,19 +98,24 @@ class System(Role):
                 instruction = json.loads(prompt)
 
                 if "code_name" in instruction:
-                    escape_codes[instruction["code_name"]] = {
-                        "args": instruction["args"],
-                        "code": instruction["code"],
-                    }
-                    return f"Stored escape code '{instruction['code_name']}' with args {instruction['args']}."
+                    code_name = instruction["code_name"]
+                    arg_names = [arg["name"] for arg in instruction["args"]]
+                    code = instruction["code"]
+                    # Indent the code properly for the function definition
+                    indented_code = '\n'.join('    ' + line for line in code.split('\n'))
+                    func_code = f"def {code_name}({', '.join(arg_names)}, employee_dict):\n{indented_code}"
+                    local_dict = {}
+                    exec(func_code, globals(), local_dict)
+                    escape_codes[code_name] = local_dict[code_name]
+                    return f"Stored escape code '{code_name}' with args {arg_names}."
+
                 elif "exec" in instruction:
                     code_name = instruction["exec"]
                     args = instruction["args"]
                     if code_name in escape_codes:
-                        code = escape_codes[code_name]["code"]
-                        exec(code, args)
-                        return f"Executed escape code '{code_name}' with args {args}."
-
+                        func = escape_codes[code_name]
+                        result = func(**args, employee_dict=self.employee_dict)
+                        return f"Executed escape code '{code_name}' with args {args}. Result: {result}"
                     else:
                         return f"Error: Escape code '{code_name}' not found."
             except json.JSONDecodeError as e:
@@ -168,18 +174,16 @@ class Human(Role):
 
 
 def parse_escape_code(s):
-    start_idx = next((idx for idx, c in enumerate(s) if c in "{["), None)
-    if start_idx is None:
-        return None  # or some other appropriate value
-    s = s[start_idx:]
-    try:
-        return json.dumps(json.loads(s))
-    except json.JSONDecodeError as e:
-        try:
-            return json.dumps(json.loads(s[:e.pos]))
-        except json.JSONDecodeError:
-            return None
-
+    lines = s.split('\n')
+    for line in lines:
+        line = line.strip()
+        if line.startswith('{') or line.startswith('['):
+            try:
+                json_obj = json.loads(line)
+                return json.dumps(json_obj)
+            except json.JSONDecodeError:
+                continue
+    return None
 
 def preload(system):
     yaml_file_path = 'preload.yaml'
@@ -202,10 +206,11 @@ def main():
     employee_dict["Samandriel"] = Angel(employee_dict)
 
     system = System()
+    system.employee_dict = employee_dict  # Add this line to provide context
     preload(system)
     last_receiver = employee_dict["CEO"]
     receiver = last_receiver
-    last_response = receiver.interact() # "Welcome to the organization. Start a conversation."
+    last_response = receiver.interact()  # "Welcome to the organization. Start a conversation."
 
     while True:
         prompt_split = last_response.split(",", 1)
@@ -227,9 +232,7 @@ def main():
                 print(colored(f"System: {system_response}", "blue"))
                 if system_response is not None and system_response != "":
                     employee_dict["Ops"].update_group_conversations({"role": "system", "content": system_response})
-
             except json.JSONDecodeError:
-                # Return the original response if the JSON blob cannot be processed
                 if system_response.startswith("Error:"):
                     print(colored(f"System responds: {system_response}", "red"))
                     continue
@@ -241,7 +244,6 @@ def main():
             print(colored(f"{receiver.name} responds: {response}", "cyan"))
         last_response = response
         last_receiver = receiver
-        # time.sleep(3)
 
 
 if __name__ == "__main__":
