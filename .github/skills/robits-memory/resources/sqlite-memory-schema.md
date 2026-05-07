@@ -12,6 +12,8 @@ Core tables:
 - `todos`: agent-owned commitments and side-project tasks.
 - `tool_calls`: requested or completed tool calls, including result content.
 - `memory_entries`: general memory records and future memory digests with source links.
+- `memory_digests`: compacted memory artifacts with prompt version, time range, and retrieval filters.
+- `memory_digest_sources`: ordered source links from a digest back to raw records.
 - `memory_fts`: FTS5 index over message, thought, tool-result, and memory-entry content.
 
 Repository API:
@@ -24,14 +26,19 @@ Repository API:
 - `append_todo`
 - `append_tool_call`
 - `append_memory_entry`
+- `append_memory_digest`
+- `get_memory_digest`
+- `get_memory_digest_sources`
+- `expand_memory_digest_sources`
 - `list_todos`
 - `list_messages`
 - `list_agent_records`
 - `search`
 
 Search supports filters for agent, session, relationship type, conversation type,
-source, and date windows. Keep these filters available when adding prompt
-assembly or memory-digest retrieval.
+source, and date windows. It searches raw records and memory digests through the
+same FTS table. Use `expand_memory_digest_sources` to drill from a digest back to
+the source records for reanalysis or later re-digestion.
 
 Generated local databases should live under `data/` or `var/` by default, both
 of which are ignored by git.

@@ -29,6 +29,15 @@ class MemorySearchResult:
     created_at: str
 
 
+@dataclass(frozen=True)
+class MemoryDigestSource:
+    source_table: str
+    source_id: str
+    source_created_at: str | None
+    position: int
+    metadata: dict[str, Any]
+
+
 class SQLiteMemoryStore:
     """Small repository API for durable local Robits memory records."""
 
@@ -163,6 +172,35 @@ class SQLiteMemoryStore:
                 FOREIGN KEY (session_id) REFERENCES sessions(session_id)
             );
 
+            CREATE TABLE IF NOT EXISTS memory_digests (
+                digest_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                agent_id TEXT,
+                session_id TEXT,
+                content TEXT NOT NULL,
+                prompt_version TEXT NOT NULL,
+                source_start_at TEXT,
+                source_end_at TEXT,
+                relationship_type TEXT,
+                conversation_type TEXT,
+                source TEXT,
+                created_at TEXT NOT NULL,
+                metadata_json TEXT NOT NULL DEFAULT '{}',
+                FOREIGN KEY (agent_id) REFERENCES agents(agent_id),
+                FOREIGN KEY (session_id) REFERENCES sessions(session_id)
+            );
+
+            CREATE TABLE IF NOT EXISTS memory_digest_sources (
+                digest_id INTEGER NOT NULL,
+                source_table TEXT NOT NULL,
+                source_id TEXT NOT NULL,
+                source_created_at TEXT,
+                position INTEGER NOT NULL,
+                metadata_json TEXT NOT NULL DEFAULT '{}',
+                PRIMARY KEY (digest_id, source_table, source_id),
+                FOREIGN KEY (digest_id) REFERENCES memory_digests(digest_id)
+                    ON DELETE CASCADE
+            );
+
             CREATE VIRTUAL TABLE IF NOT EXISTS memory_fts USING fts5(
                 kind UNINDEXED,
                 record_id UNINDEXED,
@@ -182,6 +220,9 @@ class SQLiteMemoryStore:
             CREATE INDEX IF NOT EXISTS idx_thoughts_agent ON thoughts(agent_id);
             CREATE INDEX IF NOT EXISTS idx_tool_calls_agent ON tool_calls(agent_id);
             CREATE INDEX IF NOT EXISTS idx_memory_entries_agent ON memory_entries(agent_id);
+            CREATE INDEX IF NOT EXISTS idx_memory_digests_agent ON memory_digests(agent_id);
+            CREATE INDEX IF NOT EXISTS idx_memory_digest_sources_digest
+                ON memory_digest_sources(digest_id);
             """
         )
         self.connection.commit()
@@ -546,6 +587,123 @@ class SQLiteMemoryStore:
         self.connection.commit()
         return record_id
 
+    def append_memory_digest(
+        self,
+        content,
+        source_refs,
+        agent_id=None,
+        session_id=None,
+        prompt_version="memory-digest-v1",
+        source_start_at=None,
+        source_end_at=None,
+        relationship_type=None,
+        conversation_type=None,
+        source="digest",
+        created_at=None,
+        metadata=None,
+    ):
+        if not source_refs:
+            raise ValueError("Memory digest requires at least one source reference.")
+        timestamp = created_at or _utc_now()
+        cursor = self.connection.execute(
+            """
+            INSERT INTO memory_digests(
+                agent_id, session_id, content, prompt_version, source_start_at,
+                source_end_at, relationship_type, conversation_type, source,
+                created_at, metadata_json
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                agent_id,
+                session_id,
+                content,
+                prompt_version,
+                source_start_at,
+                source_end_at,
+                relationship_type,
+                conversation_type,
+                source,
+                timestamp,
+                _json_dumps(metadata),
+            ),
+        )
+        digest_id = cursor.lastrowid
+        for position, source_ref in enumerate(source_refs):
+            source_table = source_ref["source_table"]
+            source_id = str(source_ref["source_id"])
+            self._validate_source_table(source_table)
+            self.connection.execute(
+                """
+                INSERT INTO memory_digest_sources(
+                    digest_id, source_table, source_id, source_created_at,
+                    position, metadata_json
+                )
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    digest_id,
+                    source_table,
+                    source_id,
+                    source_ref.get("source_created_at"),
+                    position,
+                    _json_dumps(source_ref.get("metadata")),
+                ),
+            )
+        self._index(
+            "memory_digest",
+            digest_id,
+            agent_id,
+            None,
+            session_id,
+            source,
+            relationship_type,
+            conversation_type,
+            timestamp,
+            content,
+        )
+        self.connection.commit()
+        return digest_id
+
+    def get_memory_digest(self, digest_id):
+        row = self.connection.execute(
+            "SELECT * FROM memory_digests WHERE digest_id = ?",
+            (digest_id,),
+        ).fetchone()
+        return dict(row) if row else None
+
+    def get_memory_digest_sources(self, digest_id):
+        rows = self.connection.execute(
+            """
+            SELECT source_table, source_id, source_created_at, position, metadata_json
+            FROM memory_digest_sources
+            WHERE digest_id = ?
+            ORDER BY position
+            """,
+            (digest_id,),
+        ).fetchall()
+        return [
+            MemoryDigestSource(
+                source_table=row["source_table"],
+                source_id=row["source_id"],
+                source_created_at=row["source_created_at"],
+                position=row["position"],
+                metadata=json.loads(row["metadata_json"]),
+            )
+            for row in rows
+        ]
+
+    def expand_memory_digest_sources(self, digest_id):
+        expanded = []
+        for source_ref in self.get_memory_digest_sources(digest_id):
+            row = self._fetch_source_record(source_ref.source_table, source_ref.source_id)
+            if row is not None:
+                row["source_table"] = source_ref.source_table
+                row["source_id"] = source_ref.source_id
+                row["digest_position"] = source_ref.position
+                expanded.append(row)
+        return expanded
+
     def list_messages(self, session_id=None, agent_id=None, limit=100):
         clauses = []
         params: list[Any] = []
@@ -698,6 +856,31 @@ class SQLiteMemoryStore:
             "DELETE FROM memory_fts WHERE kind = ? AND record_id = ?",
             (kind, str(record_id)),
         )
+
+    def _validate_source_table(self, source_table):
+        if source_table not in {
+            "messages",
+            "thoughts",
+            "tool_calls",
+            "memory_entries",
+            "memory_digests",
+        }:
+            raise ValueError(f"Unsupported memory digest source table: {source_table}")
+
+    def _fetch_source_record(self, source_table, source_id):
+        self._validate_source_table(source_table)
+        id_column = {
+            "messages": "message_id",
+            "thoughts": "thought_id",
+            "tool_calls": "tool_call_id",
+            "memory_entries": "memory_id",
+            "memory_digests": "digest_id",
+        }[source_table]
+        row = self.connection.execute(
+            f"SELECT * FROM {source_table} WHERE {id_column} = ?",
+            (source_id,),
+        ).fetchone()
+        return dict(row) if row else None
 
     def _rows(self, query, params=()):
         return [dict(row) for row in self.connection.execute(query, params).fetchall()]
