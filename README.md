@@ -35,6 +35,8 @@ The runtime can parse JSON tool instructions, load trusted tools from `tools.yam
 
 The target runtime direction is OpenAI-compatible tool calling through modern Responses-style loops: approved tools are exposed with JSON Schema metadata, the model may request function calls, the runtime executes those calls, and tool outputs are returned to the model without relying on ad hoc text parsing.
 
+See `docs/architecture-vision.md` for the staged runtime plan covering sessions, tools, SQLite-backed memory, memory digests, lifecycle, observability, TUI inspection, and local-model constraints.
+
 ## Installation
 
 To install the required packages for this project, run:

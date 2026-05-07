@@ -24,4 +24,5 @@ description: Work on the Robits Python organization-simulation runtime, includin
 ## References
 
 - Read `resources/runtime-architecture.md` for the current runtime shape and known boundaries.
+- Read `../../../docs/architecture-vision.md` before changing long-term runtime boundaries, memory, lifecycle, observability, or local-model strategy.
 - Use `assets/create-role-message.json` as a minimal tool execution payload.
