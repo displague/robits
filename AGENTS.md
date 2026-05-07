@@ -20,3 +20,4 @@ This repository is a Python experiment for simulating AI organization roles. Kee
 ## Repo-Local Skills
 
 Repo-local AI skills live in `.github/skills/`. Start with `.github/skills/robits-runtime/SKILL.md` when changing role orchestration, trusted tool execution, JSON extraction, scheduling, or model endpoint configuration.
+Use `.github/skills/robits-memory/SKILL.md` when changing SQLite memory storage, FTS search, memory records, thoughts, todos, tool calls, or memory digests.

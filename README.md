@@ -37,6 +37,18 @@ The target runtime direction is OpenAI-compatible tool calling through modern Re
 
 See `docs/architecture-vision.md` for the staged runtime plan covering sessions, tools, SQLite-backed memory, memory digests, lifecycle, observability, TUI inspection, and local-model constraints.
 
+## Memory
+
+Robits includes a local SQLite memory substrate in `robits/memory/sqlite.py`.
+It defines durable tables for sessions, agents, contacts, messages, thoughts,
+todos, tool calls, and memory entries. FTS search indexes message, thought,
+tool-result, and memory-entry content with filters for agent, session,
+relationship type, conversation type, source, and date windows.
+
+Generated local database files are ignored by git. Unit tests use temporary
+SQLite databases. Local runs should place generated databases under `data/` or
+`var/` unless the runtime is configured with another gitignored path.
+
 ## Installation
 
 To install the required packages for this project, run:
