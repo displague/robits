@@ -1,4 +1,6 @@
 import json
+import os
+import tempfile
 import unittest
 from contextlib import redirect_stdout
 from io import StringIO
@@ -107,6 +109,54 @@ class RuntimeTests(unittest.TestCase):
 
         self.assertIn("Missing args", response)
         self.assertNotIn("QA", employee_dict)
+
+    def test_escape_code_definition_validates_args_shape(self):
+        system = main.System(main.build_employee_dict())
+
+        with redirect_stdout(StringIO()):
+            response = system.interact(
+                json.dumps(
+                    {
+                        "code_name": "bad_tool",
+                        "args": [{"label": "value"}],
+                        "code": "return value",
+                    }
+                ),
+                trusted=True,
+            )
+
+        self.assertIn("args must be a list", response)
+        self.assertNotIn("bad_tool", main.escape_codes)
+
+    def test_exec_instruction_validates_args_object(self):
+        system = main.System(main.build_employee_dict())
+        with redirect_stdout(StringIO()):
+            main.preload(system)
+
+        with redirect_stdout(StringIO()):
+            response = system.interact(
+                json.dumps(
+                    {
+                        "exec": "create_role",
+                        "args": [],
+                    }
+                )
+            )
+
+        self.assertIn("args must be an object", response)
+
+    def test_preload_default_path_is_relative_to_module(self):
+        system = main.System(main.build_employee_dict())
+        original_cwd = os.getcwd()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            try:
+                os.chdir(temp_dir)
+                with redirect_stdout(StringIO()):
+                    main.preload(system)
+            finally:
+                os.chdir(original_cwd)
+
+        self.assertIn("create_role", main.escape_codes)
 
     def test_untrusted_escape_code_definition_is_rejected(self):
         system = main.System(main.build_employee_dict())

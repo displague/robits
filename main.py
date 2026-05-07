@@ -9,8 +9,8 @@ import re
 import yaml
 from datetime import datetime
 from termcolor import colored
-import sys
 import argparse
+from pathlib import Path
 
 
 def make_client():
@@ -147,7 +147,14 @@ class System(Role):
             if not trusted:
                 return "Error: Escape code definitions can only be loaded from trusted preload files."
             code_name = instruction["code_name"]
-            arg_names = [arg["name"] for arg in instruction["args"]]
+            args = instruction.get("args")
+            if not isinstance(args, list):
+                return "Error: Escape code args must be a list of objects with name fields."
+            arg_names = []
+            for arg in args:
+                if not isinstance(arg, dict) or not isinstance(arg.get("name"), str):
+                    return "Error: Escape code args must be a list of objects with name fields."
+                arg_names.append(arg["name"])
             escape_codes[code_name] = {
                 "args": arg_names,
                 "func": self.compile_escape_code(
@@ -158,6 +165,8 @@ class System(Role):
         elif "exec" in instruction:
             code_name = instruction["exec"]
             args = instruction.get("args", {})
+            if not isinstance(args, dict):
+                return "Error: Escape code args must be an object."
             if code_name in escape_codes:
                 escape_code = escape_codes[code_name]
                 missing_args = [
@@ -258,7 +267,8 @@ def parse_escape_code(s):
     return None
 
 
-def preload(system, yaml_file_path="preload.yaml"):
+def preload(system, yaml_file_path=None):
+    yaml_file_path = yaml_file_path or Path(__file__).with_name("preload.yaml")
     with open(yaml_file_path, 'r') as file:
         yaml_content = yaml.safe_load(file)
 
