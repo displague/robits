@@ -135,12 +135,12 @@ The TUI is an observer over the runtime. It should not become the runtime.
 
 ### Local Model Operation
 
-Robits should remain usable with local OpenAI-compatible model servers. LM Studio
-documents local server operation, tool/function calling support, structured
-output, and context overflow policies such as stopping at the limit, truncating
-the middle, or rolling window behavior. Robits should still implement its own
-runtime-level memory and digest policy rather than relying only on model-server
-context overflow settings.
+Robits should remain usable with local OpenAI-compatible model servers. Local
+servers may support tool/function calling, structured output, and context
+overflow policies such as stopping at the limit, truncating the middle, or
+rolling window behavior. Robits should still implement its own runtime-level
+memory and digest policy rather than relying only on model-server context
+overflow settings.
 
 Prompt assembly should estimate or count token budgets before invoking a model.
 The runtime should compact or retrieve memory before provider overflow behavior
