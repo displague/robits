@@ -13,7 +13,7 @@ description: Work on the Robits Python organization-simulation runtime, includin
 4. Keep trusted tool definition loading separate from untrusted model output.
 5. Prefer focused tests around parsing, tool loading, and execution before relying on a live model smoke test.
 6. For Responses API work, test function-call routing with fake response items before using a live endpoint.
-7. For scheduling work, prefer deterministic time-share behavior with injected or seeded schedulers before adding parallel execution.
+7. For scheduling work, keep `Session` and `RoundRobinScheduler` unit-testable with fake roles before adding parallel execution.
 
 ## Validation
 

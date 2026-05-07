@@ -29,7 +29,9 @@ The organization has the following roles:
 
 ## How It Works 🛠️
 
-The simulation runs in a loop, where organization members communicate through messages. The runtime can parse JSON tool instructions, load trusted tools from `tools.yaml`, and execute registered tools by name. Tools use namespaced identifiers such as `org.create_role`, with short aliases only where compatibility is useful.
+The simulation runs in a session, where organization members communicate through messages. A session owns a run ID, participant list, turn count, transcript entries, and the system tool handler. Undirected messages use deterministic round-robin scheduling; directed messages such as `HR, ...` still route to the named role.
+
+The runtime can parse JSON tool instructions, load trusted tools from `tools.yaml`, and execute registered tools by name. Tools use namespaced identifiers such as `org.create_role`, with short aliases only where compatibility is useful.
 
 The target runtime direction is OpenAI-compatible tool calling through modern Responses-style loops: approved tools are exposed with JSON Schema metadata, the model may request function calls, the runtime executes those calls, and tool outputs are returned to the model without relying on ad hoc text parsing.
 
@@ -98,6 +100,6 @@ There are many exciting ways you can improve and expand this project. Here are a
 3. Implement a graphical user interface (GUI) for a more immersive and user-friendly simulation experience.
 4. Explore ways to use real-world data to drive the simulation and make it more engaging and relevant.
 5. Experiment with different AI models or techniques to improve the performance and capabilities of the AI roles.
-6. Replace random next-speaker selection with a time-share scheduler that can run roles in deterministic, budgeted turns and eventually in parallel where the runtime can safely coordinate state.
+6. Extend the deterministic time-share scheduler toward parallel role execution once shared state coordination is explicit.
 
 Have fun exploring the AI-Powered Organization Simulation! We can't wait to see what you come up with! 🎉💡
