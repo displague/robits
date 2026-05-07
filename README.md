@@ -58,6 +58,14 @@ Memory digests are compacted memory artifacts stored with prompt version, source
 time range, retrieval filters, and ordered links back to raw source records so a
 future run can expand or reanalyze the original material.
 
+## Observability
+
+Sessions emit a headless runtime event stream for session lifecycle, routing,
+message, tool, and private thought events. Tests and future TUI code can
+subscribe to the active stream without requiring an interactive terminal.
+Runtime events can also be persisted to SQLite and replayed later, with
+visibility fields separating public transcript events from private thoughts.
+
 ## Installation
 
 To install the required packages for this project, run:

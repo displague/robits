@@ -618,6 +618,7 @@ class RuntimeTests(unittest.TestCase):
         self.assertEqual(session.max_turns, 3)
         self.assertEqual(session.turns_completed, 0)
         self.assertEqual(session.transcript, [])
+        self.assertEqual(session.event_stream.events()[0].event_type, "session.created")
 
     def test_round_robin_scheduler_skips_last_receiver(self):
         scheduler = main.RoundRobinScheduler(["CEO", "Ops", "SE"])
@@ -741,6 +742,36 @@ class RuntimeTests(unittest.TestCase):
         self.assertIn("QA", session.scheduler.participant_names)
         self.assertEqual(len(session.transcript[0].system_events), 1)
         self.assertIn("Created a new role: QA", session.transcript[0].system_events[0])
+
+    def test_session_emits_headless_runtime_events(self):
+        participants = build_fake_participants()
+        event_stream = main.RuntimeEventStream()
+        observed = []
+        event_stream.subscribe(observed.append)
+        session = main.Session(
+            participants=participants,
+            run_id="session-1",
+            event_stream=event_stream,
+        )
+
+        with redirect_stdout(StringIO()):
+            session.run(initial_message="HR, status please", max_turns=1)
+
+        event_types = [event.event_type for event in observed]
+
+        self.assertIn("session.created", event_types)
+        self.assertIn("message.routed", event_types)
+        self.assertIn("message.recorded", event_types)
+        self.assertIn("session.completed", event_types)
+
+    def test_thought_events_are_private_by_default(self):
+        session = main.Session(participants=build_fake_participants(), run_id="session-1")
+
+        event = session.record_thought("SE", "Private implementation note.")
+
+        self.assertEqual(event.event_type, "thought.recorded")
+        self.assertEqual(event.visibility, "private")
+        self.assertEqual(session.event_stream.events("private"), [event])
 
 
 if __name__ == "__main__":
