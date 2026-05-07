@@ -31,6 +31,20 @@ default_model = os.environ.get("ROBITS_MODEL") or os.environ.get("OPENAI_MODEL")
 costly_model = os.environ.get("ROBITS_COSTLY_MODEL", default_model)
 cheap_model = os.environ.get("ROBITS_CHEAP_MODEL", default_model)
 escape_codes = {}
+SAFE_ESCAPE_BUILTINS = {
+    "bool": bool,
+    "dict": dict,
+    "float": float,
+    "int": int,
+    "len": len,
+    "list": list,
+    "max": max,
+    "min": min,
+    "range": range,
+    "str": str,
+    "sum": sum,
+    "tuple": tuple,
+}
 
 
 def interact(self, model, sender, message):
@@ -118,46 +132,64 @@ class System(Role):
         function_name = f"_escape_{code_name}"
         function_source = f"def {function_name}({', '.join(parameters)}):\n{indented_code}"
         local_dict = {}
-        exec(function_source, {"Role": Role, "HR": HR}, local_dict)
+        exec(
+            function_source,
+            {"__builtins__": SAFE_ESCAPE_BUILTINS, "Role": Role, "HR": HR},
+            local_dict,
+        )
         return local_dict[function_name]
 
-    def interact(self, prompt):
+    def handle_instruction(self, instruction, trusted=False):
+        if not isinstance(instruction, dict):
+            return "Error: JSON instruction must be an object."
+
+        if "code_name" in instruction:
+            if not trusted:
+                return "Error: Escape code definitions can only be loaded from trusted preload files."
+            code_name = instruction["code_name"]
+            arg_names = [arg["name"] for arg in instruction["args"]]
+            escape_codes[code_name] = {
+                "args": arg_names,
+                "func": self.compile_escape_code(
+                    code_name, arg_names, instruction["code"]
+                ),
+            }
+            return f"Stored escape code '{code_name}' with args {arg_names}."
+        elif "exec" in instruction:
+            code_name = instruction["exec"]
+            args = instruction.get("args", {})
+            if code_name in escape_codes:
+                escape_code = escape_codes[code_name]
+                missing_args = [
+                    arg_name
+                    for arg_name in escape_code["args"]
+                    if arg_name not in args
+                ]
+                if missing_args:
+                    return f"Error: Missing args for escape code '{code_name}': {missing_args}"
+                result = escape_code["func"](
+                    **args,
+                    employee_dict=self.employee_dict,
+                )
+                return f"Executed escape code '{code_name}' with args {args}. Result: {result}"
+
+            return f"Error: Escape code '{code_name}' not found."
+        return "Error: JSON instruction must include code_name or exec."
+
+    def interact(self, prompt, trusted=False):
         print(colored(f"\n---\n// {self.name}\n{prompt}\n---\n", "grey"))
 
-        if prompt is not None and prompt.startswith("{"):
+        prompt_text = prompt.strip() if isinstance(prompt, str) else ""
+        if prompt_text.startswith(("{", "[")):
             try:
-                instruction = json.loads(prompt)
-
-                if "code_name" in instruction:
-                    code_name = instruction["code_name"]
-                    arg_names = [arg["name"] for arg in instruction["args"]]
-                    escape_codes[code_name] = {
-                        "args": arg_names,
-                        "func": self.compile_escape_code(
-                            code_name, arg_names, instruction["code"]
-                        ),
-                    }
-                    return f"Stored escape code '{code_name}' with args {arg_names}."
-                elif "exec" in instruction:
-                    code_name = instruction["exec"]
-                    args = instruction.get("args", {})
-                    if code_name in escape_codes:
-                        escape_code = escape_codes[code_name]
-                        missing_args = [
-                            arg_name
-                            for arg_name in escape_code["args"]
-                            if arg_name not in args
-                        ]
-                        if missing_args:
-                            return f"Error: Missing args for escape code '{code_name}': {missing_args}"
-                        result = escape_code["func"](
-                            **args,
-                            employee_dict=self.employee_dict,
-                        )
-                        return f"Executed escape code '{code_name}' with args {args}. Result: {result}"
-
-                    else:
-                        return f"Error: Escape code '{code_name}' not found."
+                instruction = json.loads(prompt_text)
+                if isinstance(instruction, list):
+                    responses = [
+                        self.handle_instruction(item, trusted=trusted)
+                        for item in instruction
+                    ]
+                    return "\n".join(responses)
+                return self.handle_instruction(instruction, trusted=trusted)
             except json.JSONDecodeError as e:
                 return f"Error: {e}"
             except Exception as e:
@@ -232,7 +264,7 @@ def preload(system, yaml_file_path="preload.yaml"):
 
     # Add escape codes for HR
     for obj in yaml_content:
-        system_response = system.interact(json.dumps(obj))
+        system_response = system.interact(json.dumps(obj), trusted=True)
         print(colored(f"System: {system_response}", "blue"))
 
 

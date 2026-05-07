@@ -8,7 +8,9 @@ Welcome to the AI-Powered Organization Simulation project. This project explores
 - [Roles](#roles)
 - [How It Works](#how-it-works)
 - [Installation](#installation)
+- [Configuration](#configuration)
 - [Running the Simulation](#running-the-simulation)
+- [Testing](#testing)
 - [Contributing](#contributing)
 - [Future Directions](#future-directions)
 
