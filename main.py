@@ -14,6 +14,8 @@ import argparse
 from pathlib import Path
 from uuid import uuid4
 
+from robits.runtime.sandbox import SandboxMetadata
+
 
 def make_client():
     client_kwargs = {
@@ -466,6 +468,7 @@ class Role:
         self.max_tokens = random.randint(250, 400) # -1
         self.lifecycle_state = "active"
         self.lifecycle_events = []
+        self.sandbox_metadata = SandboxMetadata.disabled(self.name)
 
     def interact(self, sender, prompt):
         return interact_cheap(self, sender, prompt)
@@ -570,6 +573,7 @@ class Human(Role):
     def __init__(self):
         self.name = "CEO"
         self.template = "As CEO, you are responsible for making high-level decisions and setting the overall direction of the organization."
+        self.sandbox_metadata = SandboxMetadata.disabled(self.name)
 
     def interact(self, *_):
         return input(f"{self.name}: ")

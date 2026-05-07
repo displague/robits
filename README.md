@@ -66,6 +66,16 @@ subscribe to the active stream without requiring an interactive terminal.
 Runtime events can also be persisted to SQLite and replayed later, with
 visibility fields separating public transcript events from private thoughts.
 
+## Sandboxes
+
+Agents can carry optional sandbox metadata. Default local runs keep sandboxing
+disabled and execute through the current runtime. When enabled, metadata names a
+backend plus a private per-agent workspace and a shared organization workspace.
+The runtime validates that an explicit configured backend matches the metadata
+before execution. The current implementation includes a fakeable runtime
+abstraction for tests and future container or cluster backends; it does not
+require containers for unit tests.
+
 ## Installation
 
 To install the required packages for this project, run:

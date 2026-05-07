@@ -15,6 +15,9 @@
 - Role lifecycle state is tracked in memory for active, paused, and retired
   agents, with lifecycle events recording requester and approver context when a
   trusted lifecycle tool provides it.
+- Agents carry optional sandbox metadata. Sandboxing is disabled by default; when
+  enabled, metadata separates a private per-agent workspace from a shared
+  organization workspace and names the backend policy.
 
 ## Current vs Target
 
@@ -28,6 +31,13 @@ Current runtime:
 - Runtime observability is headless-first: an in-memory event stream can be
   subscribed to during active sessions, and event records can be persisted to
   SQLite for replay.
+- Sandbox execution is represented by fakeable runtime abstractions so tests do
+  not require containers. Future container or cluster backends should implement
+  the same request/result boundary.
+- Local runs should treat sandbox metadata as policy metadata until a backend is
+  explicitly configured. Headless automation should use fake or local-process
+  backends, while future container backends should mount private agent workspaces
+  separately from the approved shared organization workspace.
 
 Target runtime:
 
