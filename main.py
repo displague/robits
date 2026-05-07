@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from openai import OpenAI
 
 import random
@@ -12,6 +12,7 @@ from datetime import datetime
 from termcolor import colored
 import argparse
 from pathlib import Path
+from uuid import uuid4
 
 
 def make_client():
@@ -418,6 +419,138 @@ def load_tools(system, yaml_file_path=None):
         system_response = system.interact(json.dumps(obj), trusted=True)
         print(colored(f"System: {system_response}", "blue"))
 
+
+@dataclass
+class TranscriptEntry:
+    turn: int
+    sender: str
+    receiver: str
+    prompt: str
+    response: str
+    directed: bool = False
+    system_events: list[str] = field(default_factory=list)
+
+
+@dataclass
+class RoutedMessage:
+    receiver: object
+    prompt: str
+    directed: bool = False
+
+
+class RoundRobinScheduler:
+    def __init__(self, participant_names):
+        self.participant_names = list(participant_names)
+        if not self.participant_names:
+            raise ValueError("Scheduler requires at least one participant.")
+        self.index = 0
+
+    def next(self, last_receiver_name=None):
+        for _ in range(len(self.participant_names)):
+            name = self.participant_names[self.index % len(self.participant_names)]
+            self.index += 1
+            if len(self.participant_names) == 1 or name != last_receiver_name:
+                return name
+        return self.participant_names[(self.index - 1) % len(self.participant_names)]
+
+    def observe(self, participant_name):
+        if participant_name in self.participant_names:
+            self.index = self.participant_names.index(participant_name) + 1
+
+    def add_participant(self, participant_name):
+        if participant_name not in self.participant_names:
+            self.participant_names.append(participant_name)
+
+
+class Session:
+    def __init__(self, participants=None, system=None, scheduler=None, run_id=None, max_turns=None):
+        self.participants = participants if participants is not None else build_employee_dict()
+        self.system = system if system is not None else System(self.participants)
+        scheduler_names = list(self.participants)
+        self.scheduler = scheduler if scheduler is not None else RoundRobinScheduler(scheduler_names)
+        self.run_id = run_id or f"run-{uuid4()}"
+        self.max_turns = max_turns
+        self.transcript = []
+        self.turns_completed = 0
+        self.last_receiver = self.participants.get("CEO") or next(iter(self.participants.values()))
+
+    def route_message(self, message, last_receiver_name=None):
+        prompt_split = message.split(",", 1) if isinstance(message, str) else []
+        if len(prompt_split) > 1:
+            receiver_name = prompt_split[0].strip()
+            if receiver_name in self.participants:
+                print(colored(f"// Directed to {receiver_name}", "grey"))
+                self.scheduler.observe(receiver_name)
+                return RoutedMessage(self.participants[receiver_name], prompt_split[1].strip(), True)
+
+        receiver_name = self.scheduler.next(last_receiver_name)
+        return RoutedMessage(self.participants[receiver_name], message, False)
+
+    def process_tool_instruction(self, message):
+        tool_instruction = parse_tool_instruction(message)
+        if tool_instruction is None or tool_instruction == "":
+            return []
+
+        system_response = self.system.interact(tool_instruction)
+        print(colored(f"System: {system_response}", "blue"))
+        if system_response is not None and system_response != "" and "Ops" in self.participants:
+            ops = self.participants["Ops"]
+            if hasattr(ops, "update_group_conversations"):
+                ops.update_group_conversations({"role": "system", "content": system_response})
+        return [system_response]
+
+    def record_turn(self, sender, receiver, prompt, response, directed=False, system_events=None):
+        entry = TranscriptEntry(
+            turn=self.turns_completed + 1,
+            sender=sender,
+            receiver=receiver,
+            prompt=prompt,
+            response=response,
+            directed=directed,
+            system_events=system_events or [],
+        )
+        self.transcript.append(entry)
+        self.turns_completed += 1
+        return entry
+
+    def sync_scheduler_participants(self):
+        for name in self.participants:
+            self.scheduler.add_participant(name)
+
+    def step(self, message):
+        sender = self.last_receiver
+        routed = self.route_message(message, sender.name)
+        system_events = self.process_tool_instruction(message)
+        self.sync_scheduler_participants()
+        response = routed.receiver.interact(sender.name, routed.prompt)
+        response = "" if response is None else response
+        if routed.receiver.name != "CEO" and response != "":
+            print(colored(f"{routed.receiver.name} responds: {response}", "cyan"))
+        self.record_turn(
+            sender=sender.name,
+            receiver=routed.receiver.name,
+            prompt=routed.prompt,
+            response=response,
+            directed=routed.directed,
+            system_events=system_events,
+        )
+        self.last_receiver = routed.receiver
+        return response
+
+    def run(self, initial_message=None, max_turns=None):
+        effective_max_turns = self.max_turns if max_turns is None else max_turns
+        last_response = (
+            initial_message
+            if initial_message is not None
+            else self.last_receiver.interact()
+        )
+
+        while effective_max_turns is None or self.turns_completed < effective_max_turns:
+            last_response = self.step(last_response)
+
+        return self
+
+
 def build_employee_dict():
     employee_dict = {}
 
@@ -430,53 +563,9 @@ def build_employee_dict():
 
 
 def run_simulation(initial_message=None, max_turns=None):
-    employee_dict = build_employee_dict()
-    system = System(employee_dict)
-    load_tools(system)
-    last_receiver = employee_dict["CEO"]
-    receiver = last_receiver
-    last_response = (
-        initial_message
-        if initial_message is not None
-        else receiver.interact()
-    )
-    turns = 0
-
-    while max_turns is None or turns < max_turns:
-        prompt_split = last_response.split(",", 1)
-        if len(prompt_split) > 1 and prompt_split[0] in employee_dict:
-            print(colored(f"// Directed to {prompt_split[0]}", "grey"))
-            receiver = employee_dict[prompt_split[0].strip()]
-            last_response = prompt_split[1].strip()
-        else:
-            while True:
-                new_receiver = employee_dict[random.choice(list(employee_dict))]
-                if new_receiver != last_receiver:
-                    receiver = new_receiver
-                    break
-
-        tool_instruction = parse_tool_instruction(last_response)
-        if tool_instruction is not None and tool_instruction != "":
-            try:
-                system_response = system.interact(tool_instruction)
-                print(colored(f"System: {system_response}", "blue"))
-                if system_response is not None and system_response != "":
-                    employee_dict["Ops"].update_group_conversations({"role": "system", "content": system_response})
-
-            except json.JSONDecodeError:
-                # Return the original response if the JSON blob cannot be processed
-                if system_response.startswith("Error:"):
-                    print(colored(f"System responds: {system_response}", "red"))
-                    continue
-
-        response = receiver.interact(last_receiver.name, last_response)
-        if response is None or response == "":
-            continue
-        if receiver.name != "CEO":
-            print(colored(f"{receiver.name} responds: {response}", "cyan"))
-        last_response = response
-        last_receiver = receiver
-        turns += 1
+    session = Session()
+    load_tools(session.system)
+    return session.run(initial_message=initial_message, max_turns=max_turns)
 
 
 def parse_args(argv=None):

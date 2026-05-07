@@ -8,6 +8,33 @@ from io import StringIO
 import main
 
 
+class FakeRole:
+    def __init__(self, name, responses=None):
+        self.name = name
+        self.responses = list(responses or [])
+        self.received = []
+        self.group_conversation_history = {}
+
+    def interact(self, sender=None, prompt=None):
+        self.received.append((sender, prompt))
+        if self.responses:
+            return self.responses.pop(0)
+        return ""
+
+    def update_group_conversations(self, message):
+        self.group_conversation_history.setdefault(self.name, []).append(message)
+
+
+def build_fake_participants():
+    return {
+        "CEO": FakeRole("CEO", ["initial"]),
+        "Ops": FakeRole("Ops", ["SE, handoff"]),
+        "SE": FakeRole("SE", ["HR, handoff"]),
+        "HR": FakeRole("HR", ["Samandriel, handoff"]),
+        "Samandriel": FakeRole("Samandriel", ["CEO, done"]),
+    }
+
+
 class RuntimeTests(unittest.TestCase):
     def setUp(self):
         main.tool_registry.clear()
@@ -380,6 +407,123 @@ class RuntimeTests(unittest.TestCase):
                 main.load_tools(system, path)
         finally:
             os.unlink(path)
+
+    def test_session_creation_records_run_id_participants_and_transcript(self):
+        participants = build_fake_participants()
+        session = main.Session(participants=participants, run_id="session-1", max_turns=3)
+
+        self.assertEqual(session.run_id, "session-1")
+        self.assertIs(session.participants, participants)
+        self.assertEqual(session.max_turns, 3)
+        self.assertEqual(session.turns_completed, 0)
+        self.assertEqual(session.transcript, [])
+
+    def test_round_robin_scheduler_skips_last_receiver(self):
+        scheduler = main.RoundRobinScheduler(["CEO", "Ops", "SE"])
+
+        self.assertEqual(scheduler.next("CEO"), "Ops")
+        self.assertEqual(scheduler.next("Ops"), "SE")
+        self.assertEqual(scheduler.next("SE"), "CEO")
+        self.assertEqual(scheduler.next("CEO"), "Ops")
+
+    def test_directed_message_routes_to_named_recipient_and_strips_prefix(self):
+        session = main.Session(participants=build_fake_participants(), run_id="session-1")
+
+        with redirect_stdout(StringIO()):
+            routed = session.route_message(" HR , please handle this", "CEO")
+
+        self.assertTrue(routed.directed)
+        self.assertEqual(routed.receiver.name, "HR")
+        self.assertEqual(routed.prompt, "please handle this")
+
+    def test_unknown_directed_prefix_falls_back_to_scheduler(self):
+        session = main.Session(participants=build_fake_participants(), run_id="session-1")
+
+        with redirect_stdout(StringIO()):
+            routed = session.route_message("Finance, please handle this", "CEO")
+
+        self.assertFalse(routed.directed)
+        self.assertEqual(routed.receiver.name, "Ops")
+        self.assertEqual(routed.prompt, "Finance, please handle this")
+
+    def test_directed_message_advances_scheduler_after_recipient(self):
+        session = main.Session(participants=build_fake_participants(), run_id="session-1")
+
+        with redirect_stdout(StringIO()):
+            routed = session.route_message("HR, please handle this", "CEO")
+            next_routed = session.route_message("continue", "HR")
+
+        self.assertEqual(routed.receiver.name, "HR")
+        self.assertEqual(next_routed.receiver.name, "Samandriel")
+
+    def test_session_stops_at_configured_turn_limit_without_model_calls(self):
+        participants = build_fake_participants()
+        session = main.Session(participants=participants, run_id="session-1", max_turns=1)
+        with redirect_stdout(StringIO()):
+            result = session.run(initial_message="hello")
+
+        self.assertIs(result, session)
+        self.assertEqual(session.turns_completed, 1)
+        self.assertEqual(len(session.transcript), 1)
+        self.assertEqual(participants["Ops"].received, [("CEO", "hello")])
+        self.assertEqual(participants["SE"].received, [])
+
+    def test_run_turn_limit_overrides_session_default(self):
+        participants = build_fake_participants()
+        session = main.Session(participants=participants, run_id="session-1", max_turns=3)
+        with redirect_stdout(StringIO()):
+            session.run(initial_message="hello", max_turns=1)
+
+        self.assertEqual(session.turns_completed, 1)
+
+    def test_session_records_directed_transcript_entries(self):
+        participants = build_fake_participants()
+        session = main.Session(participants=participants, run_id="session-1")
+        with redirect_stdout(StringIO()):
+            session.run(initial_message="HR, status please", max_turns=1)
+
+        entry = session.transcript[0]
+
+        self.assertEqual(entry.turn, 1)
+        self.assertEqual(entry.sender, "CEO")
+        self.assertEqual(entry.receiver, "HR")
+        self.assertEqual(entry.prompt, "status please")
+        self.assertEqual(entry.response, "Samandriel, handoff")
+        self.assertTrue(entry.directed)
+
+    def test_empty_model_response_consumes_bounded_turn(self):
+        participants = build_fake_participants()
+        participants["Ops"] = FakeRole("Ops", [None])
+        session = main.Session(participants=participants, run_id="session-1")
+        with redirect_stdout(StringIO()):
+            session.run(initial_message="hello", max_turns=1)
+
+        self.assertEqual(session.turns_completed, 1)
+        self.assertEqual(session.transcript[0].response, "")
+
+    def test_tool_execution_records_system_event_and_updates_scheduler(self):
+        participants = build_fake_participants()
+        participants["Ops"] = FakeRole("Ops", ["done"])
+        system = main.System(participants)
+        session = main.Session(participants=participants, system=system, run_id="session-1")
+        payload = json.dumps(
+            {
+                "exec": "org.create_role",
+                "args": {
+                    "role_name": "QA",
+                    "role_description": "Tests the organization",
+                },
+            }
+        )
+
+        with redirect_stdout(StringIO()):
+            main.load_tools(system)
+            session.run(initial_message=payload, max_turns=1)
+
+        self.assertIn("QA", participants)
+        self.assertIn("QA", session.scheduler.participant_names)
+        self.assertEqual(len(session.transcript[0].system_events), 1)
+        self.assertIn("Created a new role: QA", session.transcript[0].system_events[0])
 
 
 if __name__ == "__main__":
