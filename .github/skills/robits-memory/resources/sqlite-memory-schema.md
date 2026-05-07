@@ -24,6 +24,7 @@ Repository API:
 - `append_todo`
 - `append_tool_call`
 - `append_memory_entry`
+- `list_todos`
 - `list_messages`
 - `list_agent_records`
 - `search`

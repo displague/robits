@@ -143,6 +143,74 @@ class SQLiteMemoryStoreTests(unittest.TestCase):
         self.assertEqual(len(results), 1)
         self.assertEqual(results[0].content, "Coworker plan for sqlite search.")
 
+    def test_metadata_preserves_valid_falsy_json_values(self):
+        store = self.seed_store()
+
+        store.append_tool_call(
+            "call-1",
+            "SE",
+            "memory.empty",
+            arguments=[],
+            result_content="Empty args are intentional.",
+            session_id="session-1",
+            metadata=False,
+        )
+
+        row = store.connection.execute(
+            "SELECT arguments_json, metadata_json FROM tool_calls WHERE tool_call_id = ?",
+            ("call-1",),
+        ).fetchone()
+
+        self.assertEqual(row["arguments_json"], "[]")
+        self.assertEqual(row["metadata_json"], "false")
+
+    def test_tool_call_can_be_updated_with_result_and_reindexed(self):
+        store = self.seed_store()
+
+        store.append_tool_call(
+            "call-1",
+            "SE",
+            "memory.search",
+            arguments={"query": "sqlite"},
+            status="requested",
+            session_id="session-1",
+        )
+        store.append_tool_call(
+            "call-1",
+            "SE",
+            "memory.search",
+            arguments={"query": "sqlite"},
+            result_content="Updated sqlite result.",
+            status="completed",
+            session_id="session-1",
+        )
+
+        row = store.connection.execute(
+            "SELECT status, result_content FROM tool_calls WHERE tool_call_id = ?",
+            ("call-1",),
+        ).fetchone()
+        results = store.search("updated", agent_id="SE")
+
+        self.assertEqual(row["status"], "completed")
+        self.assertEqual(row["result_content"], "Updated sqlite result.")
+        self.assertEqual(len(results), 1)
+        self.assertEqual(results[0].record_id, "call-1")
+
+    def test_append_and_list_todos(self):
+        store = self.seed_store()
+
+        todo_id = store.append_todo(
+            "SE",
+            "Add prompt assembly retrieval",
+            session_id="session-1",
+            content="Use memory search before growing context.",
+        )
+
+        todos = store.list_todos(agent_id="SE", status="open")
+
+        self.assertEqual(todos[0]["todo_id"], todo_id)
+        self.assertEqual(todos[0]["title"], "Add prompt assembly retrieval")
+
     def test_agent_record_lookup_includes_messages_thoughts_and_tools(self):
         store = self.seed_store()
         store.append_message("session-1", "CEO", "SE", "Message for SE.")
@@ -157,8 +225,12 @@ class SQLiteMemoryStoreTests(unittest.TestCase):
 
         records = store.list_agent_records("SE")
         record_types = {record["record_type"] for record in records}
+        message = next(record for record in records if record["record_type"] == "message")
 
         self.assertEqual(record_types, {"message", "thought", "tool_call"})
+        self.assertEqual(message["agent_id"], "SE")
+        self.assertEqual(message["sender_agent_id"], "CEO")
+        self.assertEqual(message["receiver_agent_id"], "SE")
 
 
 if __name__ == "__main__":

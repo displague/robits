@@ -13,7 +13,7 @@ def _utc_now():
 
 
 def _json_dumps(value):
-    return json.dumps(value or {}, sort_keys=True)
+    return json.dumps({} if value is None else value, sort_keys=True)
 
 
 @dataclass(frozen=True)
@@ -426,6 +426,17 @@ class SQLiteMemoryStore:
                 source, created_at, metadata_json
             )
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(tool_call_id) DO UPDATE SET
+                session_id = excluded.session_id,
+                agent_id = excluded.agent_id,
+                tool_name = excluded.tool_name,
+                arguments_json = excluded.arguments_json,
+                result_content = COALESCE(excluded.result_content, tool_calls.result_content),
+                status = excluded.status,
+                relationship_type = excluded.relationship_type,
+                conversation_type = excluded.conversation_type,
+                source = excluded.source,
+                metadata_json = excluded.metadata_json
             """,
             (
                 tool_call_id,
@@ -443,6 +454,7 @@ class SQLiteMemoryStore:
             ),
         )
         if result_content:
+            self._delete_index("tool_call", tool_call_id)
             self._index(
                 "tool_call",
                 tool_call_id,
@@ -457,6 +469,28 @@ class SQLiteMemoryStore:
             )
         self.connection.commit()
         return tool_call_id
+
+    def list_todos(self, agent_id=None, session_id=None, status=None, limit=100):
+        clauses = []
+        params: list[Any] = []
+        for column, value in (
+            ("agent_id", agent_id),
+            ("session_id", session_id),
+            ("status", status),
+        ):
+            if value is not None:
+                clauses.append(f"{column} = ?")
+                params.append(value)
+        where = "WHERE " + " AND ".join(clauses) if clauses else ""
+        return self._rows(
+            f"""
+            SELECT * FROM todos
+            {where}
+            ORDER BY created_at, todo_id
+            LIMIT ?
+            """,
+            params + [limit],
+        )
 
     def append_memory_entry(
         self,
@@ -538,20 +572,22 @@ class SQLiteMemoryStore:
             self._rows(
                 """
                 SELECT 'message' AS record_type, message_id AS record_id, content,
-                       session_id, sender_agent_id AS agent_id, created_at
+                       session_id, ? AS agent_id, sender_agent_id,
+                       receiver_agent_id, created_at
                 FROM messages
                 WHERE sender_agent_id = ? OR receiver_agent_id = ?
                 ORDER BY created_at, message_id
                 LIMIT ?
                 """,
-                (agent_id, agent_id, limit),
+                (agent_id, agent_id, agent_id, limit),
             )
         )
         records.extend(
             self._rows(
                 """
                 SELECT 'thought' AS record_type, thought_id AS record_id, content,
-                       session_id, agent_id, created_at
+                       session_id, agent_id, NULL AS sender_agent_id,
+                       NULL AS receiver_agent_id, created_at
                 FROM thoughts
                 WHERE agent_id = ?
                 ORDER BY created_at, thought_id
@@ -564,7 +600,9 @@ class SQLiteMemoryStore:
             self._rows(
                 """
                 SELECT 'tool_call' AS record_type, tool_call_id AS record_id,
-                       result_content AS content, session_id, agent_id, created_at
+                       result_content AS content, session_id, agent_id,
+                       NULL AS sender_agent_id, NULL AS receiver_agent_id,
+                       created_at
                 FROM tool_calls
                 WHERE agent_id = ?
                 ORDER BY created_at, tool_call_id
@@ -653,6 +691,12 @@ class SQLiteMemoryStore:
                 created_at,
                 content,
             ),
+        )
+
+    def _delete_index(self, kind, record_id):
+        self.connection.execute(
+            "DELETE FROM memory_fts WHERE kind = ? AND record_id = ?",
+            (kind, str(record_id)),
         )
 
     def _rows(self, query, params=()):
