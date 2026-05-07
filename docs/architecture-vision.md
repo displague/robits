@@ -38,10 +38,19 @@ Lifecycle states should include at least `proposed`, `active`, `paused`, and
 `retired`.
 
 HR owns lifecycle proposals and approvals. Operators own runtime health,
-availability, and environment coordination. Software engineers propose trusted
-tools and code changes. Every active agent may request tools, but executable
-tool definitions remain trusted runtime artifacts until a later permission model
-exists.
+availability, and environment coordination, with the COO as the accountable
+operator for organization-wide environment changes. Software engineers propose
+trusted tools and code changes. Every active agent may request tools, but
+executable tool definitions remain trusted runtime artifacts until a later
+permission model exists.
+
+The COO is the operational authority for changing the Robits environment itself.
+Software engineers may propose code, configuration, tool, or runtime changes.
+The COO coordinates when and how those changes are applied, including validation,
+rollout timing, safe restarts, and rollback. HR coordinates lifecycle safety so
+agent state, memories, active work, relationships, and commitments are preserved
+or intentionally migrated before an environment change interrupts an agent's life.
+The human CEO can observe, approve, or override self-modification policy.
 
 ### Sessions and Messages
 
@@ -96,6 +105,38 @@ describe the generic API shape rather than a machine-specific endpoint or model.
 Structured output should be capability-gated: prefer provider-native schema
 support when available, and fall back to validated JSON extraction when it is
 not.
+
+### Environment Self-Modification
+
+Robits should eventually support governed self-modification: the organization can
+change its own code, tool catalog, configuration, or runtime environment without
+discarding agent lives. This is not ordinary tool execution. It is an operational
+change workflow with explicit authority boundaries.
+
+The proposed flow is:
+
+1. **Proposal**: SE or another authorized agent proposes a change with intent,
+   affected files or runtime resources, expected risk, validation plan, and
+   rollback plan.
+2. **Coordination**: COO checks operational timing, dependencies, sandbox or
+   container impact, and whether the change affects shared organization state.
+3. **Lifecycle protection**: HR checks affected agents, active sessions, memory
+   durability, private workspaces, and pending commitments before interruption.
+4. **Snapshot**: the runtime records code refs, tool catalog versions, database
+   state markers, agent lifecycle states, and active session IDs.
+5. **Apply**: COO applies the approved change through a trusted executor or
+   sandbox backend, never through raw untrusted model text.
+6. **Restart or migrate**: affected environments are restarted or migrated with
+   preserved session, memory, and lifecycle records.
+7. **Verify**: tests, smoke checks, and health events confirm the environment is
+   operating correctly.
+8. **Rollback**: failed changes revert code/config/runtime state and mark
+   affected agent lives for HR follow-up.
+
+Self-modification events should become durable records: proposal, approval,
+snapshot, migration, restart, verification, rollback, and HR lifecycle notes.
+Default local runs should keep this disabled until implementation work adds
+tested execution hooks.
 
 ### Memory and Context
 
@@ -162,6 +203,8 @@ Move only after tests cover behavior:
 4. `robits/agents/`: role definitions, agent lifecycle, and contact policy.
 5. `robits/memory/`: SQLite schema, repositories, FTS search, and memory digests.
 6. `robits/ui/`: TUI adapters over persisted or streamed runtime events.
+7. `robits/runtime/environment.py`: self-modification proposals, snapshots,
+   restart coordination, and sandbox/backend integration.
 
 Avoid large file splits before behavior is stable. Branch salvage showed that
 mechanical module moves can easily erase tests or current runtime fixes.
@@ -181,11 +224,16 @@ mechanical module moves can easily erase tests or current runtime fixes.
    `org.create_role` compatibility. This is issue #9.
 6. **Observability and TUI**: emit headless runtime events and add a TUI spyglass
    over live or persisted sessions. This is issue #16.
-7. **Responses tool loop**: replace ad hoc JSON tool extraction with tested
+7. **Sandboxed execution**: add optional per-agent sandboxes and shared
+   organization volume semantics. This is issue #18.
+8. **Governed self-modification**: add SE proposal, COO coordination, HR
+   lifecycle protection, environment snapshots, safe restart, verification, and
+   rollback records. This is issue #19.
+9. **Responses tool loop**: replace ad hoc JSON tool extraction with tested
    OpenAI-compatible tool-call routing while keeping text JSON compatibility
    during migration.
-8. **Module extraction**: split `main.py` after the boundaries above have tests.
-9. **Parallel execution**: add parallel role execution only after SQLite-backed
+10. **Module extraction**: split `main.py` after the boundaries above have tests.
+11. **Parallel execution**: add parallel role execution only after SQLite-backed
    state coordination and event ordering are explicit.
 
 ## References
