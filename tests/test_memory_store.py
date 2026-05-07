@@ -1,3 +1,4 @@
+import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
@@ -40,6 +41,8 @@ class SQLiteMemoryStoreTests(unittest.TestCase):
         self.assertIn("todos", tables)
         self.assertIn("tool_calls", tables)
         self.assertIn("memory_entries", tables)
+        self.assertIn("memory_digests", tables)
+        self.assertIn("memory_digest_sources", tables)
         self.assertIn("memory_fts", tables)
 
     def test_append_and_lookup_messages_by_session_and_agent(self):
@@ -91,8 +94,8 @@ class SQLiteMemoryStoreTests(unittest.TestCase):
             source="tool_result",
         )
         store.append_memory_entry(
-            "memory_digest",
-            "Digest: sqlite records should preserve source links.",
+            "memory_note",
+            "Note: sqlite records should preserve source links.",
             agent_id="SE",
             session_id="session-1",
             source_table="messages",
@@ -108,7 +111,7 @@ class SQLiteMemoryStoreTests(unittest.TestCase):
         self.assertIn("message", kinds)
         self.assertIn("thought", kinds)
         self.assertIn("tool_call", kinds)
-        self.assertIn("memory_digest", kinds)
+        self.assertIn("memory_note", kinds)
 
     def test_search_filters_relationship_conversation_source_and_dates(self):
         store = self.seed_store()
@@ -231,6 +234,169 @@ class SQLiteMemoryStoreTests(unittest.TestCase):
         self.assertEqual(message["agent_id"], "SE")
         self.assertEqual(message["sender_agent_id"], "CEO")
         self.assertEqual(message["receiver_agent_id"], "SE")
+
+    def test_memory_digest_records_provenance_and_is_searchable(self):
+        store = self.seed_store()
+        message_id = store.append_message(
+            "session-1",
+            "CEO",
+            "SE",
+            "Use sqlite to recall architecture decisions.",
+            relationship_type="coworker",
+            conversation_type="work",
+            source="chat",
+            created_at="2026-05-07T10:00:00+00:00",
+        )
+        thought_id = store.append_thought(
+            "SE",
+            "The digest should link back to raw records.",
+            session_id="session-1",
+            relationship_type="coworker",
+            conversation_type="work",
+            source="thinking",
+            created_at="2026-05-07T10:01:00+00:00",
+        )
+
+        digest_id = store.append_memory_digest(
+            "Digest: sqlite recall needs reversible source links.",
+            [
+                {
+                    "source_table": "messages",
+                    "source_id": message_id,
+                    "source_created_at": "2026-05-07T10:00:00+00:00",
+                },
+                {
+                    "source_table": "thoughts",
+                    "source_id": thought_id,
+                    "source_created_at": "2026-05-07T10:01:00+00:00",
+                },
+            ],
+            agent_id="SE",
+            session_id="session-1",
+            prompt_version="memory-digest-test-v1",
+            source_start_at="2026-05-07T10:00:00+00:00",
+            source_end_at="2026-05-07T10:01:00+00:00",
+            relationship_type="coworker",
+            conversation_type="work",
+        )
+
+        digest = store.get_memory_digest(digest_id)
+        sources = store.get_memory_digest_sources(digest_id)
+        results = store.search("reversible", agent_id="SE")
+
+        self.assertEqual(digest["prompt_version"], "memory-digest-test-v1")
+        self.assertEqual(digest["source_start_at"], "2026-05-07T10:00:00+00:00")
+        self.assertEqual([source.source_table for source in sources], ["messages", "thoughts"])
+        self.assertEqual(results[0].kind, "memory_digest")
+        self.assertEqual(results[0].record_id, str(digest_id))
+
+    def test_memory_digest_sources_can_expand_to_raw_records(self):
+        store = self.seed_store()
+        message_id = store.append_message(
+            "session-1",
+            "CEO",
+            "SE",
+            "Raw source message.",
+        )
+        tool_call_id = store.append_tool_call(
+            "call-1",
+            "SE",
+            "memory.search",
+            result_content="Raw tool result.",
+            session_id="session-1",
+        )
+        digest_id = store.append_memory_digest(
+            "Digest with two source kinds.",
+            [
+                {"source_table": "messages", "source_id": message_id},
+                {"source_table": "tool_calls", "source_id": tool_call_id},
+            ],
+            agent_id="SE",
+            session_id="session-1",
+        )
+
+        expanded = store.expand_memory_digest_sources(digest_id)
+
+        self.assertEqual([row["source_table"] for row in expanded], ["messages", "tool_calls"])
+        self.assertEqual(expanded[0]["content"], "Raw source message.")
+        self.assertEqual(expanded[1]["result_content"], "Raw tool result.")
+
+    def test_memory_digest_requires_sources(self):
+        store = self.seed_store()
+
+        with self.assertRaisesRegex(ValueError, "requires at least one source"):
+            store.append_memory_digest("No source links.", [], agent_id="SE")
+
+    def test_memory_digest_validates_sources_before_insert(self):
+        store = self.seed_store()
+
+        with self.assertRaisesRegex(ValueError, "source_table and source_id"):
+            store.append_memory_digest(
+                "Bad source link.",
+                [{"source_table": "messages"}],
+                agent_id="SE",
+            )
+
+        count = store.connection.execute(
+            "SELECT COUNT(*) AS count FROM memory_digests"
+        ).fetchone()["count"]
+
+        self.assertEqual(count, 0)
+
+    def test_memory_digest_source_metadata_must_be_object(self):
+        store = self.seed_store()
+        message_id = store.append_message("session-1", "CEO", "SE", "Source.")
+
+        with self.assertRaisesRegex(ValueError, "metadata must be an object"):
+            store.append_memory_digest(
+                "Bad source metadata.",
+                [
+                    {
+                        "source_table": "messages",
+                        "source_id": message_id,
+                        "metadata": False,
+                    }
+                ],
+                agent_id="SE",
+            )
+
+    def test_memory_digest_rolls_back_partial_insert_on_source_error(self):
+        store = self.seed_store()
+        message_id = store.append_message("session-1", "CEO", "SE", "Source.")
+
+        with self.assertRaises(sqlite3.IntegrityError):
+            store.append_memory_digest(
+                "Duplicate source links should roll back.",
+                [
+                    {"source_table": "messages", "source_id": message_id},
+                    {"source_table": "messages", "source_id": message_id},
+                ],
+                agent_id="SE",
+            )
+
+        digest_count = store.connection.execute(
+            "SELECT COUNT(*) AS count FROM memory_digests"
+        ).fetchone()["count"]
+        source_count = store.connection.execute(
+            "SELECT COUNT(*) AS count FROM memory_digest_sources"
+        ).fetchone()["count"]
+        fts_count = store.connection.execute(
+            "SELECT COUNT(*) AS count FROM memory_fts WHERE kind = 'memory_digest'"
+        ).fetchone()["count"]
+
+        self.assertEqual(digest_count, 0)
+        self.assertEqual(source_count, 0)
+        self.assertEqual(fts_count, 0)
+
+    def test_legacy_memory_entry_digest_kind_is_rejected(self):
+        store = self.seed_store()
+
+        with self.assertRaisesRegex(ValueError, "Use append_memory_digest"):
+            store.append_memory_entry(
+                "memory_digest",
+                "Ambiguous legacy digest.",
+                agent_id="SE",
+            )
 
 
 if __name__ == "__main__":

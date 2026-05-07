@@ -1,5 +1,5 @@
 """SQLite-backed memory storage for Robits."""
 
-from .sqlite import MemorySearchResult, SQLiteMemoryStore
+from .sqlite import MemoryDigestSource, MemorySearchResult, SQLiteMemoryStore
 
-__all__ = ["MemorySearchResult", "SQLiteMemoryStore"]
+__all__ = ["MemoryDigestSource", "MemorySearchResult", "SQLiteMemoryStore"]

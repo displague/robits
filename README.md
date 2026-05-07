@@ -49,6 +49,10 @@ Generated local database files are ignored by git. Unit tests use temporary
 SQLite databases. Local runs should place generated databases under `data/` or
 `var/` unless the runtime is configured with another gitignored path.
 
+Memory digests are compacted memory artifacts stored with prompt version, source
+time range, retrieval filters, and ordered links back to raw source records so a
+future run can expand or reanalyze the original material.
+
 ## Installation
 
 To install the required packages for this project, run:
