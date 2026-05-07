@@ -1,7 +1,19 @@
-- code_name: create_role
-  args:
-    - name: role_name
-    - name: role_description
+- name: org.create_role
+  aliases:
+    - create_role
+  description: Create a new role in the organization.
+  parameters:
+    type: object
+    properties:
+      role_name:
+        type: string
+        description: The name of the new role.
+      role_description:
+        type: string
+        description: The responsibilities and purpose of the new role.
+    required:
+      - role_name
+      - role_description
   code: |
     if role_name not in employee_dict:
         if len(employee_dict) < HR.max_organization_members:

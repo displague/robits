@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+from dataclasses import dataclass
 from openai import OpenAI
 
 import random
@@ -30,8 +31,7 @@ client = make_client()
 default_model = os.environ.get("ROBITS_MODEL") or os.environ.get("OPENAI_MODEL") or "gpt-4o-mini"
 costly_model = os.environ.get("ROBITS_COSTLY_MODEL", default_model)
 cheap_model = os.environ.get("ROBITS_CHEAP_MODEL", default_model)
-escape_codes = {}
-SAFE_ESCAPE_BUILTINS = {
+SAFE_TOOL_BUILTINS = {
     "bool": bool,
     "dict": dict,
     "float": float,
@@ -45,6 +45,196 @@ SAFE_ESCAPE_BUILTINS = {
     "sum": sum,
     "tuple": tuple,
 }
+
+
+@dataclass
+class ToolDefinition:
+    name: str
+    description: str
+    parameters: dict
+    args: list[str]
+    required_args: list[str]
+    func: object
+    aliases: tuple[str, ...] = ()
+
+    @property
+    def openai_name(self):
+        return self.name.replace(".", "__")
+
+    def as_responses_tool(self):
+        return {
+            "type": "function",
+            "name": self.openai_name,
+            "description": self.description,
+            "parameters": self.parameters,
+        }
+
+    def as_chat_completion_tool(self):
+        return {
+            "type": "function",
+            "function": {
+                "name": self.openai_name,
+                "description": self.description,
+                "parameters": self.parameters,
+            },
+        }
+
+
+class ToolRegistry:
+    def __init__(self):
+        self._tools = {}
+        self._aliases = {}
+
+    def clear(self):
+        self._tools.clear()
+        self._aliases.clear()
+
+    def __contains__(self, name):
+        return self.resolve_name(name) in self._tools
+
+    def resolve_name(self, name):
+        return self._aliases.get(name, name)
+
+    def get(self, name):
+        return self._tools[self.resolve_name(name)]
+
+    def validate_tool_name(self, name):
+        if not isinstance(name, str) or not name:
+            raise ValueError("Tool name must be a non-empty string.")
+        parts = name.split(".")
+        if not all(part.isidentifier() for part in parts):
+            raise ValueError(f"Invalid tool name: {name}")
+
+    def compile_tool(self, name, arg_names, required_arg_names, code):
+        self.validate_tool_name(name)
+        for arg_name in required_arg_names:
+            if arg_name not in arg_names:
+                raise ValueError(f"Required tool argument is not defined: {arg_name}")
+        for arg_name in arg_names:
+            if not arg_name.isidentifier():
+                raise ValueError(f"Invalid tool argument name: {arg_name}")
+            if arg_name == "employee_dict":
+                raise ValueError("Tool argument name 'employee_dict' is reserved.")
+
+        optional_arg_names = [arg_name for arg_name in arg_names if arg_name not in required_arg_names]
+        parameters = ["employee_dict"] + required_arg_names + [
+            f"{arg_name}=None" for arg_name in optional_arg_names
+        ]
+        indented_code = "\n".join(
+            f"    {line}" if line.strip() else "" for line in code.splitlines()
+        )
+        if not indented_code:
+            indented_code = "    pass"
+        function_name = f"_tool_{name.replace('.', '_')}"
+        function_source = f"def {function_name}({', '.join(parameters)}):\n{indented_code}"
+        local_dict = {}
+        exec(
+            function_source,
+            {"__builtins__": SAFE_TOOL_BUILTINS, "Role": Role, "HR": HR},
+            local_dict,
+        )
+        return local_dict[function_name]
+
+    def normalize_definition(self, instruction):
+        if "function" in instruction:
+            function = instruction["function"]
+            name = function["name"]
+            description = function.get("description", "")
+            parameters = function.get("parameters", {"type": "object", "properties": {}})
+            code = instruction["code"]
+            aliases = tuple(instruction.get("aliases", ()))
+        elif "name" in instruction:
+            name = instruction["name"]
+            description = instruction.get("description", "")
+            parameters = instruction.get("parameters", {"type": "object", "properties": {}})
+            code = instruction["code"]
+            aliases = tuple(instruction.get("aliases", ()))
+        else:
+            name = instruction["code_name"]
+            args = instruction.get("args")
+            if not isinstance(args, list):
+                raise ValueError("Tool args must be a list of objects with name fields.")
+            properties = {}
+            for arg in args:
+                if not isinstance(arg, dict) or not isinstance(arg.get("name"), str):
+                    raise ValueError("Tool args must be a list of objects with name fields.")
+                properties[arg["name"]] = {"type": "string"}
+            description = instruction.get("description", "")
+            parameters = {
+                "type": "object",
+                "properties": properties,
+                "required": list(properties),
+            }
+            code = instruction["code"]
+            aliases = tuple(instruction.get("aliases", ()))
+
+        required = parameters.get("required", [])
+        properties = parameters.get("properties", {})
+        if not isinstance(properties, dict) or not isinstance(required, list):
+            raise ValueError("Tool parameters must contain object properties and required list.")
+        required_arg_names = []
+        for arg_name in required:
+            if not isinstance(arg_name, str) or arg_name not in properties:
+                raise ValueError("Tool required args must be named properties.")
+            required_arg_names.append(arg_name)
+        arg_names = list(properties)
+
+        return name, description, parameters, arg_names, required_arg_names, code, aliases
+
+    def register_definition(self, instruction):
+        name, description, parameters, arg_names, required_arg_names, code, aliases = self.normalize_definition(instruction)
+        if name in self._tools:
+            raise ValueError(f"Tool '{name}' already exists.")
+        for alias in aliases:
+            self.validate_tool_name(alias)
+            if alias in self._aliases or alias in self._tools:
+                raise ValueError(f"Tool alias '{alias}' already exists.")
+        func = self.compile_tool(name, arg_names, required_arg_names, code)
+        tool = ToolDefinition(
+            name=name,
+            description=description,
+            parameters=parameters,
+            args=arg_names,
+            required_args=required_arg_names,
+            func=func,
+            aliases=aliases,
+        )
+        openai_name = tool.openai_name
+        if openai_name != name and (openai_name in self._aliases or openai_name in self._tools):
+            raise ValueError(f"Tool OpenAI name '{openai_name}' already exists.")
+        self._tools[name] = tool
+        for alias in aliases:
+            self._aliases[alias] = name
+        if openai_name != name:
+            self._aliases[openai_name] = name
+        return tool
+
+    def execute(self, name, args, employee_dict):
+        try:
+            self.validate_tool_name(name)
+        except ValueError as e:
+            return f"Error: {e}"
+        resolved_name = self.resolve_name(name)
+        if resolved_name not in self._tools:
+            return f"Error: Tool '{name}' not found."
+        tool = self._tools[resolved_name]
+        missing_args = [arg_name for arg_name in tool.required_args if arg_name not in args]
+        if missing_args:
+            return f"Error: Missing args for tool '{name}': {missing_args}"
+        unexpected_args = [arg_name for arg_name in args if arg_name not in tool.args]
+        if unexpected_args:
+            return f"Error: Unexpected args for tool '{name}': {unexpected_args}"
+        result = tool.func(employee_dict=employee_dict, **args)
+        return f"Executed tool '{resolved_name}' with args {args}. Result: {result}"
+
+    def as_responses_tools(self):
+        return [tool.as_responses_tool() for tool in self._tools.values()]
+
+    def as_chat_completion_tools(self):
+        return [tool.as_chat_completion_tool() for tool in self._tools.values()]
+
+
+tool_registry = ToolRegistry()
 
 
 def interact(self, model, sender, message):
@@ -108,82 +298,31 @@ class Role:
 
 
 class System(Role):
-    def __init__(self, employee_dict=None):
+    def __init__(self, employee_dict=None, registry=None):
         self.name = "System"
-        self.template = "As the System, you can parse JSON blobs and store escape codes, as well as execute them when required."
+        self.template = "As the System, you can parse JSON blobs and store trusted tools, as well as execute them when required."
         self.conversation_history = {}
         self.temperature = 0.1 * random.randint(1, 9)
         self.max_tokens = random.randint(250, 400)
         self.employee_dict = employee_dict if employee_dict is not None else {}
-
-    def compile_escape_code(self, code_name, arg_names, code):
-        if not code_name.isidentifier():
-            raise ValueError(f"Invalid escape code name: {code_name}")
-        for arg_name in arg_names:
-            if not arg_name.isidentifier():
-                raise ValueError(f"Invalid escape code argument name: {arg_name}")
-
-        parameters = arg_names + ["employee_dict"]
-        indented_code = "\n".join(
-            f"    {line}" if line.strip() else "" for line in code.splitlines()
-        )
-        if not indented_code:
-            indented_code = "    pass"
-        function_name = f"_escape_{code_name}"
-        function_source = f"def {function_name}({', '.join(parameters)}):\n{indented_code}"
-        local_dict = {}
-        exec(
-            function_source,
-            {"__builtins__": SAFE_ESCAPE_BUILTINS, "Role": Role, "HR": HR},
-            local_dict,
-        )
-        return local_dict[function_name]
+        self.tools = registry if registry is not None else tool_registry
 
     def handle_instruction(self, instruction, trusted=False):
         if not isinstance(instruction, dict):
             return "Error: JSON instruction must be an object."
 
-        if "code_name" in instruction:
+        if "code_name" in instruction or ("code" in instruction and ("name" in instruction or "function" in instruction)):
             if not trusted:
-                return "Error: Escape code definitions can only be loaded from trusted preload files."
-            code_name = instruction["code_name"]
-            args = instruction.get("args")
-            if not isinstance(args, list):
-                return "Error: Escape code args must be a list of objects with name fields."
-            arg_names = []
-            for arg in args:
-                if not isinstance(arg, dict) or not isinstance(arg.get("name"), str):
-                    return "Error: Escape code args must be a list of objects with name fields."
-                arg_names.append(arg["name"])
-            escape_codes[code_name] = {
-                "args": arg_names,
-                "func": self.compile_escape_code(
-                    code_name, arg_names, instruction["code"]
-                ),
-            }
-            return f"Stored escape code '{code_name}' with args {arg_names}."
+                return "Error: Tool definitions can only be loaded from trusted tool files."
+            tool = self.tools.register_definition(instruction)
+            return f"Stored tool '{tool.name}' with args {tool.args}."
         elif "exec" in instruction:
-            code_name = instruction["exec"]
+            tool_name = instruction["exec"]
             args = instruction.get("args", {})
             if not isinstance(args, dict):
-                return "Error: Escape code args must be an object."
-            if code_name in escape_codes:
-                escape_code = escape_codes[code_name]
-                missing_args = [
-                    arg_name
-                    for arg_name in escape_code["args"]
-                    if arg_name not in args
-                ]
-                if missing_args:
-                    return f"Error: Missing args for escape code '{code_name}': {missing_args}"
-                result = escape_code["func"](
-                    **args,
-                    employee_dict=self.employee_dict,
-                )
-                return f"Executed escape code '{code_name}' with args {args}. Result: {result}"
-
-            return f"Error: Escape code '{code_name}' not found."
-        return "Error: JSON instruction must include code_name or exec."
+                return "Error: Tool args must be an object."
+            return self.tools.execute(tool_name, args, self.employee_dict)
+        return "Error: JSON instruction must include a tool definition or exec."
 
     def interact(self, prompt, trusted=False):
         print(colored(f"\n---\n// {self.name}\n{prompt}\n---\n", "grey"))
@@ -210,7 +349,7 @@ class System(Role):
 class Ops(Role):
     def __init__(self, employee_dict):
         role_description = """You are OPs for an AI powered organization."""
-        group_template_additions = """You are part of the Operations group.Members of this group recognize when other organization members need escape codes executed and send the appropriate escape code. You can also request new code from the Software Engineer who will create escape codes. To execute code, you send a JSON blob on a new line. You will recognize when other organization members need escape codes executed and will send the appropriate escape code, the format is a JSON object: {"exec":"escape_code_name_here", "args":{"string_var":"string", "numeric_var":123}})"""
+        group_template_additions = """You are part of the Operations group. Members of this group oversee whether the agent environment is operating successfully. Tools are available to agents through a concise registry; to request a tool, send a JSON blob on a new line in the format: {"exec":"namespace.tool_name", "args":{"string_var":"string", "numeric_var":123}}."""
         super().__init__(
             self.__class__.__name__, role_description, employee_dict, group_template_additions
         )
@@ -237,8 +376,8 @@ class Angel(Role):
 
 class SoftwareEngineer(Role):
     def __init__(self, employee_dict):
-        template = """As a Software Engineer (SE), you are responsible for designing, developing, and maintaining software applications. You primarily create escape codes when requested by others in your organization."""
-        group_template_additions = """You are part of the Engineering group. To create an escape code, on a newline write a JSON object with the fields: code_name, args, and code. The code_name is the name of the escape code, the args are a list of objects which name the parameter the code will receive, the code must be a valid python function that accepts the parameters. For example, to create an escape code that fetches a URL, you may post on a newline a JSON blob like {"code_name": "add_100", "args":[{"name":"value"}], "code":"return 100+value"}"""
+        template = """As a Software Engineer (SE), you are responsible for designing, developing, and maintaining software applications. You primarily propose trusted tools when requested by others in your organization."""
+        group_template_additions = """You are part of the Engineering group. Tools are trusted, repo-loaded functions described by namespaced OpenAI-compatible metadata. Propose tool behavior in plain language; do not assume untrusted chat output can define executable tools directly."""
         super().__init__(self.__class__.__name__, template, employee_dict, group_template_additions)
 
     def interact(self, sender, prompt):
@@ -254,7 +393,7 @@ class Human(Role):
         return input(f"{self.name}: ")
 
 
-def parse_escape_code(s):
+def parse_tool_instruction(s):
     decoder = json.JSONDecoder()
     for idx, char in enumerate(s):
         if char not in "{[":
@@ -267,16 +406,17 @@ def parse_escape_code(s):
     return None
 
 
-def preload(system, yaml_file_path=None):
-    yaml_file_path = yaml_file_path or Path(__file__).with_name("preload.yaml")
-    with open(yaml_file_path, 'r') as file:
+def load_tools(system, yaml_file_path=None):
+    yaml_file_path = yaml_file_path or Path(__file__).with_name("tools.yaml")
+    with open(yaml_file_path, "r", encoding="utf-8") as file:
         yaml_content = yaml.safe_load(file)
 
-    # Add escape codes for HR
+    if not isinstance(yaml_content, list):
+        raise ValueError("Tool file must contain a list of tool definitions.")
+
     for obj in yaml_content:
         system_response = system.interact(json.dumps(obj), trusted=True)
         print(colored(f"System: {system_response}", "blue"))
-
 
 def build_employee_dict():
     employee_dict = {}
@@ -292,7 +432,7 @@ def build_employee_dict():
 def run_simulation(initial_message=None, max_turns=None):
     employee_dict = build_employee_dict()
     system = System(employee_dict)
-    preload(system)
+    load_tools(system)
     last_receiver = employee_dict["CEO"]
     receiver = last_receiver
     last_response = (
@@ -315,10 +455,10 @@ def run_simulation(initial_message=None, max_turns=None):
                     receiver = new_receiver
                     break
 
-        escape_code = parse_escape_code(last_response)
-        if escape_code is not None and escape_code != "":
+        tool_instruction = parse_tool_instruction(last_response)
+        if tool_instruction is not None and tool_instruction != "":
             try:
-                system_response = system.interact(escape_code)
+                system_response = system.interact(tool_instruction)
                 print(colored(f"System: {system_response}", "blue"))
                 if system_response is not None and system_response != "":
                     employee_dict["Ops"].update_group_conversations({"role": "system", "content": system_response})

@@ -1,16 +1,19 @@
 ---
 name: robits-runtime
-description: Work on the Robits Python organization-simulation runtime, including role orchestration, escape-code preload/execution, JSON extraction from model responses, OpenAI-compatible model configuration, and non-interactive smoke validation.
+description: Work on the Robits Python organization-simulation runtime, including role orchestration, trusted tool loading/execution, JSON extraction from model responses, OpenAI-compatible Responses or chat model configuration, scheduling, and non-interactive smoke validation.
 ---
 
 # Robits Runtime
 
 ## Process
 
-1. Inspect `main.py`, `preload.yaml`, and `tests/test_runtime.py` before changing runtime behavior.
+1. Inspect `main.py`, `tools.yaml`, and `tests/test_runtime.py` before changing runtime behavior.
 2. Preserve support for OpenAI-compatible endpoints through environment variables; keep machine-specific endpoint and model names out of committed docs unless expressed generically.
-3. Treat escape-code handling as a high-risk path because model output is parsed and executed.
-4. Prefer focused tests around parsing, preload, and execution before relying on a live model smoke test.
+3. Treat tool execution as a high-risk path because model output can request side effects.
+4. Keep trusted tool definition loading separate from untrusted model output.
+5. Prefer focused tests around parsing, tool loading, and execution before relying on a live model smoke test.
+6. For Responses API work, test function-call routing with fake response items before using a live endpoint.
+7. For scheduling work, prefer deterministic time-share behavior with injected or seeded schedulers before adding parallel execution.
 
 ## Validation
 
@@ -21,4 +24,4 @@ description: Work on the Robits Python organization-simulation runtime, includin
 ## References
 
 - Read `resources/runtime-architecture.md` for the current runtime shape and known boundaries.
-- Use `assets/create-role-message.json` as a minimal escape-code execution payload.
+- Use `assets/create-role-message.json` as a minimal tool execution payload.
