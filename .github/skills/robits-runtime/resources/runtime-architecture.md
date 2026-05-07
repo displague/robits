@@ -10,6 +10,8 @@
 - `parse_tool_instruction` extracts the first valid JSON object or array from a model response.
 - `Session` owns a run ID, participants, turn count, system tool handling, and transcript entries.
 - `RoundRobinScheduler` provides deterministic time-share recipient selection when a message is not directed.
+- `RuntimeEventStream` emits headless session, routing, message, tool, and
+  thought events for tests and future TUI observers.
 - Role lifecycle state is tracked in memory for active, paused, and retired
   agents, with lifecycle events recording requester and approver context when a
   trusted lifecycle tool provides it.
@@ -23,6 +25,9 @@ Current runtime:
 - Trusted tool definitions are repo-owned and loaded from `tools.yaml`.
 - Runtime sessions record structured turn transcripts and enforce bounded turn counts.
 - Undirected recipient selection is deterministic round-robin scheduling; directed messages still take precedence.
+- Runtime observability is headless-first: an in-memory event stream can be
+  subscribed to during active sessions, and event records can be persisted to
+  SQLite for replay.
 
 Target runtime:
 

@@ -613,6 +613,57 @@ class TranscriptEntry:
 
 
 @dataclass
+class RuntimeEvent:
+    sequence: int
+    event_type: str
+    session_id: str
+    payload: dict
+    visibility: str = "public"
+    created_at: str = field(
+        default_factory=lambda: datetime.now(timezone.utc).isoformat(timespec="seconds")
+    )
+
+
+class RuntimeEventStream:
+    def __init__(self):
+        self._events = []
+        self._subscribers = []
+        self.subscriber_errors = []
+        self._sequence = 0
+
+    def subscribe(self, callback):
+        self._subscribers.append(callback)
+        return callback
+
+    def emit(self, event_type, session_id, payload=None, visibility="public"):
+        self._sequence += 1
+        event = RuntimeEvent(
+            sequence=self._sequence,
+            event_type=event_type,
+            session_id=session_id,
+            payload=payload or {},
+            visibility=visibility,
+        )
+        self._events.append(event)
+        for callback in list(self._subscribers):
+            try:
+                callback(event)
+            except Exception as e:
+                self.subscriber_errors.append(
+                    {
+                        "event_type": event_type,
+                        "error": str(e),
+                    }
+                )
+        return event
+
+    def events(self, visibility=None):
+        if visibility is None:
+            return list(self._events)
+        return [event for event in self._events if event.visibility == visibility]
+
+
+@dataclass
 class RoutedMessage:
     receiver: object
     prompt: str
@@ -644,16 +695,33 @@ class RoundRobinScheduler:
 
 
 class Session:
-    def __init__(self, participants=None, system=None, scheduler=None, run_id=None, max_turns=None):
+    def __init__(
+        self,
+        participants=None,
+        system=None,
+        scheduler=None,
+        run_id=None,
+        max_turns=None,
+        event_stream=None,
+    ):
         self.participants = participants if participants is not None else build_employee_dict()
         self.system = system if system is not None else System(self.participants)
         scheduler_names = list(self.participants)
         self.scheduler = scheduler if scheduler is not None else RoundRobinScheduler(scheduler_names)
         self.run_id = run_id or f"run-{uuid4()}"
         self.max_turns = max_turns
+        self.event_stream = event_stream if event_stream is not None else RuntimeEventStream()
         self.transcript = []
         self.turns_completed = 0
         self.last_receiver = self.participants.get("CEO") or next(iter(self.participants.values()))
+        self.event_stream.emit(
+            "session.created",
+            self.run_id,
+            {
+                "participants": list(self.participants),
+                "max_turns": self.max_turns,
+            },
+        )
 
     def route_message(self, message, last_receiver_name=None):
         prompt_split = message.split(",", 1) if isinstance(message, str) else []
@@ -662,9 +730,25 @@ class Session:
             if receiver_name in self.participants:
                 print(colored(f"// Directed to {receiver_name}", "grey"))
                 self.scheduler.observe(receiver_name)
+                self.event_stream.emit(
+                    "message.routed",
+                    self.run_id,
+                    {
+                        "receiver": receiver_name,
+                        "directed": True,
+                    },
+                )
                 return RoutedMessage(self.participants[receiver_name], prompt_split[1].strip(), True)
 
         receiver_name = self.scheduler.next(last_receiver_name)
+        self.event_stream.emit(
+            "message.routed",
+            self.run_id,
+            {
+                "receiver": receiver_name,
+                "directed": False,
+            },
+        )
         return RoutedMessage(self.participants[receiver_name], message, False)
 
     def process_tool_instruction(self, message):
@@ -676,6 +760,14 @@ class Session:
 
         system_response = self.system.interact(tool_instruction)
         print(colored(f"System: {system_response}", "blue"))
+        self.event_stream.emit(
+            "tool.executed",
+            self.run_id,
+            {
+                "instruction": tool_instruction,
+                "response": system_response,
+            },
+        )
         if system_response is not None and system_response != "" and "Ops" in self.participants:
             ops = self.participants["Ops"]
             if hasattr(ops, "update_group_conversations"):
@@ -694,7 +786,29 @@ class Session:
         )
         self.transcript.append(entry)
         self.turns_completed += 1
+        self.event_stream.emit(
+            "message.recorded",
+            self.run_id,
+            {
+                "turn": entry.turn,
+                "sender": entry.sender,
+                "receiver": entry.receiver,
+                "directed": entry.directed,
+                "system_event_count": len(entry.system_events),
+            },
+        )
         return entry
+
+    def record_thought(self, agent_name, content, visibility="private"):
+        return self.event_stream.emit(
+            "thought.recorded",
+            self.run_id,
+            {
+                "agent": agent_name,
+                "content": content,
+            },
+            visibility=visibility,
+        )
 
     def sync_scheduler_participants(self):
         for name in self.participants:
@@ -733,6 +847,13 @@ class Session:
         while effective_max_turns is None or self.turns_completed < effective_max_turns:
             last_response = self.step(last_response)
 
+        self.event_stream.emit(
+            "session.completed",
+            self.run_id,
+            {
+                "turns_completed": self.turns_completed,
+            },
+        )
         return self
 
 

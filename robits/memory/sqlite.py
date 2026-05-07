@@ -201,6 +201,17 @@ class SQLiteMemoryStore:
                     ON DELETE CASCADE
             );
 
+            CREATE TABLE IF NOT EXISTS runtime_events (
+                event_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_id TEXT NOT NULL,
+                sequence INTEGER,
+                event_type TEXT NOT NULL,
+                visibility TEXT NOT NULL DEFAULT 'public',
+                payload_json TEXT NOT NULL DEFAULT '{}',
+                created_at TEXT NOT NULL,
+                FOREIGN KEY (session_id) REFERENCES sessions(session_id)
+            );
+
             CREATE VIRTUAL TABLE IF NOT EXISTS memory_fts USING fts5(
                 kind UNINDEXED,
                 record_id UNINDEXED,
@@ -223,6 +234,8 @@ class SQLiteMemoryStore:
             CREATE INDEX IF NOT EXISTS idx_memory_digests_agent ON memory_digests(agent_id);
             CREATE INDEX IF NOT EXISTS idx_memory_digest_sources_digest
                 ON memory_digest_sources(digest_id);
+            CREATE INDEX IF NOT EXISTS idx_runtime_events_session ON runtime_events(session_id);
+            CREATE INDEX IF NOT EXISTS idx_runtime_events_type ON runtime_events(event_type);
             """
         )
         self.connection.commit()
@@ -664,6 +677,73 @@ class SQLiteMemoryStore:
                 content,
             )
         return digest_id
+
+    def append_runtime_event(
+        self,
+        session_id,
+        event_type,
+        payload=None,
+        visibility="public",
+        sequence=None,
+        created_at=None,
+    ):
+        timestamp = created_at or _utc_now()
+        cursor = self.connection.execute(
+            """
+            INSERT INTO runtime_events(
+                session_id, sequence, event_type, visibility, payload_json, created_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (
+                session_id,
+                sequence,
+                event_type,
+                visibility,
+                _json_dumps(payload),
+                timestamp,
+            ),
+        )
+        self.connection.commit()
+        return cursor.lastrowid
+
+    def append_runtime_event_object(self, event):
+        return self.append_runtime_event(
+            event.session_id,
+            event.event_type,
+            payload=event.payload,
+            visibility=event.visibility,
+            sequence=event.sequence,
+            created_at=event.created_at,
+        )
+
+    def list_runtime_events(
+        self,
+        session_id=None,
+        event_type=None,
+        visibility=None,
+        limit=100,
+    ):
+        clauses = []
+        params: list[Any] = []
+        for column, value in (
+            ("session_id", session_id),
+            ("event_type", event_type),
+            ("visibility", visibility),
+        ):
+            if value is not None:
+                clauses.append(f"{column} = ?")
+                params.append(value)
+        where = "WHERE " + " AND ".join(clauses) if clauses else ""
+        return self._rows(
+            f"""
+            SELECT * FROM runtime_events
+            {where}
+            ORDER BY COALESCE(sequence, event_id), event_id
+            LIMIT ?
+            """,
+            params + [limit],
+        )
 
     def get_memory_digest(self, digest_id):
         row = self.connection.execute(

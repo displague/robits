@@ -12,9 +12,10 @@ description: Work on the Robits Python organization-simulation runtime, includin
 3. Treat tool execution as a high-risk path because model output can request side effects.
 4. Keep trusted tool definition loading separate from untrusted model output.
 5. Preserve `org.create_role` compatibility while keeping HR lifecycle state transitions explicit.
-6. Prefer focused tests around parsing, tool loading, lifecycle, and execution before relying on a live model smoke test.
-7. For Responses API work, test function-call routing with fake response items before using a live endpoint.
-8. For scheduling work, keep `Session` and `RoundRobinScheduler` unit-testable with fake roles before adding parallel execution.
+6. Keep observability headless-first; tests should assert emitted events without requiring a terminal UI.
+7. Prefer focused tests around parsing, tool loading, lifecycle, observability, and execution before relying on a live model smoke test.
+8. For Responses API work, test function-call routing with fake response items before using a live endpoint.
+9. For scheduling work, keep `Session` and `RoundRobinScheduler` unit-testable with fake roles before adding parallel execution.
 
 ## Validation
 

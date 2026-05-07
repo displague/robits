@@ -43,6 +43,7 @@ class SQLiteMemoryStoreTests(unittest.TestCase):
         self.assertIn("memory_entries", tables)
         self.assertIn("memory_digests", tables)
         self.assertIn("memory_digest_sources", tables)
+        self.assertIn("runtime_events", tables)
         self.assertIn("memory_fts", tables)
 
     def test_append_and_lookup_messages_by_session_and_agent(self):
@@ -397,6 +398,27 @@ class SQLiteMemoryStoreTests(unittest.TestCase):
                 "Ambiguous legacy digest.",
                 agent_id="SE",
             )
+
+    def test_runtime_events_can_be_persisted_and_filtered(self):
+        store = self.seed_store()
+
+        event_id = store.append_runtime_event(
+            "session-1",
+            "thought.recorded",
+            payload={"agent": "SE", "content": "Private note."},
+            visibility="private",
+            sequence=1,
+            created_at="2026-05-07T10:00:00+00:00",
+        )
+
+        events = store.list_runtime_events(
+            session_id="session-1",
+            event_type="thought.recorded",
+            visibility="private",
+        )
+
+        self.assertEqual(events[0]["event_id"], event_id)
+        self.assertEqual(events[0]["payload_json"], '{"agent": "SE", "content": "Private note."}')
 
 
 if __name__ == "__main__":

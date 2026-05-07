@@ -14,6 +14,7 @@ Core tables:
 - `memory_entries`: general memory records that are not compacted digests.
 - `memory_digests`: compacted memory artifacts with prompt version, time range, and retrieval filters.
 - `memory_digest_sources`: ordered source links from a digest back to raw records.
+- `runtime_events`: headless observability events for live-session replay or TUI readers.
 - `memory_fts`: FTS5 index over message, thought, tool-result, memory-entry, and memory-digest content.
 
 Repository API:
@@ -30,6 +31,9 @@ Repository API:
 - `get_memory_digest`
 - `get_memory_digest_sources`
 - `expand_memory_digest_sources`
+- `append_runtime_event`
+- `append_runtime_event_object`
+- `list_runtime_events`
 - `list_todos`
 - `list_messages`
 - `list_agent_records`
