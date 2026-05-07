@@ -547,6 +547,8 @@ class SQLiteMemoryStore:
         created_at=None,
         metadata=None,
     ):
+        if kind == "memory_digest":
+            raise ValueError("Use append_memory_digest for compacted memory artifacts.")
         timestamp = created_at or _utc_now()
         cursor = self.connection.execute(
             """
@@ -604,65 +606,63 @@ class SQLiteMemoryStore:
     ):
         if not source_refs:
             raise ValueError("Memory digest requires at least one source reference.")
+        normalized_sources = self._normalize_digest_source_refs(source_refs)
         timestamp = created_at or _utc_now()
-        cursor = self.connection.execute(
-            """
-            INSERT INTO memory_digests(
-                agent_id, session_id, content, prompt_version, source_start_at,
-                source_end_at, relationship_type, conversation_type, source,
-                created_at, metadata_json
-            )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                agent_id,
-                session_id,
-                content,
-                prompt_version,
-                source_start_at,
-                source_end_at,
-                relationship_type,
-                conversation_type,
-                source,
-                timestamp,
-                _json_dumps(metadata),
-            ),
-        )
-        digest_id = cursor.lastrowid
-        for position, source_ref in enumerate(source_refs):
-            source_table = source_ref["source_table"]
-            source_id = str(source_ref["source_id"])
-            self._validate_source_table(source_table)
-            self.connection.execute(
+        with self.connection:
+            cursor = self.connection.execute(
                 """
-                INSERT INTO memory_digest_sources(
-                    digest_id, source_table, source_id, source_created_at,
-                    position, metadata_json
+                INSERT INTO memory_digests(
+                    agent_id, session_id, content, prompt_version, source_start_at,
+                    source_end_at, relationship_type, conversation_type, source,
+                    created_at, metadata_json
                 )
-                VALUES (?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
-                    digest_id,
-                    source_table,
-                    source_id,
-                    source_ref.get("source_created_at"),
-                    position,
-                    _json_dumps(source_ref.get("metadata")),
+                    agent_id,
+                    session_id,
+                    content,
+                    prompt_version,
+                    source_start_at,
+                    source_end_at,
+                    relationship_type,
+                    conversation_type,
+                    source,
+                    timestamp,
+                    _json_dumps(metadata),
                 ),
             )
-        self._index(
-            "memory_digest",
-            digest_id,
-            agent_id,
-            None,
-            session_id,
-            source,
-            relationship_type,
-            conversation_type,
-            timestamp,
-            content,
-        )
-        self.connection.commit()
+            digest_id = cursor.lastrowid
+            for position, source_ref in enumerate(normalized_sources):
+                self.connection.execute(
+                    """
+                    INSERT INTO memory_digest_sources(
+                        digest_id, source_table, source_id, source_created_at,
+                        position, metadata_json
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        digest_id,
+                        source_ref["source_table"],
+                        source_ref["source_id"],
+                        source_ref.get("source_created_at"),
+                        position,
+                        _json_dumps(source_ref.get("metadata")),
+                    ),
+                )
+            self._index(
+                "memory_digest",
+                digest_id,
+                agent_id,
+                None,
+                session_id,
+                source,
+                relationship_type,
+                conversation_type,
+                timestamp,
+                content,
+            )
         return digest_id
 
     def get_memory_digest(self, digest_id):
@@ -866,6 +866,26 @@ class SQLiteMemoryStore:
             "memory_digests",
         }:
             raise ValueError(f"Unsupported memory digest source table: {source_table}")
+
+    def _normalize_digest_source_refs(self, source_refs):
+        normalized = []
+        for source_ref in source_refs:
+            if "source_table" not in source_ref or "source_id" not in source_ref:
+                raise ValueError("Memory digest sources require source_table and source_id.")
+            source_table = source_ref["source_table"]
+            self._validate_source_table(source_table)
+            metadata = source_ref.get("metadata")
+            if metadata is not None and not isinstance(metadata, dict):
+                raise ValueError("Memory digest source metadata must be an object.")
+            normalized.append(
+                {
+                    "source_table": source_table,
+                    "source_id": str(source_ref["source_id"]),
+                    "source_created_at": source_ref.get("source_created_at"),
+                    "metadata": metadata,
+                }
+            )
+        return normalized
 
     def _fetch_source_record(self, source_table, source_id):
         self._validate_source_table(source_table)

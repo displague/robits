@@ -11,10 +11,10 @@ Core tables:
 - `thoughts`: private inner-monologue records.
 - `todos`: agent-owned commitments and side-project tasks.
 - `tool_calls`: requested or completed tool calls, including result content.
-- `memory_entries`: general memory records and future memory digests with source links.
+- `memory_entries`: general memory records that are not compacted digests.
 - `memory_digests`: compacted memory artifacts with prompt version, time range, and retrieval filters.
 - `memory_digest_sources`: ordered source links from a digest back to raw records.
-- `memory_fts`: FTS5 index over message, thought, tool-result, and memory-entry content.
+- `memory_fts`: FTS5 index over message, thought, tool-result, memory-entry, and memory-digest content.
 
 Repository API:
 
