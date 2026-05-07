@@ -11,20 +11,74 @@
       role_description:
         type: string
         description: The responsibilities and purpose of the new role.
+      requested_by:
+        type: string
+        description: The agent or human requesting the lifecycle change.
+      approved_by:
+        type: string
+        description: The agent or human approving the lifecycle change.
     required:
       - role_name
       - role_description
   code: |
-    if role_name not in employee_dict:
-        if len(employee_dict) < HR.max_organization_members:
-            new_role = Role(
-                role_name,
-                role_description,
-                employee_dict
-            )
-            employee_dict[role_name] = new_role
-            return f"Created a new role: {role_name}"
-        else:
-            return f"Error: The organization has reached its maximum size of {HR.max_organization_members} members."
-    else:
-        return f"Error: Role '{role_name}' already exists."
+    return create_lifecycle_role(
+        employee_dict,
+        role_name,
+        role_description,
+        requested_by=requested_by,
+        approved_by=approved_by,
+    )
+- name: org.pause_role
+  description: Pause an active role in the organization.
+  parameters:
+    type: object
+    properties:
+      role_name:
+        type: string
+        description: The name of the role to pause.
+      requested_by:
+        type: string
+        description: The agent or human requesting the lifecycle change.
+      approved_by:
+        type: string
+        description: The agent or human approving the lifecycle change.
+      reason:
+        type: string
+        description: The reason for pausing the role.
+    required:
+      - role_name
+  code: |
+    return pause_lifecycle_role(
+        employee_dict,
+        role_name,
+        requested_by=requested_by,
+        approved_by=approved_by,
+        reason=reason,
+    )
+- name: org.retire_role
+  description: Retire a role in the organization.
+  parameters:
+    type: object
+    properties:
+      role_name:
+        type: string
+        description: The name of the role to retire.
+      requested_by:
+        type: string
+        description: The agent or human requesting the lifecycle change.
+      approved_by:
+        type: string
+        description: The agent or human approving the lifecycle change.
+      reason:
+        type: string
+        description: The reason for retiring the role.
+    required:
+      - role_name
+  code: |
+    return retire_lifecycle_role(
+        employee_dict,
+        role_name,
+        requested_by=requested_by,
+        approved_by=approved_by,
+        reason=reason,
+    )
