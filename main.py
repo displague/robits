@@ -487,6 +487,8 @@ class Session:
         return RoutedMessage(self.participants[receiver_name], message, False)
 
     def process_tool_instruction(self, message):
+        if not isinstance(message, str) or message == "":
+            return []
         tool_instruction = parse_tool_instruction(message)
         if tool_instruction is None or tool_instruction == "":
             return []
@@ -544,6 +546,8 @@ class Session:
             if initial_message is not None
             else self.last_receiver.interact()
         )
+        if last_response is None:
+            last_response = ""
 
         while effective_max_turns is None or self.turns_completed < effective_max_turns:
             last_response = self.step(last_response)

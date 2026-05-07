@@ -501,6 +501,22 @@ class RuntimeTests(unittest.TestCase):
         self.assertEqual(session.turns_completed, 1)
         self.assertEqual(session.transcript[0].response, "")
 
+    def test_none_initial_response_is_normalized_for_session_step(self):
+        participants = build_fake_participants()
+        participants["CEO"] = FakeRole("CEO", [None])
+        session = main.Session(participants=participants, run_id="session-1")
+        with redirect_stdout(StringIO()):
+            session.run(max_turns=1)
+
+        self.assertEqual(session.turns_completed, 1)
+        self.assertEqual(session.transcript[0].prompt, "")
+
+    def test_non_string_message_does_not_parse_tool_instruction(self):
+        session = main.Session(participants=build_fake_participants(), run_id="session-1")
+
+        self.assertEqual(session.process_tool_instruction(None), [])
+        self.assertEqual(session.process_tool_instruction({"exec": "org.create_role"}), [])
+
     def test_tool_execution_records_system_event_and_updates_scheduler(self):
         participants = build_fake_participants()
         participants["Ops"] = FakeRole("Ops", ["done"])
