@@ -1,6 +1,6 @@
-# AI-Powered Organization Simulation 🤖🏢
+# AI-Powered Organization Simulation
 
-Welcome to the AI-Powered Organization Simulation project! This project is a fun and interactive way to explore how an organization with AI-driven roles can communicate and work together. It's a great starting point for understanding the possibilities of integrating AI into various aspects of an organization. 🚀💼
+Welcome to the AI-Powered Organization Simulation project. This project explores how an organization with AI-driven roles can communicate and work together.
 
 ## Table of Contents 📚
 
@@ -8,7 +8,9 @@ Welcome to the AI-Powered Organization Simulation project! This project is a fun
 - [Roles](#roles)
 - [How It Works](#how-it-works)
 - [Installation](#installation)
+- [Configuration](#configuration)
 - [Running the Simulation](#running-the-simulation)
+- [Testing](#testing)
 - [Contributing](#contributing)
 - [Future Directions](#future-directions)
 
@@ -29,15 +31,26 @@ The organization has the following roles:
 
 The simulation runs in a loop, where the organization members communicate with each other through messages. The System role can parse JSON blobs, store escape codes, and execute them when required. The code also contains a function to parse escape codes from a response text.
 
-## Installation 🖥️
+## Installation
 
 To install the required packages for this project, run:
 
 ```bash
-pip install openai termcolor
+pip install -r requirements.txt
 ```
 
-## Running the Simulation 🎮
+## Configuration
+
+The runtime uses the OpenAI Python client and can target OpenAI or an OpenAI-compatible local endpoint.
+
+Relevant environment variables:
+
+- `OPENAI_API_KEY`: API key. Local compatible servers may accept any non-empty value.
+- `OPENAI_BASE_URL` or `OPENAI_API_BASE`: optional compatible endpoint URL.
+- `ROBITS_MODEL` or `OPENAI_MODEL`: default chat model.
+- `ROBITS_CHEAP_MODEL` and `ROBITS_COSTLY_MODEL`: optional per-role overrides.
+
+## Running the Simulation
 
 To run the AI-Powered Organization Simulation:
 
@@ -45,6 +58,20 @@ To run the AI-Powered Organization Simulation:
    ```bash
    python main.py
    ```
+
+For non-interactive smoke checks, provide an initial prompt and turn limit:
+
+```bash
+python main.py --prompt "Ops, say hello to HR" --turns 1
+```
+
+## Testing
+
+The focused runtime tests do not call an external model service:
+
+```bash
+python -m unittest
+```
 
 ## Contributing 🤝
 

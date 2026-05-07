@@ -1,0 +1,7 @@
+{
+  "exec": "create_role",
+  "args": {
+    "role_name": "QA",
+    "role_description": "Tests the organization"
+  }
+}
