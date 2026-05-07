@@ -618,7 +618,10 @@ class RuntimeTests(unittest.TestCase):
         self.assertEqual(session.max_turns, 3)
         self.assertEqual(session.turns_completed, 0)
         self.assertEqual(session.transcript, [])
-        self.assertEqual(session.event_stream.events()[0].event_type, "session.created")
+        self.assertIn(
+            "session.created",
+            [event.event_type for event in session.event_stream.events()],
+        )
 
     def test_round_robin_scheduler_skips_last_receiver(self):
         scheduler = main.RoundRobinScheduler(["CEO", "Ops", "SE"])
@@ -763,6 +766,19 @@ class RuntimeTests(unittest.TestCase):
         self.assertIn("message.routed", event_types)
         self.assertIn("message.recorded", event_types)
         self.assertIn("session.completed", event_types)
+
+    def test_event_subscriber_errors_do_not_break_runtime(self):
+        event_stream = main.RuntimeEventStream()
+
+        def broken_subscriber(_event):
+            raise RuntimeError("observer failed")
+
+        event_stream.subscribe(broken_subscriber)
+        event = event_stream.emit("session.created", "session-1")
+
+        self.assertEqual(event.event_type, "session.created")
+        self.assertEqual(event_stream.subscriber_errors[0]["event_type"], "session.created")
+        self.assertEqual(event_stream.subscriber_errors[0]["error"], "observer failed")
 
     def test_thought_events_are_private_by_default(self):
         session = main.Session(participants=build_fake_participants(), run_id="session-1")

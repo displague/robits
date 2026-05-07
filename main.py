@@ -628,6 +628,7 @@ class RuntimeEventStream:
     def __init__(self):
         self._events = []
         self._subscribers = []
+        self.subscriber_errors = []
         self._sequence = 0
 
     def subscribe(self, callback):
@@ -645,7 +646,15 @@ class RuntimeEventStream:
         )
         self._events.append(event)
         for callback in list(self._subscribers):
-            callback(event)
+            try:
+                callback(event)
+            except Exception as e:
+                self.subscriber_errors.append(
+                    {
+                        "event_type": event_type,
+                        "error": str(e),
+                    }
+                )
         return event
 
     def events(self, visibility=None):
