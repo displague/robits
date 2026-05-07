@@ -38,17 +38,18 @@ Lifecycle states should include at least `proposed`, `active`, `paused`, and
 `retired`.
 
 HR owns lifecycle proposals and approvals. Operators own runtime health,
-availability, and environment coordination. Software engineers propose trusted
-tools and code changes. Every active agent may request tools, but executable
-tool definitions remain trusted runtime artifacts until a later permission model
-exists.
+availability, and environment coordination, with the COO as the accountable
+operator for organization-wide environment changes. Software engineers propose
+trusted tools and code changes. Every active agent may request tools, but
+executable tool definitions remain trusted runtime artifacts until a later
+permission model exists.
 
 The COO is the operational authority for changing the Robits environment itself.
 Software engineers may propose code, configuration, tool, or runtime changes.
 The COO coordinates when and how those changes are applied, including validation,
 rollout timing, safe restarts, and rollback. HR coordinates lifecycle safety so
 agent state, memories, active work, relationships, and commitments are preserved
-or intentionally migrated before an environment change interrupts an agent life.
+or intentionally migrated before an environment change interrupts an agent's life.
 The human CEO can observe, approve, or override self-modification policy.
 
 ### Sessions and Messages
