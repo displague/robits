@@ -164,6 +164,7 @@ class RuntimeTests(unittest.TestCase):
         self.assertEqual(event.lifecycle_state, "active")
         self.assertEqual(event.requested_by, "CEO")
         self.assertEqual(event.approved_by, "HR")
+        self.assertIn("+00:00", event.created_at)
 
     def test_create_role_rejects_duplicate_role(self):
         employee_dict = main.build_employee_dict()
@@ -273,6 +274,43 @@ class RuntimeTests(unittest.TestCase):
         self.assertEqual(qa.lifecycle_state, "retired")
         self.assertEqual([event.action for event in qa.lifecycle_events], ["create", "pause", "retire"])
         self.assertEqual(qa.lifecycle_events[-1].approved_by, "CEO")
+
+    def test_lifecycle_rejects_invalid_transitions_without_new_event(self):
+        employee_dict = main.build_employee_dict()
+        system = main.System(employee_dict)
+        with redirect_stdout(StringIO()):
+            main.load_tools(system)
+            system.interact(
+                json.dumps(
+                    {
+                        "exec": "org.create_role",
+                        "args": {
+                            "role_name": "QA",
+                            "role_description": "Tests the organization",
+                        },
+                    }
+                )
+            )
+            first_pause = system.interact(
+                json.dumps({"exec": "org.pause_role", "args": {"role_name": "QA"}})
+            )
+            second_pause = system.interact(
+                json.dumps({"exec": "org.pause_role", "args": {"role_name": "QA"}})
+            )
+            retire = system.interact(
+                json.dumps({"exec": "org.retire_role", "args": {"role_name": "QA"}})
+            )
+            retire_again = system.interact(
+                json.dumps({"exec": "org.retire_role", "args": {"role_name": "QA"}})
+            )
+
+        qa = employee_dict["QA"]
+
+        self.assertIn("paused", first_pause)
+        self.assertIn("Cannot pause", second_pause)
+        self.assertIn("retired", retire)
+        self.assertIn("Cannot retire", retire_again)
+        self.assertEqual([event.action for event in qa.lifecycle_events], ["create", "pause", "retire"])
 
     def test_tool_lifecycle_event_is_recorded_in_session_transcript(self):
         participants = build_fake_participants()

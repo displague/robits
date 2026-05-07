@@ -8,7 +8,7 @@ import os
 import json
 import re
 import yaml
-from datetime import datetime
+from datetime import datetime, timezone
 from termcolor import colored
 import argparse
 from pathlib import Path
@@ -255,7 +255,9 @@ class LifecycleEvent:
     requested_by: str | None = None
     approved_by: str | None = None
     reason: str | None = None
-    created_at: str = field(default_factory=lambda: datetime.now().isoformat(timespec="seconds"))
+    created_at: str = field(
+        default_factory=lambda: datetime.now(timezone.utc).isoformat(timespec="seconds")
+    )
 
 
 def validate_role_name(role_name):
@@ -345,6 +347,7 @@ def change_lifecycle_state(
     requested_by=None,
     approved_by=None,
     reason=None,
+    allowed_from=None,
 ):
     try:
         normalized_name = validate_role_name(role_name)
@@ -356,6 +359,13 @@ def change_lifecycle_state(
         return f"Error: Role '{normalized_name}' not found."
 
     role = employee_dict[normalized_name]
+    current_state = getattr(role, "lifecycle_state", "active")
+    if allowed_from is not None and current_state not in allowed_from:
+        allowed_text = ", ".join(allowed_from)
+        return (
+            f"Error: Cannot {action} role '{normalized_name}' from lifecycle "
+            f"state '{current_state}'. Expected one of: {allowed_text}."
+        )
     record_lifecycle_event(
         role,
         action=action,
@@ -384,6 +394,7 @@ def pause_lifecycle_role(
         requested_by=requested_by,
         approved_by=approved_by,
         reason=reason,
+        allowed_from=("active",),
     )
 
 
@@ -402,6 +413,7 @@ def retire_lifecycle_role(
         requested_by=requested_by,
         approved_by=approved_by,
         reason=reason,
+        allowed_from=("active", "paused"),
     )
 
 
