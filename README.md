@@ -71,9 +71,10 @@ visibility fields separating public transcript events from private thoughts.
 Agents can carry optional sandbox metadata. Default local runs keep sandboxing
 disabled and execute through the current runtime. When enabled, metadata names a
 backend plus a private per-agent workspace and a shared organization workspace.
-The current implementation includes a fakeable runtime abstraction for tests and
-future container or cluster backends; it does not require containers for unit
-tests.
+The runtime validates that an explicit configured backend matches the metadata
+before execution. The current implementation includes a fakeable runtime
+abstraction for tests and future container or cluster backends; it does not
+require containers for unit tests.
 
 ## Installation
 

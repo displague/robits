@@ -58,10 +58,9 @@ class SandboxExecutionResult:
 class FakeSandboxBackend:
     """Deterministic backend for tests and future container adapters."""
 
-    name = "fake"
-
-    def __init__(self, output="ok"):
+    def __init__(self, output="ok", name="fake"):
         self.output = output
+        self.name = name
         self.requests = []
 
     def execute(self, request):
@@ -77,7 +76,7 @@ class FakeSandboxBackend:
 
 class SandboxRuntime:
     def __init__(self, backend=None):
-        self.backend = backend if backend is not None else FakeSandboxBackend()
+        self.backend = backend
 
     def execute_tool(self, sandbox_metadata, tool_name, arguments=None):
         if sandbox_metadata is None or not sandbox_metadata.enabled:
@@ -86,6 +85,25 @@ class SandboxRuntime:
                 output="Sandbox disabled; execute in current runtime.",
                 backend="none",
                 agent_name=getattr(sandbox_metadata, "agent_name", ""),
+                tool_name=tool_name,
+            )
+        if self.backend is None:
+            return SandboxExecutionResult(
+                status="error",
+                output="Sandbox enabled but no backend is configured.",
+                backend="none",
+                agent_name=sandbox_metadata.agent_name,
+                tool_name=tool_name,
+            )
+        if sandbox_metadata.backend != self.backend.name:
+            return SandboxExecutionResult(
+                status="error",
+                output=(
+                    f"Sandbox backend mismatch: requested '{sandbox_metadata.backend}' "
+                    f"but configured '{self.backend.name}'."
+                ),
+                backend=self.backend.name,
+                agent_name=sandbox_metadata.agent_name,
                 tool_name=tool_name,
             )
         request = SandboxExecutionRequest(
