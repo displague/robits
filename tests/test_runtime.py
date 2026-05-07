@@ -208,10 +208,10 @@ class RuntimeTests(unittest.TestCase):
             main.load_tools(system)
 
         tools = main.tool_registry.as_responses_tools()
+        tool = next(tool for tool in tools if tool["name"] == "org__create_role")
 
-        self.assertEqual(tools[0]["type"], "function")
-        self.assertEqual(tools[0]["name"], "org__create_role")
-        self.assertEqual(tools[0]["parameters"]["required"], ["role_name", "role_description"])
+        self.assertEqual(tool["type"], "function")
+        self.assertEqual(tool["parameters"]["required"], ["role_name", "role_description"])
 
     def test_tool_registry_exposes_chat_completion_tool_metadata(self):
         system = main.System(main.build_employee_dict())
@@ -219,11 +219,13 @@ class RuntimeTests(unittest.TestCase):
             main.load_tools(system)
 
         tools = main.tool_registry.as_chat_completion_tools()
+        tool = next(
+            tool for tool in tools if tool["function"]["name"] == "org__create_role"
+        )
 
-        self.assertEqual(tools[0]["type"], "function")
-        self.assertEqual(tools[0]["function"]["name"], "org__create_role")
+        self.assertEqual(tool["type"], "function")
         self.assertEqual(
-            tools[0]["function"]["parameters"]["required"],
+            tool["function"]["parameters"]["required"],
             ["role_name", "role_description"],
         )
 
@@ -249,6 +251,62 @@ class RuntimeTests(unittest.TestCase):
         self.assertIn("Created a new role: QA", response)
         self.assertIn("QA", employee_dict)
 
+    def test_openai_tool_name_exec_resolves_tool(self):
+        employee_dict = main.build_employee_dict()
+        system = main.System(employee_dict)
+        with redirect_stdout(StringIO()):
+            main.load_tools(system)
+
+        with redirect_stdout(StringIO()):
+            response = system.interact(
+                json.dumps(
+                    {
+                        "exec": "org__create_role",
+                        "args": {
+                            "role_name": "QA",
+                            "role_description": "Tests the organization",
+                        },
+                    }
+                )
+            )
+
+        self.assertIn("Created a new role: QA", response)
+        self.assertIn("QA", employee_dict)
+
+    def test_optional_tool_property_can_be_supplied_or_omitted(self):
+        system = main.System(main.build_employee_dict())
+        with redirect_stdout(StringIO()):
+            response = system.interact(
+                json.dumps(
+                    {
+                        "name": "test.echo",
+                        "description": "Echo a required value with an optional suffix.",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {
+                                "value": {"type": "string"},
+                                "suffix": {"type": "string"},
+                            },
+                            "required": ["value"],
+                        },
+                        "code": "return value + (suffix or '')",
+                    }
+                ),
+                trusted=True,
+            )
+            omitted = system.interact(
+                json.dumps({"exec": "test.echo", "args": {"value": "a"}})
+            )
+            supplied = system.interact(
+                json.dumps(
+                    {"exec": "test.echo", "args": {"value": "a", "suffix": "b"}}
+                )
+            )
+
+        self.assertIn("Stored tool", response)
+        self.assertIn("Result: a", omitted)
+        self.assertIn("Result: ab", supplied)
+
     def test_duplicate_tool_name_is_rejected(self):
         system = main.System(main.build_employee_dict())
         with redirect_stdout(StringIO()):
@@ -272,6 +330,30 @@ class RuntimeTests(unittest.TestCase):
         self.assertIn("already exists", response)
         self.assertEqual(main.tool_registry.get("create_role").name, "org.create_role")
 
+    def test_invalid_tool_alias_is_rejected(self):
+        system = main.System(main.build_employee_dict())
+
+        with redirect_stdout(StringIO()):
+            response = system.interact(
+                json.dumps(
+                    {
+                        "name": "test.alias",
+                        "aliases": ["bad-alias"],
+                        "description": "Bad alias.",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {},
+                            "required": [],
+                        },
+                        "code": "return 'bad'",
+                    }
+                ),
+                trusted=True,
+            )
+
+        self.assertIn("Invalid tool name", response)
+        self.assertNotIn("test.alias", main.tool_registry)
+
     def test_invalid_qualified_exec_name_is_rejected(self):
         system = main.System(main.build_employee_dict())
 
@@ -286,6 +368,18 @@ class RuntimeTests(unittest.TestCase):
             )
 
         self.assertIn("Invalid tool name", response)
+
+    def test_load_tools_requires_list_file(self):
+        system = main.System(main.build_employee_dict())
+        with tempfile.NamedTemporaryFile("w", suffix=".yaml", delete=False) as handle:
+            handle.write("name: not-a-list\n")
+            path = handle.name
+
+        try:
+            with self.assertRaisesRegex(ValueError, "list of tool definitions"):
+                main.load_tools(system, path)
+        finally:
+            os.unlink(path)
 
 
 if __name__ == "__main__":

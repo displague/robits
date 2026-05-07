@@ -53,6 +53,7 @@ class ToolDefinition:
     description: str
     parameters: dict
     args: list[str]
+    required_args: list[str]
     func: object
     aliases: tuple[str, ...] = ()
 
@@ -104,13 +105,21 @@ class ToolRegistry:
         if not all(part.isidentifier() for part in parts):
             raise ValueError(f"Invalid tool name: {name}")
 
-    def compile_tool(self, name, arg_names, code):
+    def compile_tool(self, name, arg_names, required_arg_names, code):
         self.validate_tool_name(name)
+        for arg_name in required_arg_names:
+            if arg_name not in arg_names:
+                raise ValueError(f"Required tool argument is not defined: {arg_name}")
         for arg_name in arg_names:
             if not arg_name.isidentifier():
                 raise ValueError(f"Invalid tool argument name: {arg_name}")
+            if arg_name == "employee_dict":
+                raise ValueError("Tool argument name 'employee_dict' is reserved.")
 
-        parameters = arg_names + ["employee_dict"]
+        optional_arg_names = [arg_name for arg_name in arg_names if arg_name not in required_arg_names]
+        parameters = ["employee_dict"] + required_arg_names + [
+            f"{arg_name}=None" for arg_name in optional_arg_names
+        ]
         indented_code = "\n".join(
             f"    {line}" if line.strip() else "" for line in code.splitlines()
         )
@@ -163,33 +172,42 @@ class ToolRegistry:
         properties = parameters.get("properties", {})
         if not isinstance(properties, dict) or not isinstance(required, list):
             raise ValueError("Tool parameters must contain object properties and required list.")
-        arg_names = []
+        required_arg_names = []
         for arg_name in required:
             if not isinstance(arg_name, str) or arg_name not in properties:
                 raise ValueError("Tool required args must be named properties.")
-            arg_names.append(arg_name)
+            required_arg_names.append(arg_name)
+        arg_names = list(properties)
 
-        return name, description, parameters, arg_names, code, aliases
+        return name, description, parameters, arg_names, required_arg_names, code, aliases
 
     def register_definition(self, instruction):
-        name, description, parameters, arg_names, code, aliases = self.normalize_definition(instruction)
+        name, description, parameters, arg_names, required_arg_names, code, aliases = self.normalize_definition(instruction)
         if name in self._tools:
             raise ValueError(f"Tool '{name}' already exists.")
         for alias in aliases:
+            self.validate_tool_name(alias)
             if alias in self._aliases or alias in self._tools:
                 raise ValueError(f"Tool alias '{alias}' already exists.")
-        func = self.compile_tool(name, arg_names, code)
-        self._tools[name] = ToolDefinition(
+        func = self.compile_tool(name, arg_names, required_arg_names, code)
+        tool = ToolDefinition(
             name=name,
             description=description,
             parameters=parameters,
             args=arg_names,
+            required_args=required_arg_names,
             func=func,
             aliases=aliases,
         )
+        openai_name = tool.openai_name
+        if openai_name != name and (openai_name in self._aliases or openai_name in self._tools):
+            raise ValueError(f"Tool OpenAI name '{openai_name}' already exists.")
+        self._tools[name] = tool
         for alias in aliases:
             self._aliases[alias] = name
-        return self._tools[name]
+        if openai_name != name:
+            self._aliases[openai_name] = name
+        return tool
 
     def execute(self, name, args, employee_dict):
         try:
@@ -200,10 +218,13 @@ class ToolRegistry:
         if resolved_name not in self._tools:
             return f"Error: Tool '{name}' not found."
         tool = self._tools[resolved_name]
-        missing_args = [arg_name for arg_name in tool.args if arg_name not in args]
+        missing_args = [arg_name for arg_name in tool.required_args if arg_name not in args]
         if missing_args:
             return f"Error: Missing args for tool '{name}': {missing_args}"
-        result = tool.func(**args, employee_dict=employee_dict)
+        unexpected_args = [arg_name for arg_name in args if arg_name not in tool.args]
+        if unexpected_args:
+            return f"Error: Unexpected args for tool '{name}': {unexpected_args}"
+        result = tool.func(employee_dict=employee_dict, **args)
         return f"Executed tool '{resolved_name}' with args {args}. Result: {result}"
 
     def as_responses_tools(self):
@@ -387,8 +408,11 @@ def parse_tool_instruction(s):
 
 def load_tools(system, yaml_file_path=None):
     yaml_file_path = yaml_file_path or Path(__file__).with_name("tools.yaml")
-    with open(yaml_file_path, 'r') as file:
+    with open(yaml_file_path, "r", encoding="utf-8") as file:
         yaml_content = yaml.safe_load(file)
+
+    if not isinstance(yaml_content, list):
+        raise ValueError("Tool file must contain a list of tool definitions.")
 
     for obj in yaml_content:
         system_response = system.interact(json.dumps(obj), trusted=True)
