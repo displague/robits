@@ -33,6 +33,11 @@ The simulation runs in a session, where organization members communicate through
 
 The runtime can parse JSON tool instructions, load trusted tools from `tools.yaml`, and execute registered tools by name. Tools use namespaced identifiers such as `org.create_role`, with short aliases only where compatibility is useful.
 
+HR lifecycle tools keep role creation compatible while adding explicit states:
+`active`, `paused`, and `retired` roles record lifecycle events with optional
+requester, approver, and reason fields. `org.create_role` creates an active role;
+`org.pause_role` and `org.retire_role` change an existing role's lifecycle state.
+
 The target runtime direction is OpenAI-compatible tool calling through modern Responses-style loops: approved tools are exposed with JSON Schema metadata, the model may request function calls, the runtime executes those calls, and tool outputs are returned to the model without relying on ad hoc text parsing.
 
 See `docs/architecture-vision.md` for the staged runtime plan covering sessions, tools, SQLite-backed memory, memory digests, lifecycle, observability, TUI inspection, and local-model constraints.

@@ -91,6 +91,7 @@ class RuntimeTests(unittest.TestCase):
         self.assertIn("Created a new role: QA", response)
         self.assertIn("QA", employee_dict)
         self.assertIsInstance(employee_dict["QA"], main.Role)
+        self.assertEqual(employee_dict["QA"].lifecycle_state, "active")
 
     def test_system_accepts_json_instruction_arrays(self):
         employee_dict = main.build_employee_dict()
@@ -136,6 +137,168 @@ class RuntimeTests(unittest.TestCase):
 
         self.assertIn("Missing args", response)
         self.assertNotIn("QA", employee_dict)
+
+    def test_create_role_records_lifecycle_request_and_approval(self):
+        employee_dict = main.build_employee_dict()
+        system = main.System(employee_dict)
+        with redirect_stdout(StringIO()):
+            main.load_tools(system)
+            response = system.interact(
+                json.dumps(
+                    {
+                        "exec": "org.create_role",
+                        "args": {
+                            "role_name": "QA",
+                            "role_description": "Tests the organization",
+                            "requested_by": "CEO",
+                            "approved_by": "HR",
+                        },
+                    }
+                )
+            )
+
+        event = employee_dict["QA"].lifecycle_events[0]
+
+        self.assertIn("Created a new role: QA", response)
+        self.assertEqual(event.action, "create")
+        self.assertEqual(event.lifecycle_state, "active")
+        self.assertEqual(event.requested_by, "CEO")
+        self.assertEqual(event.approved_by, "HR")
+
+    def test_create_role_rejects_duplicate_role(self):
+        employee_dict = main.build_employee_dict()
+        system = main.System(employee_dict)
+        with redirect_stdout(StringIO()):
+            main.load_tools(system)
+            first = system.interact(
+                json.dumps(
+                    {
+                        "exec": "org.create_role",
+                        "args": {
+                            "role_name": "QA",
+                            "role_description": "Tests the organization",
+                        },
+                    }
+                )
+            )
+            duplicate = system.interact(
+                json.dumps(
+                    {
+                        "exec": "org.create_role",
+                        "args": {
+                            "role_name": "QA",
+                            "role_description": "Duplicate role",
+                        },
+                    }
+                )
+            )
+
+        self.assertIn("Created a new role: QA", first)
+        self.assertIn("already exists", duplicate)
+
+    def test_create_role_rejects_capacity_limit(self):
+        employee_dict = main.build_employee_dict()
+        system = main.System(employee_dict)
+        original_limit = main.HR.max_organization_members
+        main.HR.max_organization_members = len(employee_dict)
+        try:
+            with redirect_stdout(StringIO()):
+                main.load_tools(system)
+                response = system.interact(
+                    json.dumps(
+                        {
+                            "exec": "org.create_role",
+                            "args": {
+                                "role_name": "QA",
+                                "role_description": "Tests the organization",
+                            },
+                        }
+                    )
+                )
+        finally:
+            main.HR.max_organization_members = original_limit
+
+        self.assertIn("maximum size", response)
+        self.assertNotIn("QA", employee_dict)
+
+    def test_pause_and_retire_role_update_lifecycle_state(self):
+        employee_dict = main.build_employee_dict()
+        system = main.System(employee_dict)
+        with redirect_stdout(StringIO()):
+            main.load_tools(system)
+            system.interact(
+                json.dumps(
+                    {
+                        "exec": "org.create_role",
+                        "args": {
+                            "role_name": "QA",
+                            "role_description": "Tests the organization",
+                            "requested_by": "CEO",
+                            "approved_by": "HR",
+                        },
+                    }
+                )
+            )
+            pause_response = system.interact(
+                json.dumps(
+                    {
+                        "exec": "org.pause_role",
+                        "args": {
+                            "role_name": "QA",
+                            "requested_by": "HR",
+                            "approved_by": "HR",
+                            "reason": "Rest period",
+                        },
+                    }
+                )
+            )
+            retire_response = system.interact(
+                json.dumps(
+                    {
+                        "exec": "org.retire_role",
+                        "args": {
+                            "role_name": "QA",
+                            "requested_by": "HR",
+                            "approved_by": "CEO",
+                            "reason": "Assignment complete",
+                        },
+                    }
+                )
+            )
+
+        qa = employee_dict["QA"]
+
+        self.assertIn("paused", pause_response)
+        self.assertIn("retired", retire_response)
+        self.assertEqual(qa.lifecycle_state, "retired")
+        self.assertEqual([event.action for event in qa.lifecycle_events], ["create", "pause", "retire"])
+        self.assertEqual(qa.lifecycle_events[-1].approved_by, "CEO")
+
+    def test_tool_lifecycle_event_is_recorded_in_session_transcript(self):
+        participants = build_fake_participants()
+        participants["Ops"] = FakeRole("Ops", ["done"])
+        system = main.System(participants)
+        session = main.Session(participants=participants, system=system, run_id="session-1")
+        payload = json.dumps(
+            {
+                "exec": "org.create_role",
+                "args": {
+                    "role_name": "QA",
+                    "role_description": "Tests the organization",
+                    "requested_by": "CEO",
+                    "approved_by": "HR",
+                },
+            }
+        )
+
+        with redirect_stdout(StringIO()):
+            main.load_tools(system)
+            session.run(initial_message=payload, max_turns=1)
+
+        event_text = session.transcript[0].system_events[0]
+
+        self.assertIn("requested by CEO", event_text)
+        self.assertIn("approved by HR", event_text)
 
     def test_tool_definition_validates_args_shape(self):
         system = main.System(main.build_employee_dict())

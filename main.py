@@ -131,7 +131,14 @@ class ToolRegistry:
         local_dict = {}
         exec(
             function_source,
-            {"__builtins__": SAFE_TOOL_BUILTINS, "Role": Role, "HR": HR},
+            {
+                "__builtins__": SAFE_TOOL_BUILTINS,
+                "Role": Role,
+                "HR": HR,
+                "create_lifecycle_role": create_lifecycle_role,
+                "pause_lifecycle_role": pause_lifecycle_role,
+                "retire_lifecycle_role": retire_lifecycle_role,
+            },
             local_dict,
         )
         return local_dict[function_name]
@@ -237,6 +244,166 @@ class ToolRegistry:
 
 tool_registry = ToolRegistry()
 
+LIFECYCLE_STATES = ("proposed", "active", "paused", "retired")
+
+
+@dataclass
+class LifecycleEvent:
+    action: str
+    agent_name: str
+    lifecycle_state: str
+    requested_by: str | None = None
+    approved_by: str | None = None
+    reason: str | None = None
+    created_at: str = field(default_factory=lambda: datetime.now().isoformat(timespec="seconds"))
+
+
+def validate_role_name(role_name):
+    if not isinstance(role_name, str) or not role_name.strip():
+        raise ValueError("Role name must be a non-empty string.")
+    normalized = role_name.strip()
+    if "," in normalized:
+        raise ValueError("Role name cannot contain commas.")
+    if len(normalized) > 64:
+        raise ValueError("Role name cannot exceed 64 characters.")
+    return normalized
+
+
+def validate_role_description(role_description):
+    if not isinstance(role_description, str) or not role_description.strip():
+        raise ValueError("Role description must be a non-empty string.")
+    return role_description.strip()
+
+
+def record_lifecycle_event(
+    role,
+    action,
+    lifecycle_state,
+    requested_by=None,
+    approved_by=None,
+    reason=None,
+):
+    event = LifecycleEvent(
+        action=action,
+        agent_name=role.name,
+        lifecycle_state=lifecycle_state,
+        requested_by=requested_by,
+        approved_by=approved_by,
+        reason=reason,
+    )
+    if not hasattr(role, "lifecycle_events"):
+        role.lifecycle_events = []
+    role.lifecycle_events.append(event)
+    role.lifecycle_state = lifecycle_state
+    return event
+
+
+def format_lifecycle_actor_text(requested_by=None, approved_by=None):
+    actor_parts = []
+    if requested_by:
+        actor_parts.append(f"requested by {requested_by}")
+    if approved_by:
+        actor_parts.append(f"approved by {approved_by}")
+    return f" ({', '.join(actor_parts)})" if actor_parts else ""
+
+
+def create_lifecycle_role(
+    employee_dict,
+    role_name,
+    role_description,
+    requested_by=None,
+    approved_by=None,
+):
+    try:
+        normalized_name = validate_role_name(role_name)
+        normalized_description = validate_role_description(role_description)
+    except ValueError as e:
+        return f"Error: {e}"
+    if normalized_name in employee_dict:
+        return f"Error: Role '{normalized_name}' already exists."
+    if len(employee_dict) >= HR.max_organization_members:
+        return f"Error: The organization has reached its maximum size of {HR.max_organization_members} members."
+
+    new_role = Role(normalized_name, normalized_description, employee_dict)
+    record_lifecycle_event(
+        new_role,
+        action="create",
+        lifecycle_state="active",
+        requested_by=requested_by,
+        approved_by=approved_by,
+    )
+    employee_dict[normalized_name] = new_role
+    actor_text = format_lifecycle_actor_text(requested_by, approved_by)
+    return f"Created a new role: {normalized_name} (state: active){actor_text}"
+
+
+def change_lifecycle_state(
+    employee_dict,
+    role_name,
+    lifecycle_state,
+    action,
+    requested_by=None,
+    approved_by=None,
+    reason=None,
+):
+    try:
+        normalized_name = validate_role_name(role_name)
+    except ValueError as e:
+        return f"Error: {e}"
+    if lifecycle_state not in LIFECYCLE_STATES:
+        return f"Error: Invalid lifecycle state '{lifecycle_state}'."
+    if normalized_name not in employee_dict:
+        return f"Error: Role '{normalized_name}' not found."
+
+    role = employee_dict[normalized_name]
+    record_lifecycle_event(
+        role,
+        action=action,
+        lifecycle_state=lifecycle_state,
+        requested_by=requested_by,
+        approved_by=approved_by,
+        reason=reason,
+    )
+    actor_text = format_lifecycle_actor_text(requested_by, approved_by)
+    reason_text = f" Reason: {reason}" if reason else ""
+    return f"Updated role '{normalized_name}' to lifecycle state '{lifecycle_state}'{actor_text}.{reason_text}"
+
+
+def pause_lifecycle_role(
+    employee_dict,
+    role_name,
+    requested_by=None,
+    approved_by=None,
+    reason=None,
+):
+    return change_lifecycle_state(
+        employee_dict,
+        role_name,
+        "paused",
+        "pause",
+        requested_by=requested_by,
+        approved_by=approved_by,
+        reason=reason,
+    )
+
+
+def retire_lifecycle_role(
+    employee_dict,
+    role_name,
+    requested_by=None,
+    approved_by=None,
+    reason=None,
+):
+    return change_lifecycle_state(
+        employee_dict,
+        role_name,
+        "retired",
+        "retire",
+        requested_by=requested_by,
+        approved_by=approved_by,
+        reason=reason,
+    )
+
 
 def interact(self, model, sender, message):
     if self.template != "" and self.name not in self.conversation_history:
@@ -285,6 +452,8 @@ class Role:
         self.global_conversation_history = []
         self.temperature = 0.7 # 0.1 * random.randint(1, 9)
         self.max_tokens = random.randint(250, 400) # -1
+        self.lifecycle_state = "active"
+        self.lifecycle_events = []
 
     def interact(self, sender, prompt):
         return interact_cheap(self, sender, prompt)
