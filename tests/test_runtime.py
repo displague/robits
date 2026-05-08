@@ -82,6 +82,25 @@ class RuntimeTests(unittest.TestCase):
             },
         )
 
+    def test_parse_agent_action_recognizes_wait_think_reply_and_tool(self):
+        self.assertEqual(
+            main.parse_agent_action('{"action": "wait"}'),
+            {"action": "wait"},
+        )
+        self.assertEqual(
+            main.parse_agent_action('{"action": "think", "content": "Need a plan."}'),
+            {"action": "think", "content": "Need a plan."},
+        )
+        self.assertEqual(
+            main.parse_agent_action('{"action": "reply", "content": "hello"}'),
+            {"action": "reply", "content": "hello"},
+        )
+        self.assertEqual(
+            main.parse_agent_action('{"exec": "tools.list", "args": {}}'),
+            {"exec": "tools.list", "args": {}},
+        )
+        self.assertIsNone(main.parse_agent_action('{"note": "plain JSON, not an action"}'))
+
     def test_loaded_create_role_executes_against_employee_dict(self):
         employee_dict = main.build_employee_dict()
         system = main.System(employee_dict)
@@ -1061,6 +1080,73 @@ class RuntimeTests(unittest.TestCase):
 
         self.assertEqual(session.turns_completed, 1)
         self.assertEqual(session.transcript[0].prompt, "")
+
+    def test_wait_action_consumes_turn_without_replying(self):
+        participants = build_fake_participants()
+        participants["Ops"] = FakeRole("Ops", ['{"action": "wait"}'])
+        event_stream = main.RuntimeEventStream()
+        session = main.Session(
+            participants=participants,
+            run_id="session-1",
+            event_stream=event_stream,
+        )
+
+        with redirect_stdout(StringIO()):
+            session.run(initial_message="hello", max_turns=1)
+
+        self.assertEqual(session.transcript[0].response, "")
+        self.assertIn("agent.waited", [event.event_type for event in event_stream.events()])
+
+    def test_think_action_records_private_thought_without_replying(self):
+        participants = build_fake_participants()
+        participants["Ops"] = FakeRole("Ops", ['{"action": "think", "content": "Check tool health later."}'])
+        event_stream = main.RuntimeEventStream()
+        session = main.Session(
+            participants=participants,
+            run_id="session-1",
+            event_stream=event_stream,
+        )
+
+        with redirect_stdout(StringIO()):
+            session.run(initial_message="hello", max_turns=1)
+
+        thought_events = [
+            event for event in event_stream.events() if event.event_type == "thought.recorded"
+        ]
+        self.assertEqual(session.transcript[0].response, "")
+        self.assertEqual(len(thought_events), 1)
+        self.assertEqual(thought_events[0].visibility, "private")
+        self.assertEqual(thought_events[0].payload["agent"], "Ops")
+
+    def test_agent_tool_action_executes_without_broadcast_reply(self):
+        participants = build_fake_participants()
+        participants["HR"] = FakeRole(
+            "HR",
+            [
+                json.dumps(
+                    {
+                        "exec": "org.create_role",
+                        "args": {
+                            "role_name": "QA",
+                            "role_description": "Tests the organization",
+                        },
+                    }
+                )
+            ],
+        )
+        participants["HR"].capabilities = {"hr"}
+        participants["HR"].allowed_tools = {"org.*"}
+        system = main.System(participants)
+        session = main.Session(participants=participants, system=system, run_id="session-1")
+
+        with redirect_stdout(StringIO()):
+            main.load_tools(system)
+            session.run(initial_message="HR, create QA", max_turns=1)
+
+        self.assertIn("QA", participants)
+        self.assertEqual(session.transcript[0].response, "")
+        self.assertEqual(len(session.transcript[0].system_events), 1)
+        self.assertIn("Created a new role: QA", session.transcript[0].system_events[0])
 
     def test_non_string_message_does_not_parse_tool_instruction(self):
         session = main.Session(participants=build_fake_participants(), run_id="session-1")

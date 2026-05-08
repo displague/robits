@@ -1135,7 +1135,12 @@ def interact_costly(self, sender, message):
 class Role:
     def __init__(self, name, template, employee_dict, group_template_additions=""):
         self.name = name
-        self.template = template + group_template_additions
+        turn_action_template = """
+On your turn, choose one useful action. You do not need to reply to every message.
+You may reply in plain text, call a tool by returning {"exec":"namespace.tool_name","args":{}}, record a private thought by returning {"action":"think","content":"..."}, or wait silently by returning {"action":"wait"}.
+Only say that you created, changed, or called a tool if you actually returned a tool call for the runtime to execute.
+"""
+        self.template = template + group_template_additions + turn_action_template
         self.employee_dict = employee_dict
         self.conversation_history = {name: [] for name in employee_dict}
         self.group_conversation_history = {}
@@ -1279,6 +1284,23 @@ def parse_tool_instruction(s):
             return json.dumps(obj)
         except json.JSONDecodeError:
             continue
+    return None
+
+
+def parse_agent_action(s):
+    instruction = parse_tool_instruction(s)
+    if instruction is None:
+        return None
+    try:
+        action = json.loads(instruction)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(action, dict):
+        return None
+    if "exec" in action:
+        return action
+    if action.get("action") in {"wait", "think", "reply"}:
+        return action
     return None
 
 
@@ -1473,6 +1495,35 @@ class Session:
                 ops.update_group_conversations({"role": "system", "content": system_response})
         return [system_response]
 
+    def process_agent_action(self, message, sender=None):
+        if not isinstance(message, str) or message.strip() == "":
+            return "", []
+        action = parse_agent_action(message)
+        if action is None:
+            return message, []
+        action_type = action.get("action")
+        if action_type == "wait":
+            self.event_stream.emit(
+                "agent.waited",
+                self.run_id,
+                {
+                    "agent": getattr(sender, "name", None),
+                },
+            )
+            return "", []
+        if action_type == "think":
+            content = action.get("content", "")
+            if isinstance(content, str) and content.strip():
+                self.record_thought(getattr(sender, "name", "unknown"), content.strip())
+            return "", []
+        if action_type == "reply":
+            content = action.get("content", "")
+            return (content if isinstance(content, str) else ""), []
+        if "exec" in action:
+            system_events = self.process_tool_instruction(json.dumps(action), sender=sender)
+            return "", system_events
+        return message, []
+
     def record_turn(self, sender, receiver, prompt, response, directed=False, system_events=None):
         entry = TranscriptEntry(
             turn=self.turns_completed + 1,
@@ -1528,6 +1579,10 @@ class Session:
             prompt = "\n".join(reminders + [prompt])
         response = routed.receiver.interact(sender.name, prompt)
         response = "" if response is None else response
+        response, response_events = self.process_agent_action(response, sender=routed.receiver)
+        if response_events:
+            system_events.extend(response_events)
+            self.sync_scheduler_participants()
         if routed.receiver.name != "CEO" and response != "":
             print(colored(f"{routed.receiver.name} responds: {response}", "cyan"))
         self.record_turn(
