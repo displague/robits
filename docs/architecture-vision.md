@@ -241,3 +241,4 @@ mechanical module moves can easily erase tests or current runtime fixes.
 - LM Studio docs index: https://lmstudio.ai/llms.txt
 - LM Studio OpenAI-compatible Responses API:
   https://lmstudio.ai/docs/developer/openai-compat/responses
+- Kind sandbox runtime design: `docs/kind-sandbox-runtime.md`
