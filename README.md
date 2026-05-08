@@ -76,6 +76,11 @@ before execution. The current implementation includes a fakeable runtime
 abstraction for tests and future container or cluster backends; it does not
 require containers for unit tests.
 
+See `docs/kind-sandbox-runtime.md` for the target kind/Kubernetes sandbox model.
+That design explains role-to-pod mapping, COO/operator permissions, capacity
+constraints, persistence, and the current gap between sandbox metadata and a
+real container backend.
+
 ## Installation
 
 To install the required packages for this project, run:
