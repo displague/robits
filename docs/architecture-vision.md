@@ -19,8 +19,10 @@ for a human CEO to inspect what happened.
   undirected messages; directed messages such as `HR, ...` take precedence.
 - `System` loads trusted tool definitions from `tools.yaml` and executes
   registered tools by namespaced name.
-- `ToolRegistry` normalizes trusted repo-owned tools into metadata that can be
-  exposed to OpenAI-compatible Responses or Chat Completions APIs.
+- `ToolRegistry` normalizes trusted repo-owned tools into metadata exposed to
+  OpenAI-compatible Responses or Chat Completions APIs.
+- Provider adapters route model calls through Responses by default, with Chat
+  Completions available as a compatibility fallback.
 - Tests use fake roles and temporary files so runtime behavior does not require
   a live model service.
 
@@ -74,9 +76,9 @@ translated at the edge, not passed through the whole runtime.
 
 ### Provider Adapters
 
-Model invocation should move behind provider adapters. The first adapter should
-preserve the current Chat Completions behavior. A Responses-compatible adapter
-can then be added without changing session, memory, or lifecycle code.
+Model invocation moves behind provider adapters. Responses is the preferred
+runtime path, while Chat Completions remains available as a compatibility
+fallback during migration.
 
 Provider adapters own:
 

@@ -38,6 +38,19 @@ class MemoryDigestSource:
     metadata: dict[str, Any]
 
 
+@dataclass(frozen=True)
+class ExpandedMemoryDigestSource:
+    source_table: str
+    source_id: str
+    source_created_at: str | None
+    position: int
+    depth: int
+    parent_digest_id: int
+    source_path: tuple[int, ...]
+    metadata: dict[str, Any]
+    record: dict[str, Any]
+
+
 class SQLiteMemoryStore:
     """Small repository API for durable local Robits memory records."""
 
@@ -177,6 +190,12 @@ class SQLiteMemoryStore:
                 agent_id TEXT,
                 session_id TEXT,
                 content TEXT NOT NULL,
+                digest_type TEXT NOT NULL DEFAULT 'episodic',
+                generation INTEGER NOT NULL DEFAULT 1,
+                version INTEGER NOT NULL DEFAULT 1,
+                superseded_by_digest_id INTEGER,
+                system_only INTEGER NOT NULL DEFAULT 0,
+                accessibility TEXT NOT NULL DEFAULT 'agent',
                 prompt_version TEXT NOT NULL,
                 source_start_at TEXT,
                 source_end_at TEXT,
@@ -232,13 +251,33 @@ class SQLiteMemoryStore:
             CREATE INDEX IF NOT EXISTS idx_tool_calls_agent ON tool_calls(agent_id);
             CREATE INDEX IF NOT EXISTS idx_memory_entries_agent ON memory_entries(agent_id);
             CREATE INDEX IF NOT EXISTS idx_memory_digests_agent ON memory_digests(agent_id);
+            CREATE INDEX IF NOT EXISTS idx_memory_digests_current
+                ON memory_digests(digest_type, superseded_by_digest_id, accessibility, system_only);
             CREATE INDEX IF NOT EXISTS idx_memory_digest_sources_digest
                 ON memory_digest_sources(digest_id);
             CREATE INDEX IF NOT EXISTS idx_runtime_events_session ON runtime_events(session_id);
             CREATE INDEX IF NOT EXISTS idx_runtime_events_type ON runtime_events(event_type);
             """
         )
+        self._ensure_memory_digest_columns()
         self.connection.commit()
+
+    def _ensure_memory_digest_columns(self):
+        columns = {
+            row["name"]
+            for row in self.connection.execute("PRAGMA table_info(memory_digests)").fetchall()
+        }
+        migrations = {
+            "digest_type": "ALTER TABLE memory_digests ADD COLUMN digest_type TEXT NOT NULL DEFAULT 'episodic'",
+            "generation": "ALTER TABLE memory_digests ADD COLUMN generation INTEGER NOT NULL DEFAULT 1",
+            "version": "ALTER TABLE memory_digests ADD COLUMN version INTEGER NOT NULL DEFAULT 1",
+            "superseded_by_digest_id": "ALTER TABLE memory_digests ADD COLUMN superseded_by_digest_id INTEGER",
+            "system_only": "ALTER TABLE memory_digests ADD COLUMN system_only INTEGER NOT NULL DEFAULT 0",
+            "accessibility": "ALTER TABLE memory_digests ADD COLUMN accessibility TEXT NOT NULL DEFAULT 'agent'",
+        }
+        for column, statement in migrations.items():
+            if column not in columns:
+                self.connection.execute(statement)
 
     def create_session(self, session_id, title=None, started_at=None, metadata=None):
         created_at = started_at or _utc_now()
@@ -608,6 +647,12 @@ class SQLiteMemoryStore:
         source_refs,
         agent_id=None,
         session_id=None,
+        digest_type="episodic",
+        generation=None,
+        version=1,
+        supersedes_digest_ids=None,
+        system_only=False,
+        accessibility=None,
         prompt_version="memory-digest-v1",
         source_start_at=None,
         source_end_at=None,
@@ -619,22 +664,41 @@ class SQLiteMemoryStore:
     ):
         if not source_refs:
             raise ValueError("Memory digest requires at least one source reference.")
+        self._validate_digest_type(digest_type)
+        if version < 1:
+            raise ValueError("Memory digest version must be at least 1.")
+        if accessibility is None:
+            accessibility = "system" if system_only else "agent"
+        self._validate_digest_accessibility(accessibility)
         normalized_sources = self._normalize_digest_source_refs(source_refs)
+        if generation is None:
+            generation = self._next_digest_generation(normalized_sources)
+        if generation < 0:
+            raise ValueError("Memory digest generation must be non-negative.")
+        supersedes_digest_ids = [
+            int(digest_id) for digest_id in (supersedes_digest_ids or [])
+        ]
         timestamp = created_at or _utc_now()
         with self.connection:
             cursor = self.connection.execute(
                 """
                 INSERT INTO memory_digests(
-                    agent_id, session_id, content, prompt_version, source_start_at,
+                    agent_id, session_id, content, digest_type, generation, version,
+                    system_only, accessibility, prompt_version, source_start_at,
                     source_end_at, relationship_type, conversation_type, source,
                     created_at, metadata_json
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     agent_id,
                     session_id,
                     content,
+                    digest_type,
+                    generation,
+                    version,
+                    1 if system_only else 0,
+                    accessibility,
                     prompt_version,
                     source_start_at,
                     source_end_at,
@@ -674,9 +738,96 @@ class SQLiteMemoryStore:
                 relationship_type,
                 conversation_type,
                 timestamp,
-                content,
-            )
+                    content,
+                )
+            for superseded_digest_id in supersedes_digest_ids:
+                self.connection.execute(
+                    """
+                    UPDATE memory_digests
+                    SET superseded_by_digest_id = ?
+                    WHERE digest_id = ?
+                    """,
+                    (digest_id, superseded_digest_id),
+                )
         return digest_id
+
+    def seed_memory_digest(
+        self,
+        digest_type,
+        content,
+        agent_id=None,
+        session_id=None,
+        prompt_version="memory-digest-seed-v1",
+        source="system_seed",
+        created_at=None,
+        metadata=None,
+        system_only=False,
+        accessibility=None,
+    ):
+        self._validate_digest_type(digest_type)
+        seed_id = self.append_memory_entry(
+            f"{digest_type}_digest_seed",
+            content,
+            agent_id=agent_id,
+            session_id=session_id,
+            source=source,
+            created_at=created_at,
+            metadata=metadata,
+        )
+        return self.append_memory_digest(
+            content,
+            [{"source_table": "memory_entries", "source_id": seed_id}],
+            agent_id=agent_id,
+            session_id=session_id,
+            digest_type=digest_type,
+            generation=0,
+            version=1,
+            system_only=system_only,
+            accessibility=accessibility,
+            prompt_version=prompt_version,
+            source=source,
+            created_at=created_at,
+            metadata=metadata,
+        )
+
+    def seed_identity_and_goal_digests(
+        self,
+        agent_id,
+        identity_content,
+        long_term_goal_content,
+        short_term_goal_content=None,
+        session_id=None,
+        created_at=None,
+        metadata=None,
+    ):
+        if short_term_goal_content is None:
+            short_term_goal_content = long_term_goal_content
+        return {
+            "identity": self.seed_memory_digest(
+                "identity",
+                identity_content,
+                agent_id=agent_id,
+                session_id=session_id,
+                created_at=created_at,
+                metadata=metadata,
+            ),
+            "goal_long_term": self.seed_memory_digest(
+                "goal_long_term",
+                long_term_goal_content,
+                agent_id=agent_id,
+                session_id=session_id,
+                created_at=created_at,
+                metadata=metadata,
+            ),
+            "goal_short_term": self.seed_memory_digest(
+                "goal_short_term",
+                short_term_goal_content,
+                agent_id=agent_id,
+                session_id=session_id,
+                created_at=created_at,
+                metadata=metadata,
+            ),
+        }
 
     def append_runtime_event(
         self,
@@ -773,7 +924,17 @@ class SQLiteMemoryStore:
             for row in rows
         ]
 
-    def expand_memory_digest_sources(self, digest_id):
+    def expand_memory_digest_sources(
+        self,
+        digest_id,
+        recursive=False,
+        include_digest_records=True,
+    ):
+        if recursive:
+            return self._expand_memory_digest_sources_recursive(
+                int(digest_id),
+                include_digest_records=include_digest_records,
+            )
         expanded = []
         for source_ref in self.get_memory_digest_sources(digest_id):
             row = self._fetch_source_record(source_ref.source_table, source_ref.source_id)
@@ -783,6 +944,54 @@ class SQLiteMemoryStore:
                 row["digest_position"] = source_ref.position
                 expanded.append(row)
         return expanded
+
+    def expand_memory_digest_source_tree(self, digest_id):
+        digest_id = int(digest_id)
+        digest = self.get_memory_digest(digest_id)
+        if digest is None:
+            return None
+        return {
+            "digest": digest,
+            "sources": self._build_memory_digest_source_tree(digest_id, visited=set()),
+        }
+
+    def list_memory_digests(
+        self,
+        agent_id=None,
+        session_id=None,
+        digest_type=None,
+        current_only=False,
+        accessible_only=False,
+        include_system_only=True,
+        limit=100,
+    ):
+        clauses = []
+        params: list[Any] = []
+        for column, value in (
+            ("agent_id", agent_id),
+            ("session_id", session_id),
+            ("digest_type", digest_type),
+        ):
+            if value is not None:
+                clauses.append(f"{column} = ?")
+                params.append(value)
+        if current_only:
+            clauses.append("superseded_by_digest_id IS NULL")
+        if accessible_only:
+            clauses.append("accessibility = 'agent'")
+            clauses.append("system_only = 0")
+        elif not include_system_only:
+            clauses.append("system_only = 0")
+        where = "WHERE " + " AND ".join(clauses) if clauses else ""
+        return self._rows(
+            f"""
+            SELECT * FROM memory_digests
+            {where}
+            ORDER BY created_at, digest_id
+            LIMIT ?
+            """,
+            params + [limit],
+        )
 
     def list_messages(self, session_id=None, agent_id=None, limit=100):
         clauses = []
@@ -947,6 +1156,16 @@ class SQLiteMemoryStore:
         }:
             raise ValueError(f"Unsupported memory digest source table: {source_table}")
 
+    def _validate_digest_type(self, digest_type):
+        if digest_type not in {"episodic", "identity", "goal_long_term", "goal_short_term"}:
+            raise ValueError(
+                "Memory digest type must be episodic, identity, goal_long_term, or goal_short_term."
+            )
+
+    def _validate_digest_accessibility(self, accessibility):
+        if accessibility not in {"agent", "system"}:
+            raise ValueError("Memory digest accessibility must be agent or system.")
+
     def _normalize_digest_source_refs(self, source_refs):
         normalized = []
         for source_ref in source_refs:
@@ -966,6 +1185,93 @@ class SQLiteMemoryStore:
                 }
             )
         return normalized
+
+    def _next_digest_generation(self, normalized_sources):
+        source_digest_ids = [
+            source_ref["source_id"]
+            for source_ref in normalized_sources
+            if source_ref["source_table"] == "memory_digests"
+        ]
+        if not source_digest_ids:
+            return 1
+        placeholders = ", ".join("?" for _ in source_digest_ids)
+        row = self.connection.execute(
+            f"""
+            SELECT MAX(generation) AS max_generation
+            FROM memory_digests
+            WHERE digest_id IN ({placeholders})
+            """,
+            source_digest_ids,
+        ).fetchone()
+        max_generation = row["max_generation"] if row else None
+        return (max_generation or 0) + 1
+
+    def _expand_memory_digest_sources_recursive(
+        self,
+        digest_id,
+        include_digest_records=True,
+    ):
+        expanded: list[ExpandedMemoryDigestSource] = []
+
+        def visit(current_digest_id, depth, path, visited):
+            if current_digest_id in visited:
+                return
+            next_visited = visited | {current_digest_id}
+            for source_ref in self.get_memory_digest_sources(current_digest_id):
+                row = self._fetch_source_record(source_ref.source_table, source_ref.source_id)
+                if row is None:
+                    continue
+                source_digest_id = (
+                    int(source_ref.source_id)
+                    if source_ref.source_table == "memory_digests"
+                    else None
+                )
+                next_path = path + ((source_digest_id,) if source_digest_id else ())
+                if source_ref.source_table != "memory_digests" or include_digest_records:
+                    expanded.append(
+                        ExpandedMemoryDigestSource(
+                            source_table=source_ref.source_table,
+                            source_id=source_ref.source_id,
+                            source_created_at=source_ref.source_created_at,
+                            position=source_ref.position,
+                            depth=depth,
+                            parent_digest_id=current_digest_id,
+                            source_path=next_path,
+                            metadata=source_ref.metadata,
+                            record=row,
+                        )
+                    )
+                if source_digest_id is not None:
+                    visit(source_digest_id, depth + 1, next_path, next_visited)
+
+        visit(digest_id, 0, (digest_id,), set())
+        return expanded
+
+    def _build_memory_digest_source_tree(self, digest_id, visited):
+        if digest_id in visited:
+            return []
+        next_visited = visited | {digest_id}
+        tree = []
+        for source_ref in self.get_memory_digest_sources(digest_id):
+            row = self._fetch_source_record(source_ref.source_table, source_ref.source_id)
+            if row is None:
+                continue
+            node = {
+                "source_table": source_ref.source_table,
+                "source_id": source_ref.source_id,
+                "source_created_at": source_ref.source_created_at,
+                "position": source_ref.position,
+                "metadata": source_ref.metadata,
+                "record": row,
+                "sources": [],
+            }
+            if source_ref.source_table == "memory_digests":
+                node["sources"] = self._build_memory_digest_source_tree(
+                    int(source_ref.source_id),
+                    next_visited,
+                )
+            tree.append(node)
+        return tree
 
     def _fetch_source_record(self, source_table, source_id):
         self._validate_source_table(source_table)

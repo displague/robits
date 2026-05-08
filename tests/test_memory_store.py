@@ -46,6 +46,17 @@ class SQLiteMemoryStoreTests(unittest.TestCase):
         self.assertIn("runtime_events", tables)
         self.assertIn("memory_fts", tables)
 
+        digest_columns = {
+            row["name"]
+            for row in store.connection.execute("PRAGMA table_info(memory_digests)")
+        }
+        self.assertIn("digest_type", digest_columns)
+        self.assertIn("generation", digest_columns)
+        self.assertIn("version", digest_columns)
+        self.assertIn("superseded_by_digest_id", digest_columns)
+        self.assertIn("system_only", digest_columns)
+        self.assertIn("accessibility", digest_columns)
+
     def test_append_and_lookup_messages_by_session_and_agent(self):
         store = self.seed_store()
 
@@ -321,6 +332,139 @@ class SQLiteMemoryStoreTests(unittest.TestCase):
         self.assertEqual([row["source_table"] for row in expanded], ["messages", "tool_calls"])
         self.assertEqual(expanded[0]["content"], "Raw source message.")
         self.assertEqual(expanded[1]["result_content"], "Raw tool result.")
+
+    def test_memory_digest_can_use_digest_sources_and_expand_recursively(self):
+        store = self.seed_store()
+        message_id = store.append_message(
+            "session-1",
+            "CEO",
+            "SE",
+            "Raw cascade source message.",
+        )
+        first_digest_id = store.append_memory_digest(
+            "First generation digest.",
+            [{"source_table": "messages", "source_id": message_id}],
+            agent_id="SE",
+            session_id="session-1",
+        )
+        second_digest_id = store.append_memory_digest(
+            "Second generation digest.",
+            [{"source_table": "memory_digests", "source_id": first_digest_id}],
+            agent_id="SE",
+            session_id="session-1",
+        )
+
+        second_digest = store.get_memory_digest(second_digest_id)
+        direct_sources = store.expand_memory_digest_sources(second_digest_id)
+        recursive_sources = store.expand_memory_digest_sources(second_digest_id, recursive=True)
+        tree = store.expand_memory_digest_source_tree(second_digest_id)
+
+        self.assertEqual(second_digest["generation"], 2)
+        self.assertEqual(direct_sources[0]["source_table"], "memory_digests")
+        self.assertEqual(recursive_sources[0].source_table, "memory_digests")
+        self.assertEqual(recursive_sources[1].source_table, "messages")
+        self.assertEqual(recursive_sources[1].record["content"], "Raw cascade source message.")
+        self.assertEqual(tree["sources"][0]["sources"][0]["record"]["content"], "Raw cascade source message.")
+
+    def test_memory_digest_current_accessibility_excludes_superseded_and_system_only(self):
+        store = self.seed_store()
+        message_id = store.append_message("session-1", "CEO", "SE", "Source.")
+        original_digest_id = store.append_memory_digest(
+            "Original accessible digest.",
+            [{"source_table": "messages", "source_id": message_id}],
+            agent_id="SE",
+            session_id="session-1",
+        )
+        replacement_digest_id = store.append_memory_digest(
+            "Replacement accessible digest.",
+            [{"source_table": "memory_digests", "source_id": original_digest_id}],
+            agent_id="SE",
+            session_id="session-1",
+            supersedes_digest_ids=[original_digest_id],
+        )
+        system_digest_id = store.append_memory_digest(
+            "System-only reanalysis digest.",
+            [{"source_table": "memory_digests", "source_id": replacement_digest_id}],
+            agent_id="SE",
+            session_id="session-1",
+            system_only=True,
+        )
+
+        all_digests = store.list_memory_digests(agent_id="SE")
+        current_accessible = store.list_memory_digests(
+            agent_id="SE",
+            current_only=True,
+            accessible_only=True,
+        )
+        original_digest = store.get_memory_digest(original_digest_id)
+        system_digest = store.get_memory_digest(system_digest_id)
+
+        self.assertEqual(
+            {digest["digest_id"] for digest in all_digests},
+            {original_digest_id, replacement_digest_id, system_digest_id},
+        )
+        self.assertEqual([digest["digest_id"] for digest in current_accessible], [replacement_digest_id])
+        self.assertEqual(original_digest["superseded_by_digest_id"], replacement_digest_id)
+        self.assertEqual(system_digest["system_only"], 1)
+        self.assertEqual(system_digest["accessibility"], "system")
+
+    def test_seed_identity_and_goal_digest_records(self):
+        store = self.seed_store()
+
+        seeded = store.seed_identity_and_goal_digests(
+            "SE",
+            "Identity: SE owns reliable runtime changes.",
+            "Long-term goal: preserve agent lives.",
+            "Short-term goal: keep memory compact and reanalyzable.",
+            session_id="session-1",
+        )
+
+        identity_digest = store.get_memory_digest(seeded["identity"])
+        long_goal_digest = store.get_memory_digest(seeded["goal_long_term"])
+        short_goal_digest = store.get_memory_digest(seeded["goal_short_term"])
+        identity_sources = store.expand_memory_digest_sources(seeded["identity"])
+        short_goal_sources = store.expand_memory_digest_sources(seeded["goal_short_term"])
+
+        self.assertEqual(identity_digest["digest_type"], "identity")
+        self.assertEqual(long_goal_digest["digest_type"], "goal_long_term")
+        self.assertEqual(short_goal_digest["digest_type"], "goal_short_term")
+        self.assertEqual(identity_digest["generation"], 0)
+        self.assertEqual(short_goal_digest["generation"], 0)
+        self.assertEqual(identity_sources[0]["kind"], "identity_digest_seed")
+        self.assertEqual(short_goal_sources[0]["kind"], "goal_short_term_digest_seed")
+
+    def test_recursive_digest_expansion_can_return_raw_sources_without_digest_nodes(self):
+        store = self.seed_store()
+        thought_id = store.append_thought(
+            "SE",
+            "Raw thought remains available for automatic reanalysis.",
+            session_id="session-1",
+        )
+        first_digest_id = store.append_memory_digest(
+            "Digest of raw thought.",
+            [{"source_table": "thoughts", "source_id": thought_id}],
+            agent_id="SE",
+            session_id="session-1",
+        )
+        second_digest_id = store.append_memory_digest(
+            "Digest of digest.",
+            [{"source_table": "memory_digests", "source_id": first_digest_id}],
+            agent_id="SE",
+            session_id="session-1",
+        )
+
+        raw_sources = store.expand_memory_digest_sources(
+            second_digest_id,
+            recursive=True,
+            include_digest_records=False,
+        )
+
+        self.assertEqual(len(raw_sources), 1)
+        self.assertEqual(raw_sources[0].source_table, "thoughts")
+        self.assertEqual(
+            raw_sources[0].record["content"],
+            "Raw thought remains available for automatic reanalysis.",
+        )
 
     def test_memory_digest_requires_sources(self):
         store = self.seed_store()

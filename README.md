@@ -99,10 +99,17 @@ Relevant environment variables:
 - `OPENAI_BASE_URL` or `OPENAI_API_BASE`: optional compatible endpoint URL.
 - `ROBITS_MODEL` or `OPENAI_MODEL`: default chat model.
 - `ROBITS_CHEAP_MODEL` and `ROBITS_COSTLY_MODEL`: optional per-role overrides.
+- `ROBITS_MEMORY_DB`: optional SQLite memory database path for memory introspection tools.
+- `ROBITS_PROVIDER_API`: model API path, `responses` by default or `chat_completions` for compatibility.
+- `ROBITS_MAX_PARALLELISM`: maximum concurrent model calls, default `1`.
+- `ROBITS_MAX_API_RETRIES`: maximum retry attempts for transient API failures, default `3`.
 
 ## Tools
 
 Trusted tools live in `tools.yaml`. Each entry includes a namespaced `name`, a JSON Schema `parameters` object, and trusted repo-owned code. Untrusted model output can request registered tools, but it cannot define new executable tools.
+Agents can use trusted alarm tools to create, list, and cancel their own reminders,
+and memory tools to inspect accessible SQLite memory. Memory digest creation and
+re-digestion remain automatic system behavior rather than agent-callable tools.
 
 Example execution payload:
 

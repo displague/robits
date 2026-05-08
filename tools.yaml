@@ -11,6 +11,11 @@
       role_description:
         type: string
         description: The responsibilities and purpose of the new role.
+      capabilities:
+        type: array
+        items:
+          type: string
+        description: Optional role capability flags such as operator, hr, kubeapi, protected, or essential.
       requested_by:
         type: string
         description: The agent or human requesting the lifecycle change.
@@ -25,9 +30,21 @@
         employee_dict,
         role_name,
         role_description,
+        capabilities=capabilities,
         requested_by=requested_by,
         approved_by=approved_by,
     )
+- name: org.list_roles
+  description: List roles in the organization with lifecycle state and capability flags.
+  parameters:
+    type: object
+    properties:
+      include_exited:
+        type: boolean
+        description: Include roles archived out of organization scheduling.
+    required: []
+  code: |
+    return list_lifecycle_roles(employee_dict, include_exited=include_exited if include_exited is not None else True)
 - name: org.pause_role
   description: Pause an active role in the organization.
   parameters:
@@ -81,4 +98,180 @@
         requested_by=requested_by,
         approved_by=approved_by,
         reason=reason,
+    )
+- name: org.archive_role
+  aliases:
+    - org.remove_role
+  description: Archive an eligible role out of active organization scheduling without deleting its data.
+  parameters:
+    type: object
+    properties:
+      role_name:
+        type: string
+        description: The name of the role to archive.
+      requested_by:
+        type: string
+        description: The agent or human requesting the lifecycle change.
+      approved_by:
+        type: string
+        description: The agent or human approving the lifecycle change.
+      reason:
+        type: string
+        description: The reason for archiving the role.
+    required:
+      - role_name
+  code: |
+    return archive_lifecycle_role(
+        employee_dict,
+        role_name,
+        requested_by=requested_by,
+        approved_by=approved_by,
+        reason=reason,
+    )
+- name: agent.create_alarm
+  description: Create a one-shot or recurring reminder alarm for an agent.
+  parameters:
+    type: object
+    properties:
+      agent_name:
+        type: string
+        description: The agent that owns the alarm.
+      reminder:
+        type: string
+        description: Reminder text shown to the agent when the alarm is due.
+      due_at:
+        type: string
+        description: ISO datetime when the alarm is next due.
+      recurrence:
+        type: string
+        enum:
+          - once
+          - hourly
+          - daily
+          - weekly
+        description: Optional recurrence interval.
+    required:
+      - agent_name
+      - reminder
+      - due_at
+  code: |
+    return create_alarm(
+        employee_dict,
+        agent_name,
+        reminder,
+        due_at,
+        recurrence=recurrence if recurrence is not None else "once",
+    )
+- name: agent.list_alarms
+  description: List an agent's alarms.
+  parameters:
+    type: object
+    properties:
+      agent_name:
+        type: string
+        description: The agent that owns the alarms.
+      include_inactive:
+        type: boolean
+        description: Include canceled and completed alarms.
+    required:
+      - agent_name
+  code: |
+    return list_alarms(
+        employee_dict,
+        agent_name,
+        include_inactive=include_inactive if include_inactive is not None else False,
+    )
+- name: agent.cancel_alarm
+  aliases:
+    - agent.delete_alarm
+  description: Cancel an agent alarm by ID.
+  parameters:
+    type: object
+    properties:
+      agent_name:
+        type: string
+        description: The agent that owns the alarm.
+      alarm_id:
+        type: string
+        description: Alarm ID to cancel.
+    required:
+      - agent_name
+      - alarm_id
+  code: |
+    return cancel_alarm(employee_dict, agent_name, alarm_id)
+- name: memory.search
+  description: Search an agent's accessible SQLite memory records.
+  parameters:
+    type: object
+    properties:
+      agent_name:
+        type: string
+        description: The agent performing memory introspection.
+      query:
+        type: string
+        description: Full-text memory search query.
+      limit:
+        type: integer
+        description: Maximum number of records to return.
+    required:
+      - agent_name
+      - query
+  code: |
+    return memory_search(
+        employee_dict,
+        agent_name,
+        query,
+        limit=limit if limit is not None else 10,
+    )
+- name: memory.list_digests
+  description: List an agent's current accessible memory digests.
+  parameters:
+    type: object
+    properties:
+      agent_name:
+        type: string
+        description: The agent performing memory introspection.
+      digest_type:
+        type: string
+        enum:
+          - episodic
+          - identity
+          - goal_long_term
+          - goal_short_term
+        description: Optional digest type filter.
+      limit:
+        type: integer
+        description: Maximum number of digests to return.
+    required:
+      - agent_name
+  code: |
+    return memory_list_digests(
+        employee_dict,
+        agent_name,
+        digest_type=digest_type,
+        limit=limit if limit is not None else 10,
+    )
+- name: memory.expand_digest
+  description: Expand an accessible memory digest into its source records.
+  parameters:
+    type: object
+    properties:
+      agent_name:
+        type: string
+        description: The agent performing memory introspection.
+      digest_id:
+        type: integer
+        description: The digest ID to expand.
+      recursive:
+        type: boolean
+        description: Include cascading digest sources recursively.
+    required:
+      - agent_name
+      - digest_id
+  code: |
+    return memory_expand_digest(
+        employee_dict,
+        agent_name,
+        digest_id,
+        recursive=recursive if recursive is not None else True,
     )
