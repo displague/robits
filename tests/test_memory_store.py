@@ -57,6 +57,46 @@ class SQLiteMemoryStoreTests(unittest.TestCase):
         self.assertIn("system_only", digest_columns)
         self.assertIn("accessibility", digest_columns)
 
+    def test_existing_digest_table_migrates_before_current_index_creation(self):
+        temp_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(temp_dir.cleanup)
+        db_path = Path(temp_dir.name) / "legacy.sqlite3"
+        connection = sqlite3.connect(db_path)
+        connection.executescript(
+            """
+            CREATE TABLE memory_digests (
+                digest_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                agent_id TEXT,
+                session_id TEXT,
+                content TEXT NOT NULL,
+                prompt_version TEXT NOT NULL,
+                source_start_at TEXT,
+                source_end_at TEXT,
+                relationship_type TEXT,
+                conversation_type TEXT,
+                source TEXT,
+                created_at TEXT NOT NULL,
+                metadata_json TEXT NOT NULL DEFAULT '{}'
+            );
+            """
+        )
+        connection.close()
+
+        store = SQLiteMemoryStore(db_path)
+        self.addCleanup(store.close)
+
+        digest_columns = {
+            row["name"]
+            for row in store.connection.execute("PRAGMA table_info(memory_digests)")
+        }
+        indexes = {
+            row["name"]
+            for row in store.connection.execute("PRAGMA index_list(memory_digests)")
+        }
+
+        self.assertIn("digest_type", digest_columns)
+        self.assertIn("idx_memory_digests_current", indexes)
+
     def test_append_and_lookup_messages_by_session_and_agent(self):
         store = self.seed_store()
 

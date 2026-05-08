@@ -251,8 +251,6 @@ class SQLiteMemoryStore:
             CREATE INDEX IF NOT EXISTS idx_tool_calls_agent ON tool_calls(agent_id);
             CREATE INDEX IF NOT EXISTS idx_memory_entries_agent ON memory_entries(agent_id);
             CREATE INDEX IF NOT EXISTS idx_memory_digests_agent ON memory_digests(agent_id);
-            CREATE INDEX IF NOT EXISTS idx_memory_digests_current
-                ON memory_digests(digest_type, superseded_by_digest_id, accessibility, system_only);
             CREATE INDEX IF NOT EXISTS idx_memory_digest_sources_digest
                 ON memory_digest_sources(digest_id);
             CREATE INDEX IF NOT EXISTS idx_runtime_events_session ON runtime_events(session_id);
@@ -260,6 +258,12 @@ class SQLiteMemoryStore:
             """
         )
         self._ensure_memory_digest_columns()
+        self.connection.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_memory_digests_current
+                ON memory_digests(digest_type, superseded_by_digest_id, accessibility, system_only)
+            """
+        )
         self.connection.commit()
 
     def _ensure_memory_digest_columns(self):

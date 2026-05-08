@@ -293,8 +293,8 @@ class ToolRegistry:
         for tool in sorted(self._tools.values(), key=lambda item: item.name):
             if tool.system_tool and not include_system:
                 continue
-            allowed = role is None or role_can_use_tool(role, tool)
-            if not include_denied and not allowed:
+            allowed = None if role is None else role_can_use_tool(role, tool)
+            if not include_denied and allowed is False:
                 continue
             rows.append(
                 {
@@ -330,7 +330,23 @@ class ToolRegistry:
         unexpected_args = [arg_name for arg_name in args if arg_name not in tool.args]
         if unexpected_args:
             return f"Error: Unexpected args for tool '{name}': {unexpected_args}"
-        result = tool.func(employee_dict=employee_dict, **args)
+        global active_tool_caller, active_tool_caller_name
+        previous_caller = active_tool_caller
+        previous_caller_name = active_tool_caller_name
+        active_tool_caller = caller
+        active_tool_caller_name = None
+        if caller is not None:
+            for employee_name, employee in employee_dict.items():
+                if employee is caller:
+                    active_tool_caller_name = employee_name
+                    break
+            if active_tool_caller_name is None:
+                active_tool_caller_name = getattr(caller, "name", None)
+        try:
+            result = tool.func(employee_dict=employee_dict, **args)
+        finally:
+            active_tool_caller = previous_caller
+            active_tool_caller_name = previous_caller_name
         return f"Executed tool '{resolved_name}' with args {args}. Result: {result}"
 
     def as_responses_tools(self, role=None):
@@ -343,6 +359,8 @@ class ToolRegistry:
 
 
 tool_registry = ToolRegistry()
+active_tool_caller = None
+active_tool_caller_name = None
 
 
 def _response_text(response):
@@ -406,7 +424,7 @@ class ChatCompletionsProvider(ModelProvider):
 
     def generate(self, role, model, sender, messages):
         def request():
-            return self.client.chat.completions.create(
+            stream = self.client.chat.completions.create(
                 model=model,
                 messages=messages,
                 max_tokens=role.max_tokens,
@@ -415,13 +433,13 @@ class ChatCompletionsProvider(ModelProvider):
                 user=f"robits_{role.name}",
                 stream=True,
             )
+            content = ""
+            for chunk in stream:
+                if chunk.choices[0].delta.content is not None:
+                    content += chunk.choices[0].delta.content
+            return content
 
-        stream = _with_model_retries(request)
-        content = ""
-        for chunk in stream:
-            if chunk.choices[0].delta.content is not None:
-                content += chunk.choices[0].delta.content
-        return content
+        return _with_model_retries(request)
 
 
 class ResponsesProvider(ModelProvider):
@@ -564,8 +582,19 @@ def _normalize_tool_grants(tool_grants=None):
     for grant in raw:
         if not isinstance(grant, str) or not grant.strip():
             raise ValueError("Tool grants must be non-empty strings.")
-        normalized.add(grant.strip())
+        normalized.add(_normalize_tool_grant(grant.strip()))
     return normalized
+
+
+def _normalize_tool_grant(tool_name):
+    if tool_name == "*":
+        return tool_name
+    if tool_name.endswith(".*"):
+        namespace = tool_name[:-2]
+        tool_registry.validate_tool_name(namespace)
+        return f"{namespace}.*"
+    tool_registry.validate_tool_name(tool_name)
+    return tool_registry.resolve_name(tool_name)
 
 
 def _tool_grant_matches(tool_name, grant):
@@ -586,54 +615,60 @@ def role_can_use_tool(role, tool):
     return any(_tool_grant_matches(tool.name, grant) for grant in grants)
 
 
+def _caller_can_act_for_agent(agent_name):
+    caller = active_tool_caller
+    if caller is None:
+        return False
+    if active_tool_caller_name == agent_name or getattr(caller, "name", None) == agent_name:
+        return True
+    capabilities = getattr(caller, "capabilities", set())
+    return bool({"operator", "hr"} & capabilities)
+
+
+def _caller_name_for_error():
+    return active_tool_caller_name or getattr(active_tool_caller, "name", "unknown caller")
+
+
 def grant_tool_access(employee_dict, role_name, tool_name, granted_by=None):
     try:
         normalized_name = validate_role_name(role_name)
+        normalized_tool_name = _normalize_tool_grant(tool_name)
     except ValueError as e:
         return f"Error: {e}"
-    if tool_name == "*":
-        pass
-    elif tool_name.endswith(".*"):
-        try:
-            tool_registry.validate_tool_name(tool_name[:-2])
-        except ValueError as e:
-            return f"Error: {e}"
-    else:
-        try:
-            tool_registry.validate_tool_name(tool_name)
-        except ValueError as e:
-            return f"Error: {e}"
     if normalized_name not in employee_dict:
         return f"Error: Role '{normalized_name}' not found."
-    if tool_name != "*" and not tool_name.endswith(".*") and tool_name not in tool_registry:
+    if normalized_tool_name != "*" and not normalized_tool_name.endswith(".*") and normalized_tool_name not in tool_registry:
         return f"Error: Tool '{tool_name}' not found."
-    if tool_name.endswith(".*"):
-        namespace = tool_name[:-2]
+    if normalized_tool_name.endswith(".*"):
+        namespace = normalized_tool_name[:-2]
         if not any(tool.name.startswith(f"{namespace}.") for tool in tool_registry._tools.values()):
             return f"Error: Tool namespace '{namespace}' not found."
     role = employee_dict[normalized_name]
-    role.allowed_tools.add(tool_name)
+    role.allowed_tools.add(normalized_tool_name)
     actor_text = f" by {granted_by}" if granted_by else ""
-    return f"Granted tool access '{tool_name}' to role '{normalized_name}'{actor_text}."
+    return f"Granted tool access '{normalized_tool_name}' to role '{normalized_name}'{actor_text}."
 
 
 def revoke_tool_access(employee_dict, role_name, tool_name, revoked_by=None):
     try:
         normalized_name = validate_role_name(role_name)
+        normalized_tool_name = _normalize_tool_grant(tool_name)
     except ValueError as e:
         return f"Error: {e}"
     if normalized_name not in employee_dict:
         return f"Error: Role '{normalized_name}' not found."
     role = employee_dict[normalized_name]
-    if tool_name not in role.allowed_tools:
-        return f"Error: Role '{normalized_name}' does not have grant '{tool_name}'."
-    role.allowed_tools.remove(tool_name)
+    if normalized_tool_name not in role.allowed_tools:
+        return f"Error: Role '{normalized_name}' does not have grant '{normalized_tool_name}'."
+    role.allowed_tools.remove(normalized_tool_name)
     actor_text = f" by {revoked_by}" if revoked_by else ""
-    return f"Revoked tool access '{tool_name}' from role '{normalized_name}'{actor_text}."
+    return f"Revoked tool access '{normalized_tool_name}' from role '{normalized_name}'{actor_text}."
 
 
 def list_registered_tools(employee_dict, role_name=None, include_system=True, only_allowed=False):
     role = None
+    if only_allowed and not role_name:
+        return "Error: role_name is required when only_allowed is true."
     if role_name:
         try:
             normalized_name = validate_role_name(role_name)
@@ -909,6 +944,8 @@ def create_alarm(employee_dict, agent_name, reminder, due_at, recurrence="once")
         due = _parse_datetime(due_at)
     except ValueError as e:
         return f"Error: {e}"
+    if not _caller_can_act_for_agent(normalized_name):
+        return f"Error: Role '{_caller_name_for_error()}' cannot manage alarms for '{normalized_name}'."
     if normalized_name not in employee_dict:
         return f"Error: Role '{normalized_name}' not found."
     if not isinstance(reminder, str) or not reminder.strip():
@@ -935,6 +972,8 @@ def list_alarms(employee_dict, agent_name, include_inactive=False):
         normalized_name = validate_role_name(agent_name)
     except ValueError as e:
         return f"Error: {e}"
+    if not _caller_can_act_for_agent(normalized_name):
+        return f"Error: Role '{_caller_name_for_error()}' cannot inspect alarms for '{normalized_name}'."
     if normalized_name not in employee_dict:
         return f"Error: Role '{normalized_name}' not found."
     alarms = []
@@ -958,6 +997,8 @@ def cancel_alarm(employee_dict, agent_name, alarm_id):
         normalized_name = validate_role_name(agent_name)
     except ValueError as e:
         return f"Error: {e}"
+    if not _caller_can_act_for_agent(normalized_name):
+        return f"Error: Role '{_caller_name_for_error()}' cannot manage alarms for '{normalized_name}'."
     if normalized_name not in employee_dict:
         return f"Error: Role '{normalized_name}' not found."
     for alarm in getattr(employee_dict[normalized_name], "alarms", []):
@@ -982,6 +1023,8 @@ def memory_search(employee_dict, agent_name, query, limit=10):
         normalized_name = validate_role_name(agent_name)
     except ValueError as e:
         return f"Error: {e}"
+    if not _caller_can_act_for_agent(normalized_name):
+        return f"Error: Role '{_caller_name_for_error()}' cannot inspect memory for '{normalized_name}'."
     if not isinstance(query, str) or not query.strip():
         return "Error: Memory query must be a non-empty string."
     results = store.search(query, agent_id=normalized_name, limit=int(limit or 10))
@@ -997,6 +1040,8 @@ def memory_list_digests(employee_dict, agent_name, digest_type=None, limit=10):
         normalized_name = validate_role_name(agent_name)
     except ValueError as e:
         return f"Error: {e}"
+    if not _caller_can_act_for_agent(normalized_name):
+        return f"Error: Role '{_caller_name_for_error()}' cannot inspect memory for '{normalized_name}'."
     digests = store.list_memory_digests(
         agent_id=normalized_name,
         digest_type=digest_type,
@@ -1017,6 +1062,8 @@ def memory_expand_digest(employee_dict, agent_name, digest_id, recursive=True):
         digest_id = int(digest_id)
     except ValueError as e:
         return f"Error: {e}"
+    if not _caller_can_act_for_agent(normalized_name):
+        return f"Error: Role '{_caller_name_for_error()}' cannot inspect memory for '{normalized_name}'."
     digest = store.get_memory_digest(digest_id)
     if digest is None:
         return f"Error: Memory digest '{digest_id}' not found."
@@ -1171,7 +1218,7 @@ class Ops(Role):
             self.__class__.__name__, role_description, employee_dict, group_template_additions
         )
         self.capabilities = {"operator"}
-        self.allowed_tools.update({"tools.*", "org.list_roles"})
+        self.allowed_tools.update({"tools.*"})
 
 
 class HR(Role):
