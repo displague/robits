@@ -69,6 +69,11 @@ class ToolDefinition:
     required_args: list[str]
     func: object
     aliases: tuple[str, ...] = ()
+    namespace: str = ""
+    required_capabilities: tuple[str, ...] = ()
+    owner_capability: str | None = None
+    system_tool: bool = False
+    grantable: bool = True
 
     @property
     def openai_name(self):
@@ -158,6 +163,10 @@ class ToolRegistry:
                 "memory_search": memory_search,
                 "memory_list_digests": memory_list_digests,
                 "memory_expand_digest": memory_expand_digest,
+                "grant_tool_access": grant_tool_access,
+                "revoke_tool_access": revoke_tool_access,
+                "list_registered_tools": list_registered_tools,
+                "propose_tool_change": propose_tool_change,
             },
             local_dict,
         )
@@ -196,10 +205,21 @@ class ToolRegistry:
             code = instruction["code"]
             aliases = tuple(instruction.get("aliases", ()))
 
+        namespace = instruction.get("namespace") or name.split(".", 1)[0]
+        required_capabilities = tuple(instruction.get("required_capabilities", ()))
+        owner_capability = instruction.get("owner_capability")
+        system_tool = bool(instruction.get("system_tool", False))
+        grantable = bool(instruction.get("grantable", True))
         required = parameters.get("required", [])
         properties = parameters.get("properties", {})
         if not isinstance(properties, dict) or not isinstance(required, list):
             raise ValueError("Tool parameters must contain object properties and required list.")
+        if not isinstance(required_capabilities, tuple) or not all(
+            isinstance(capability, str) for capability in required_capabilities
+        ):
+            raise ValueError("Tool required_capabilities must be a list of strings.")
+        if owner_capability is not None and not isinstance(owner_capability, str):
+            raise ValueError("Tool owner_capability must be a string.")
         required_arg_names = []
         for arg_name in required:
             if not isinstance(arg_name, str) or arg_name not in properties:
@@ -207,10 +227,36 @@ class ToolRegistry:
             required_arg_names.append(arg_name)
         arg_names = list(properties)
 
-        return name, description, parameters, arg_names, required_arg_names, code, aliases
+        return (
+            name,
+            description,
+            parameters,
+            arg_names,
+            required_arg_names,
+            code,
+            aliases,
+            namespace,
+            required_capabilities,
+            owner_capability,
+            system_tool,
+            grantable,
+        )
 
     def register_definition(self, instruction):
-        name, description, parameters, arg_names, required_arg_names, code, aliases = self.normalize_definition(instruction)
+        (
+            name,
+            description,
+            parameters,
+            arg_names,
+            required_arg_names,
+            code,
+            aliases,
+            namespace,
+            required_capabilities,
+            owner_capability,
+            system_tool,
+            grantable,
+        ) = self.normalize_definition(instruction)
         if name in self._tools:
             raise ValueError(f"Tool '{name}' already exists.")
         for alias in aliases:
@@ -226,6 +272,11 @@ class ToolRegistry:
             required_args=required_arg_names,
             func=func,
             aliases=aliases,
+            namespace=namespace,
+            required_capabilities=required_capabilities,
+            owner_capability=owner_capability,
+            system_tool=system_tool,
+            grantable=grantable,
         )
         openai_name = tool.openai_name
         if openai_name != name and (openai_name in self._aliases or openai_name in self._tools):
@@ -237,7 +288,32 @@ class ToolRegistry:
             self._aliases[openai_name] = name
         return tool
 
-    def execute(self, name, args, employee_dict):
+    def list_tools(self, include_system=True, role=None, include_denied=True):
+        rows = []
+        for tool in sorted(self._tools.values(), key=lambda item: item.name):
+            if tool.system_tool and not include_system:
+                continue
+            allowed = role is None or role_can_use_tool(role, tool)
+            if not include_denied and not allowed:
+                continue
+            rows.append(
+                {
+                    "name": tool.name,
+                    "namespace": tool.namespace,
+                    "description": tool.description,
+                    "required_capabilities": list(tool.required_capabilities),
+                    "owner_capability": tool.owner_capability,
+                    "system_tool": tool.system_tool,
+                    "grantable": tool.grantable,
+                    "allowed": allowed,
+                }
+            )
+        return rows
+
+    def tools_for_role(self, role):
+        return [tool for tool in self._tools.values() if role_can_use_tool(role, tool)]
+
+    def execute(self, name, args, employee_dict, caller=None):
         try:
             self.validate_tool_name(name)
         except ValueError as e:
@@ -246,6 +322,8 @@ class ToolRegistry:
         if resolved_name not in self._tools:
             return f"Error: Tool '{name}' not found."
         tool = self._tools[resolved_name]
+        if caller is not None and not role_can_use_tool(caller, tool):
+            return f"Error: Role '{caller.name}' is not allowed to use tool '{resolved_name}'."
         missing_args = [arg_name for arg_name in tool.required_args if arg_name not in args]
         if missing_args:
             return f"Error: Missing args for tool '{name}': {missing_args}"
@@ -255,11 +333,13 @@ class ToolRegistry:
         result = tool.func(employee_dict=employee_dict, **args)
         return f"Executed tool '{resolved_name}' with args {args}. Result: {result}"
 
-    def as_responses_tools(self):
-        return [tool.as_responses_tool() for tool in self._tools.values()]
+    def as_responses_tools(self, role=None):
+        tools = self._tools.values() if role is None else self.tools_for_role(role)
+        return [tool.as_responses_tool() for tool in tools]
 
-    def as_chat_completion_tools(self):
-        return [tool.as_chat_completion_tool() for tool in self._tools.values()]
+    def as_chat_completion_tools(self, role=None):
+        tools = self._tools.values() if role is None else self.tools_for_role(role)
+        return [tool.as_chat_completion_tool() for tool in tools]
 
 
 tool_registry = ToolRegistry()
@@ -351,7 +431,7 @@ class ResponsesProvider(ModelProvider):
 
     def generate(self, role, model, sender, messages):
         employee_dict = getattr(role, "employee_dict", None)
-        tools = self.registry.as_responses_tools()
+        tools = self.registry.as_responses_tools(role)
         kwargs = {
             "model": model,
             "input": messages,
@@ -377,7 +457,12 @@ class ResponsesProvider(ModelProvider):
                 except json.JSONDecodeError as error:
                     result = f"Error: Invalid tool arguments JSON: {error}"
                 else:
-                    result = self.registry.execute(getattr(call, "name", ""), args, employee_dict)
+                    result = self.registry.execute(
+                        getattr(call, "name", ""),
+                        args,
+                        employee_dict,
+                        caller=role,
+                    )
                 outputs.append(
                     {
                         "type": "function_call_output",
@@ -468,6 +553,130 @@ def _normalize_capabilities(capabilities=None):
     return normalized
 
 
+def _normalize_tool_grants(tool_grants=None):
+    if tool_grants is None:
+        return set()
+    if isinstance(tool_grants, str):
+        raw = [tool_grants]
+    else:
+        raw = list(tool_grants)
+    normalized = set()
+    for grant in raw:
+        if not isinstance(grant, str) or not grant.strip():
+            raise ValueError("Tool grants must be non-empty strings.")
+        normalized.add(grant.strip())
+    return normalized
+
+
+def _tool_grant_matches(tool_name, grant):
+    if grant == "*":
+        return True
+    if grant.endswith(".*"):
+        return tool_name.startswith(grant[:-1])
+    return tool_name == grant
+
+
+def role_can_use_tool(role, tool):
+    if getattr(role, "name", None) == "CEO":
+        return True
+    capabilities = getattr(role, "capabilities", set())
+    if tool.required_capabilities and not set(tool.required_capabilities).issubset(capabilities):
+        return False
+    grants = getattr(role, "allowed_tools", set())
+    return any(_tool_grant_matches(tool.name, grant) for grant in grants)
+
+
+def grant_tool_access(employee_dict, role_name, tool_name, granted_by=None):
+    try:
+        normalized_name = validate_role_name(role_name)
+    except ValueError as e:
+        return f"Error: {e}"
+    if tool_name == "*":
+        pass
+    elif tool_name.endswith(".*"):
+        try:
+            tool_registry.validate_tool_name(tool_name[:-2])
+        except ValueError as e:
+            return f"Error: {e}"
+    else:
+        try:
+            tool_registry.validate_tool_name(tool_name)
+        except ValueError as e:
+            return f"Error: {e}"
+    if normalized_name not in employee_dict:
+        return f"Error: Role '{normalized_name}' not found."
+    if tool_name != "*" and not tool_name.endswith(".*") and tool_name not in tool_registry:
+        return f"Error: Tool '{tool_name}' not found."
+    if tool_name.endswith(".*"):
+        namespace = tool_name[:-2]
+        if not any(tool.name.startswith(f"{namespace}.") for tool in tool_registry._tools.values()):
+            return f"Error: Tool namespace '{namespace}' not found."
+    role = employee_dict[normalized_name]
+    role.allowed_tools.add(tool_name)
+    actor_text = f" by {granted_by}" if granted_by else ""
+    return f"Granted tool access '{tool_name}' to role '{normalized_name}'{actor_text}."
+
+
+def revoke_tool_access(employee_dict, role_name, tool_name, revoked_by=None):
+    try:
+        normalized_name = validate_role_name(role_name)
+    except ValueError as e:
+        return f"Error: {e}"
+    if normalized_name not in employee_dict:
+        return f"Error: Role '{normalized_name}' not found."
+    role = employee_dict[normalized_name]
+    if tool_name not in role.allowed_tools:
+        return f"Error: Role '{normalized_name}' does not have grant '{tool_name}'."
+    role.allowed_tools.remove(tool_name)
+    actor_text = f" by {revoked_by}" if revoked_by else ""
+    return f"Revoked tool access '{tool_name}' from role '{normalized_name}'{actor_text}."
+
+
+def list_registered_tools(employee_dict, role_name=None, include_system=True, only_allowed=False):
+    role = None
+    if role_name:
+        try:
+            normalized_name = validate_role_name(role_name)
+        except ValueError as e:
+            return f"Error: {e}"
+        if normalized_name not in employee_dict:
+            return f"Error: Role '{normalized_name}' not found."
+        role = employee_dict[normalized_name]
+    return json.dumps(
+        tool_registry.list_tools(
+            include_system=include_system,
+            role=role,
+            include_denied=not only_allowed,
+        ),
+        sort_keys=True,
+    )
+
+
+def propose_tool_change(employee_dict, requested_by, tool_name, description, action="create"):
+    del employee_dict
+    try:
+        tool_registry.validate_tool_name(tool_name)
+    except ValueError as e:
+        return f"Error: {e}"
+    if not isinstance(description, str) or not description.strip():
+        return "Error: Tool proposal description must be a non-empty string."
+    if action not in {"create", "update"}:
+        return f"Error: Tool proposal action must be create or update."
+    if tool_name in tool_registry:
+        tool = tool_registry.get(tool_name)
+        if tool.system_tool:
+            return f"Error: System tool '{tool_name}' cannot be changed by SE proposal."
+    proposal = {
+        "proposal_id": f"tool-proposal-{uuid4()}",
+        "requested_by": requested_by,
+        "tool_name": tool_name,
+        "action": action,
+        "description": description.strip(),
+        "status": "proposed",
+    }
+    return json.dumps(proposal, sort_keys=True)
+
+
 def validate_role_name(role_name):
     if not isinstance(role_name, str) or not role_name.strip():
         raise ValueError("Role name must be a non-empty string.")
@@ -522,6 +731,7 @@ def create_lifecycle_role(
     role_name,
     role_description,
     capabilities=None,
+    tool_grants=None,
     requested_by=None,
     approved_by=None,
 ):
@@ -529,6 +739,7 @@ def create_lifecycle_role(
         normalized_name = validate_role_name(role_name)
         normalized_description = validate_role_description(role_description)
         normalized_capabilities = _normalize_capabilities(capabilities)
+        normalized_tool_grants = _normalize_tool_grants(tool_grants)
     except ValueError as e:
         return f"Error: {e}"
     if normalized_name in employee_dict:
@@ -538,6 +749,7 @@ def create_lifecycle_role(
 
     new_role = Role(normalized_name, normalized_description, employee_dict)
     new_role.capabilities = normalized_capabilities
+    new_role.allowed_tools.update(normalized_tool_grants)
     record_lifecycle_event(
         new_role,
         action="create",
@@ -675,11 +887,13 @@ def list_lifecycle_roles(employee_dict, include_exited=True):
         if not include_exited and state == "exited":
             continue
         capabilities = sorted(getattr(role, "capabilities", set()))
+        tool_grants = sorted(getattr(role, "allowed_tools", set()))
         rows.append(
             {
                 "role_name": name,
                 "lifecycle_state": state,
                 "capabilities": capabilities,
+                "tool_grants": tool_grants,
             }
         )
     return json.dumps(rows, sort_keys=True)
@@ -884,6 +1098,7 @@ class Role:
         self.lifecycle_state = "active"
         self.lifecycle_events = []
         self.capabilities = set()
+        self.allowed_tools = {"agent.*", "memory.search", "memory.list_digests", "memory.expand_digest"}
         self.alarms = []
         self.sandbox_metadata = SandboxMetadata.disabled(self.name)
 
@@ -909,7 +1124,7 @@ class System(Role):
         self.employee_dict = employee_dict if employee_dict is not None else {}
         self.tools = registry if registry is not None else tool_registry
 
-    def handle_instruction(self, instruction, trusted=False):
+    def handle_instruction(self, instruction, trusted=False, caller=None):
         if not isinstance(instruction, dict):
             return "Error: JSON instruction must be an object."
 
@@ -923,10 +1138,10 @@ class System(Role):
             args = instruction.get("args", {})
             if not isinstance(args, dict):
                 return "Error: Tool args must be an object."
-            return self.tools.execute(tool_name, args, self.employee_dict)
+            return self.tools.execute(tool_name, args, self.employee_dict, caller=caller)
         return "Error: JSON instruction must include a tool definition or exec."
 
-    def interact(self, prompt, trusted=False):
+    def interact(self, prompt, trusted=False, caller=None):
         print(colored(f"\n---\n// {self.name}\n{prompt}\n---\n", "grey"))
 
         prompt_text = prompt.strip() if isinstance(prompt, str) else ""
@@ -935,11 +1150,11 @@ class System(Role):
                 instruction = json.loads(prompt_text)
                 if isinstance(instruction, list):
                     responses = [
-                        self.handle_instruction(item, trusted=trusted)
+                        self.handle_instruction(item, trusted=trusted, caller=caller)
                         for item in instruction
                     ]
                     return "\n".join(responses)
-                return self.handle_instruction(instruction, trusted=trusted)
+                return self.handle_instruction(instruction, trusted=trusted, caller=caller)
             except json.JSONDecodeError as e:
                 return f"Error: {e}"
             except Exception as e:
@@ -956,6 +1171,7 @@ class Ops(Role):
             self.__class__.__name__, role_description, employee_dict, group_template_additions
         )
         self.capabilities = {"operator"}
+        self.allowed_tools.update({"tools.*", "org.list_roles"})
 
 
 class HR(Role):
@@ -970,6 +1186,7 @@ You are part of the Human Resources group. To create a new role, send a message 
             self.__class__.__name__, role_description, employee_dict, group_template_additions
         )
         self.capabilities = {"hr", "protected", "essential"}
+        self.allowed_tools.update({"org.*", "tools.list"})
 
 
 class Angel(Role):
@@ -984,6 +1201,7 @@ class SoftwareEngineer(Role):
         group_template_additions = """You are part of the Engineering group. Tools are trusted, repo-loaded functions described by namespaced OpenAI-compatible metadata. Propose tool behavior in plain language; do not assume untrusted chat output can define executable tools directly."""
         super().__init__(self.__class__.__name__, template, employee_dict, group_template_additions)
         self.capabilities = {"engineer"}
+        self.allowed_tools.update({"tools.list", "tools.propose"})
 
     def interact(self, sender, prompt):
         return interact_costly(self, sender, prompt)
@@ -996,6 +1214,7 @@ class Human(Role):
         self.lifecycle_state = "active"
         self.lifecycle_events = []
         self.capabilities = {"protected", "essential"}
+        self.allowed_tools = {"*"}
         self.alarms = []
         self.sandbox_metadata = SandboxMetadata.disabled(self.name)
 
@@ -1184,14 +1403,14 @@ class Session:
         )
         return RoutedMessage(self.participants[receiver_name], message, False)
 
-    def process_tool_instruction(self, message):
+    def process_tool_instruction(self, message, sender=None):
         if not isinstance(message, str) or message == "":
             return []
         tool_instruction = parse_tool_instruction(message)
         if tool_instruction is None or tool_instruction == "":
             return []
 
-        system_response = self.system.interact(tool_instruction)
+        system_response = self.system.interact(tool_instruction, caller=sender)
         print(colored(f"System: {system_response}", "blue"))
         self.event_stream.emit(
             "tool.executed",
@@ -1254,7 +1473,7 @@ class Session:
         sender = self.last_receiver
         self.sync_scheduler_participants()
         routed = self.route_message(message, sender.name)
-        system_events = self.process_tool_instruction(message)
+        system_events = self.process_tool_instruction(message, sender=sender)
         self.sync_scheduler_participants()
         prompt = routed.prompt
         reminders = due_alarm_reminders(routed.receiver)

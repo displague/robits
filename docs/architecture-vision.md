@@ -102,6 +102,13 @@ The registry should keep supporting:
 - JSON Schema parameters
 - explicit tool-call result records
 
+Tools also need role-level governance. Each role has explicit tool grants such
+as `agent.*` or `memory.search`; provider adapters expose only tools allowed for
+the active role, and runtime execution rejects disallowed requests. Operators
+own grant and revoke actions. SE can propose non-system tool changes, but system
+tools such as memory introspection, role lifecycle management, and runtime
+operator controls stay protected trusted artifacts.
+
 Local OpenAI-compatible servers are a validation target, but durable docs should
 describe the generic API shape rather than a machine-specific endpoint or model.
 Structured output should be capability-gated: prefer provider-native schema

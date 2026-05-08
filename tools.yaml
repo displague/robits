@@ -1,4 +1,9 @@
 - name: org.create_role
+  system_tool: true
+  grantable: false
+  required_capabilities:
+    - hr
+  owner_capability: hr
   aliases:
     - create_role
   description: Create a new role in the organization.
@@ -16,6 +21,11 @@
         items:
           type: string
         description: Optional role capability flags such as operator, hr, kubeapi, protected, or essential.
+      tool_grants:
+        type: array
+        items:
+          type: string
+        description: Optional initial tool grants such as agent.* or memory.search.
       requested_by:
         type: string
         description: The agent or human requesting the lifecycle change.
@@ -31,10 +41,16 @@
         role_name,
         role_description,
         capabilities=capabilities,
+        tool_grants=tool_grants,
         requested_by=requested_by,
         approved_by=approved_by,
     )
 - name: org.list_roles
+  system_tool: true
+  grantable: false
+  required_capabilities:
+    - hr
+  owner_capability: hr
   description: List roles in the organization with lifecycle state and capability flags.
   parameters:
     type: object
@@ -46,6 +62,11 @@
   code: |
     return list_lifecycle_roles(employee_dict, include_exited=include_exited if include_exited is not None else True)
 - name: org.pause_role
+  system_tool: true
+  grantable: false
+  required_capabilities:
+    - hr
+  owner_capability: hr
   description: Pause an active role in the organization.
   parameters:
     type: object
@@ -73,6 +94,11 @@
         reason=reason,
     )
 - name: org.retire_role
+  system_tool: true
+  grantable: false
+  required_capabilities:
+    - hr
+  owner_capability: hr
   description: Retire a role in the organization.
   parameters:
     type: object
@@ -100,6 +126,11 @@
         reason=reason,
     )
 - name: org.archive_role
+  system_tool: true
+  grantable: false
+  required_capabilities:
+    - hr
+  owner_capability: hr
   aliases:
     - org.remove_role
   description: Archive an eligible role out of active organization scheduling without deleting its data.
@@ -129,6 +160,8 @@
         reason=reason,
     )
 - name: agent.create_alarm
+  required_capabilities: []
+  owner_capability: agent
   description: Create a one-shot or recurring reminder alarm for an agent.
   parameters:
     type: object
@@ -163,6 +196,8 @@
         recurrence=recurrence if recurrence is not None else "once",
     )
 - name: agent.list_alarms
+  required_capabilities: []
+  owner_capability: agent
   description: List an agent's alarms.
   parameters:
     type: object
@@ -182,6 +217,8 @@
         include_inactive=include_inactive if include_inactive is not None else False,
     )
 - name: agent.cancel_alarm
+  required_capabilities: []
+  owner_capability: agent
   aliases:
     - agent.delete_alarm
   description: Cancel an agent alarm by ID.
@@ -200,6 +237,9 @@
   code: |
     return cancel_alarm(employee_dict, agent_name, alarm_id)
 - name: memory.search
+  system_tool: true
+  grantable: true
+  owner_capability: system
   description: Search an agent's accessible SQLite memory records.
   parameters:
     type: object
@@ -224,6 +264,9 @@
         limit=limit if limit is not None else 10,
     )
 - name: memory.list_digests
+  system_tool: true
+  grantable: true
+  owner_capability: system
   description: List an agent's current accessible memory digests.
   parameters:
     type: object
@@ -252,6 +295,9 @@
         limit=limit if limit is not None else 10,
     )
 - name: memory.expand_digest
+  system_tool: true
+  grantable: true
+  owner_capability: system
   description: Expand an accessible memory digest into its source records.
   parameters:
     type: object
@@ -274,4 +320,113 @@
         agent_name,
         digest_id,
         recursive=recursive if recursive is not None else True,
+    )
+- name: tools.list
+  system_tool: true
+  grantable: false
+  description: List registered tools and role access decisions.
+  parameters:
+    type: object
+    properties:
+      role_name:
+        type: string
+        description: Optional role to evaluate access for.
+      include_system:
+        type: boolean
+        description: Include system tools in the listing.
+      only_allowed:
+        type: boolean
+        description: Only show tools the role can call.
+    required: []
+  code: |
+    return list_registered_tools(
+        employee_dict,
+        role_name=role_name,
+        include_system=include_system if include_system is not None else True,
+        only_allowed=only_allowed if only_allowed is not None else False,
+    )
+- name: tools.grant
+  system_tool: true
+  grantable: false
+  required_capabilities:
+    - operator
+  owner_capability: operator
+  description: Grant a tool or namespace pattern to a role.
+  parameters:
+    type: object
+    properties:
+      role_name:
+        type: string
+        description: Role receiving access.
+      tool_name:
+        type: string
+        description: Tool name or namespace pattern such as memory.search or agent.*.
+      granted_by:
+        type: string
+        description: Agent approving the grant.
+    required:
+      - role_name
+      - tool_name
+  code: |
+    return grant_tool_access(employee_dict, role_name, tool_name, granted_by=granted_by)
+- name: tools.revoke
+  system_tool: true
+  grantable: false
+  required_capabilities:
+    - operator
+  owner_capability: operator
+  description: Revoke a tool or namespace pattern from a role.
+  parameters:
+    type: object
+    properties:
+      role_name:
+        type: string
+        description: Role losing access.
+      tool_name:
+        type: string
+        description: Tool name or namespace pattern to revoke.
+      revoked_by:
+        type: string
+        description: Agent approving the revocation.
+    required:
+      - role_name
+      - tool_name
+  code: |
+    return revoke_tool_access(employee_dict, role_name, tool_name, revoked_by=revoked_by)
+- name: tools.propose
+  system_tool: true
+  grantable: false
+  required_capabilities:
+    - engineer
+  owner_capability: engineer
+  description: Propose creation or update of a non-system trusted tool.
+  parameters:
+    type: object
+    properties:
+      requested_by:
+        type: string
+        description: Agent proposing the tool change.
+      tool_name:
+        type: string
+        description: Tool name being proposed.
+      description:
+        type: string
+        description: Proposed behavior and purpose.
+      action:
+        type: string
+        enum:
+          - create
+          - update
+        description: Proposal action.
+    required:
+      - requested_by
+      - tool_name
+      - description
+  code: |
+    return propose_tool_change(
+        employee_dict,
+        requested_by,
+        tool_name,
+        description,
+        action=action if action is not None else "create",
     )

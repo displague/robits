@@ -314,6 +314,10 @@ class RuntimeTests(unittest.TestCase):
 
         self.assertIn("Created a new role: SRE", create_response)
         self.assertEqual(sre["capabilities"], ["kubeapi", "operator"])
+        self.assertEqual(
+            sre["tool_grants"],
+            ["agent.*", "memory.expand_digest", "memory.list_digests", "memory.search"],
+        )
 
     def test_archive_role_rejects_protected_roles_and_exits_eligible_role(self):
         employee_dict = main.build_employee_dict()
@@ -341,6 +345,28 @@ class RuntimeTests(unittest.TestCase):
         self.assertIn("protected", protected_response)
         self.assertIn("exited", archived_response)
         self.assertEqual(employee_dict["QA"].lifecycle_state, "exited")
+
+    def test_create_role_can_seed_tool_grants(self):
+        employee_dict = main.build_employee_dict()
+        system = main.System(employee_dict)
+        with redirect_stdout(StringIO()):
+            main.load_tools(system)
+            response = system.interact(
+                json.dumps(
+                    {
+                        "exec": "org.create_role",
+                        "args": {
+                            "role_name": "Research",
+                            "role_description": "Explores memory.",
+                            "tool_grants": ["memory.search"],
+                        },
+                    }
+                ),
+                caller=employee_dict["HR"],
+            )
+
+        self.assertIn("Created a new role: Research", response)
+        self.assertIn("memory.search", employee_dict["Research"].allowed_tools)
 
     def test_lifecycle_rejects_invalid_transitions_without_new_event(self):
         employee_dict = main.build_employee_dict()
@@ -526,7 +552,7 @@ class RuntimeTests(unittest.TestCase):
 
     def test_responses_provider_executes_registered_function_call(self):
         employee_dict = main.build_employee_dict()
-        role = employee_dict["Ops"]
+        role = employee_dict["HR"]
         system = main.System(employee_dict)
         with redirect_stdout(StringIO()):
             main.load_tools(system)
@@ -568,6 +594,110 @@ class RuntimeTests(unittest.TestCase):
         self.assertEqual(second_call["previous_response_id"], "response-1")
         self.assertEqual(second_call["input"][0]["type"], "function_call_output")
         self.assertIn("Created a new role: QA", second_call["input"][0]["output"])
+
+    def test_responses_provider_exposes_only_role_allowed_tools(self):
+        employee_dict = main.build_employee_dict()
+        role = employee_dict["SE"]
+        system = main.System(employee_dict)
+        with redirect_stdout(StringIO()):
+            main.load_tools(system)
+        final_response = SimpleNamespace(id="response-1", output_text="ok")
+        fake_client = SimpleNamespace(
+            responses=SimpleNamespace(create=FakeCreate([final_response]))
+        )
+        provider = main.ResponsesProvider(fake_client)
+
+        provider.generate(role, "test-model", "CEO", [{"role": "user", "content": "hi"}])
+
+        tool_names = {tool["name"] for tool in fake_client.responses.create.calls[0]["tools"]}
+        self.assertIn("tools__propose", tool_names)
+        self.assertNotIn("org__create_role", tool_names)
+
+    def test_disallowed_tool_call_is_rejected_at_runtime(self):
+        employee_dict = main.build_employee_dict()
+        system = main.System(employee_dict)
+        with redirect_stdout(StringIO()):
+            main.load_tools(system)
+            response = system.interact(
+                json.dumps(
+                    {
+                        "exec": "org.create_role",
+                        "args": {
+                            "role_name": "QA",
+                            "role_description": "Tests the organization",
+                        },
+                    }
+                ),
+                caller=employee_dict["SE"],
+            )
+
+        self.assertIn("not allowed", response)
+        self.assertNotIn("QA", employee_dict)
+
+    def test_operator_can_grant_tool_access(self):
+        employee_dict = main.build_employee_dict()
+        system = main.System(employee_dict)
+        with redirect_stdout(StringIO()):
+            main.load_tools(system)
+            grant_response = system.interact(
+                json.dumps(
+                    {
+                        "exec": "tools.grant",
+                        "args": {
+                            "role_name": "SE",
+                            "tool_name": "memory.search",
+                            "granted_by": "Ops",
+                        },
+                    }
+                ),
+                caller=employee_dict["Ops"],
+            )
+
+        self.assertIn("Granted tool access", grant_response)
+        self.assertIn("memory.search", employee_dict["SE"].allowed_tools)
+
+    def test_se_cannot_propose_system_tool_update(self):
+        employee_dict = main.build_employee_dict()
+        system = main.System(employee_dict)
+        with redirect_stdout(StringIO()):
+            main.load_tools(system)
+            response = system.interact(
+                json.dumps(
+                    {
+                        "exec": "tools.propose",
+                        "args": {
+                            "requested_by": "SE",
+                            "tool_name": "memory.search",
+                            "description": "Change memory access.",
+                            "action": "update",
+                        },
+                    }
+                ),
+                caller=employee_dict["SE"],
+            )
+
+        self.assertIn("System tool", response)
+
+    def test_tools_list_reports_allowed_access_for_role(self):
+        employee_dict = main.build_employee_dict()
+        system = main.System(employee_dict)
+        with redirect_stdout(StringIO()):
+            main.load_tools(system)
+            response = system.interact(
+                json.dumps(
+                    {
+                        "exec": "tools.list",
+                        "args": {"role_name": "SE", "only_allowed": True},
+                    }
+                ),
+                caller=employee_dict["SE"],
+            )
+
+        tools = json.loads(response.split("Result: ", 1)[1])
+        names = {tool["name"] for tool in tools}
+
+        self.assertIn("tools.propose", names)
+        self.assertNotIn("org.create_role", names)
 
     def test_model_retry_retries_rate_limit_errors(self):
         attempts = []
