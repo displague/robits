@@ -110,6 +110,11 @@ Trusted tools live in `tools.yaml`. Each entry includes a namespaced `name`, a J
 Agents can use trusted alarm tools to create, list, and cancel their own reminders,
 and memory tools to inspect accessible SQLite memory. Memory digest creation and
 re-digestion remain automatic system behavior rather than agent-callable tools.
+Roles carry tool grants such as `agent.*` or `memory.search`; model providers
+only expose tools allowed for the active role, and execution denies disallowed
+tool calls. Operator roles can grant or revoke tool access, SE can propose
+non-system tool changes, and system tools such as memory internals and HR role
+management cannot be changed through SE proposals.
 
 Example execution payload:
 
