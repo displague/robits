@@ -358,7 +358,7 @@ class RuntimeTests(unittest.TestCase):
                         "args": {
                             "role_name": "Research",
                             "role_description": "Explores memory.",
-                            "tool_grants": ["memory.search"],
+                            "tool_grants": ["tools.list"],
                         },
                     }
                 ),
@@ -366,7 +366,7 @@ class RuntimeTests(unittest.TestCase):
             )
 
         self.assertIn("Created a new role: Research", response)
-        self.assertIn("memory.search", employee_dict["Research"].allowed_tools)
+        self.assertIn("tools.list", employee_dict["Research"].allowed_tools)
 
     def test_lifecycle_rejects_invalid_transitions_without_new_event(self):
         employee_dict = main.build_employee_dict()
@@ -645,7 +645,7 @@ class RuntimeTests(unittest.TestCase):
                         "exec": "tools.grant",
                         "args": {
                             "role_name": "SE",
-                            "tool_name": "memory.search",
+                            "tool_name": "memory__search",
                             "granted_by": "Ops",
                         },
                     }
@@ -655,6 +655,29 @@ class RuntimeTests(unittest.TestCase):
 
         self.assertIn("Granted tool access", grant_response)
         self.assertIn("memory.search", employee_dict["SE"].allowed_tools)
+
+    def test_operator_can_revoke_tool_access_with_openai_alias(self):
+        employee_dict = main.build_employee_dict()
+        employee_dict["SE"].allowed_tools.add("memory.search")
+        system = main.System(employee_dict)
+        with redirect_stdout(StringIO()):
+            main.load_tools(system)
+            revoke_response = system.interact(
+                json.dumps(
+                    {
+                        "exec": "tools.revoke",
+                        "args": {
+                            "role_name": "SE",
+                            "tool_name": "memory__search",
+                            "revoked_by": "Ops",
+                        },
+                    }
+                ),
+                caller=employee_dict["Ops"],
+            )
+
+        self.assertIn("Revoked tool access", revoke_response)
+        self.assertNotIn("memory.search", employee_dict["SE"].allowed_tools)
 
     def test_se_cannot_propose_system_tool_update(self):
         employee_dict = main.build_employee_dict()
@@ -699,6 +722,29 @@ class RuntimeTests(unittest.TestCase):
         self.assertIn("tools.propose", names)
         self.assertNotIn("org.create_role", names)
 
+    def test_tools_list_without_role_does_not_report_allowed_true(self):
+        system = main.System(main.build_employee_dict())
+        with redirect_stdout(StringIO()):
+            main.load_tools(system)
+            response = system.interact(
+                json.dumps({"exec": "tools.list", "args": {}})
+            )
+
+        tools = json.loads(response.split("Result: ", 1)[1])
+
+        self.assertIsNone(tools[0]["allowed"])
+
+    def test_tools_list_only_allowed_requires_role(self):
+        system = main.System(main.build_employee_dict())
+        with redirect_stdout(StringIO()):
+            main.load_tools(system)
+            response = system.interact(
+                json.dumps({"exec": "tools.list", "args": {"only_allowed": True}})
+            )
+
+        self.assertIn("role_name is required", response)
+
+
     def test_model_retry_retries_rate_limit_errors(self):
         attempts = []
         original_retries = main.max_api_retries
@@ -729,6 +775,34 @@ class RuntimeTests(unittest.TestCase):
         self.assertEqual(len(attempts), 2)
         sleep.assert_not_called()
 
+    def test_chat_completion_parallelism_gate_covers_stream_consumption(self):
+        gate_was_held = []
+
+        def stream():
+            gate_was_held.append(not main.model_call_gate.acquire(blocking=False))
+            if not gate_was_held[-1]:
+                main.model_call_gate.release()
+            yield SimpleNamespace(
+                choices=[
+                    SimpleNamespace(delta=SimpleNamespace(content="hello"))
+                ]
+            )
+
+        fake_client = SimpleNamespace(
+            chat=SimpleNamespace(
+                completions=SimpleNamespace(
+                    create=lambda **_kwargs: stream()
+                ),
+            )
+        )
+        provider = main.ChatCompletionsProvider(fake_client)
+        role = SimpleNamespace(name="SE", max_tokens=10, temperature=0)
+
+        response = provider.generate(role, "test-model", "CEO", [])
+
+        self.assertEqual(response, "hello")
+        self.assertEqual(gate_was_held, [True])
+
     def test_namespaced_exec_resolves_tool(self):
         employee_dict = main.build_employee_dict()
         system = main.System(employee_dict)
@@ -745,7 +819,7 @@ class RuntimeTests(unittest.TestCase):
                             "role_description": "Tests the organization",
                         },
                     }
-                )
+                ),
             )
 
         self.assertIn("Created a new role: QA", response)
@@ -1043,7 +1117,8 @@ class RuntimeTests(unittest.TestCase):
                             "due_at": "2026-05-08T10:00:00+00:00",
                         },
                     }
-                )
+                ),
+                caller=employee_dict["SE"],
             )
             alarm_id = employee_dict["SE"].alarms[0].alarm_id
             list_response = system.interact(
@@ -1052,7 +1127,8 @@ class RuntimeTests(unittest.TestCase):
                         "exec": "agent.list_alarms",
                         "args": {"agent_name": "SE"},
                     }
-                )
+                ),
+                caller=employee_dict["SE"],
             )
             cancel_response = system.interact(
                 json.dumps(
@@ -1060,7 +1136,8 @@ class RuntimeTests(unittest.TestCase):
                         "exec": "agent.cancel_alarm",
                         "args": {"agent_name": "SE", "alarm_id": alarm_id},
                     }
-                )
+                ),
+                caller=employee_dict["SE"],
             )
 
         alarms = json.loads(list_response.split("Result: ", 1)[1])
@@ -1069,6 +1146,49 @@ class RuntimeTests(unittest.TestCase):
         self.assertEqual(alarms[0]["reminder"], "Check build health.")
         self.assertIn("Canceled alarm", cancel_response)
         self.assertEqual(employee_dict["SE"].alarms[0].status, "canceled")
+
+    def test_agent_alarm_tools_reject_missing_caller(self):
+        employee_dict = main.build_employee_dict()
+        system = main.System(employee_dict)
+        with redirect_stdout(StringIO()):
+            main.load_tools(system)
+            response = system.interact(
+                json.dumps(
+                    {
+                        "exec": "agent.create_alarm",
+                        "args": {
+                            "agent_name": "SE",
+                            "reminder": "Check build health.",
+                            "due_at": "2026-05-08T10:00:00+00:00",
+                        },
+                    }
+                )
+            )
+
+        self.assertIn("unknown caller", response)
+        self.assertEqual(employee_dict["SE"].alarms, [])
+
+    def test_agent_alarm_tools_reject_cross_agent_access(self):
+        employee_dict = main.build_employee_dict()
+        system = main.System(employee_dict)
+        with redirect_stdout(StringIO()):
+            main.load_tools(system)
+            response = system.interact(
+                json.dumps(
+                    {
+                        "exec": "agent.create_alarm",
+                        "args": {
+                            "agent_name": "HR",
+                            "reminder": "Check people.",
+                            "due_at": "2026-05-08T10:00:00+00:00",
+                        },
+                    }
+                ),
+                caller=employee_dict["SE"],
+            )
+
+        self.assertIn("cannot manage alarms", response)
+        self.assertEqual(employee_dict["HR"].alarms, [])
 
     def test_memory_tools_search_list_and_expand_accessible_digests(self):
         employee_dict = main.build_employee_dict()
@@ -1101,7 +1221,8 @@ class RuntimeTests(unittest.TestCase):
                                 "exec": "memory.search",
                                 "args": {"agent_name": "SE", "query": "preserve"},
                             }
-                        )
+                        ),
+                        caller=employee_dict["SE"],
                     )
                     list_response = system.interact(
                         json.dumps(
@@ -1109,7 +1230,8 @@ class RuntimeTests(unittest.TestCase):
                                 "exec": "memory.list_digests",
                                 "args": {"agent_name": "SE", "digest_type": "identity"},
                             }
-                        )
+                        ),
+                        caller=employee_dict["SE"],
                     )
                     expand_response = system.interact(
                         json.dumps(
@@ -1117,7 +1239,8 @@ class RuntimeTests(unittest.TestCase):
                                 "exec": "memory.expand_digest",
                                 "args": {"agent_name": "SE", "digest_id": digest_id},
                             }
-                        )
+                        ),
+                        caller=employee_dict["SE"],
                     )
             finally:
                 main.memory_store = original_store
@@ -1130,6 +1253,71 @@ class RuntimeTests(unittest.TestCase):
         self.assertTrue(search_results)
         self.assertEqual(digest_results[0]["digest_id"], digest_id)
         self.assertEqual(expanded[0]["record"]["content"], "Robits should preserve source memory.")
+
+    def test_memory_tools_reject_cross_agent_access(self):
+        employee_dict = main.build_employee_dict()
+        system = main.System(employee_dict)
+        original_store = main.memory_store
+        with tempfile.TemporaryDirectory() as temp_dir:
+            store = SQLiteMemoryStore(os.path.join(temp_dir, "memory.sqlite3"))
+            try:
+                store.create_session("session-1")
+                store.upsert_agent("HR", "HR", "HR")
+                store.append_message(
+                    "session-1",
+                    "HR",
+                    "HR",
+                    "Private HR memory.",
+                )
+                main.memory_store = store
+                with redirect_stdout(StringIO()):
+                    main.load_tools(system)
+                    response = system.interact(
+                        json.dumps(
+                            {
+                                "exec": "memory.search",
+                                "args": {"agent_name": "HR", "query": "private"},
+                            }
+                        ),
+                        caller=employee_dict["SE"],
+                    )
+            finally:
+                main.memory_store = original_store
+                store.close()
+
+        self.assertIn("cannot inspect memory", response)
+
+    def test_memory_tools_reject_missing_caller(self):
+        employee_dict = main.build_employee_dict()
+        system = main.System(employee_dict)
+        original_store = main.memory_store
+        with tempfile.TemporaryDirectory() as temp_dir:
+            store = SQLiteMemoryStore(os.path.join(temp_dir, "memory.sqlite3"))
+            try:
+                store.create_session("session-1")
+                store.upsert_agent("SE", "SoftwareEngineer", "SE")
+                store.append_message(
+                    "session-1",
+                    "SE",
+                    "SE",
+                    "Private SE memory.",
+                )
+                main.memory_store = store
+                with redirect_stdout(StringIO()):
+                    main.load_tools(system)
+                    response = system.interact(
+                        json.dumps(
+                            {
+                                "exec": "memory.search",
+                                "args": {"agent_name": "SE", "query": "private"},
+                            }
+                        )
+                    )
+            finally:
+                main.memory_store = original_store
+                store.close()
+
+        self.assertIn("unknown caller", response)
 
     def test_due_alarm_is_injected_into_agent_prompt(self):
         participants = build_fake_participants()
