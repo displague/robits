@@ -8,12 +8,14 @@ import os
 import json
 import re
 import yaml
-from datetime import datetime, timezone
+import threading
+from datetime import datetime, timedelta, timezone
 from termcolor import colored
 import argparse
 from pathlib import Path
 from uuid import uuid4
 
+from robits.memory.sqlite import SQLiteMemoryStore
 from robits.runtime.sandbox import SandboxMetadata
 
 
@@ -34,6 +36,14 @@ client = make_client()
 default_model = os.environ.get("ROBITS_MODEL") or os.environ.get("OPENAI_MODEL") or "gpt-4o-mini"
 costly_model = os.environ.get("ROBITS_COSTLY_MODEL", default_model)
 cheap_model = os.environ.get("ROBITS_CHEAP_MODEL", default_model)
+provider_api = os.environ.get("ROBITS_PROVIDER_API", "responses").strip().lower()
+max_parallelism = max(1, int(os.environ.get("ROBITS_MAX_PARALLELISM", "1")))
+max_api_retries = max(0, int(os.environ.get("ROBITS_MAX_API_RETRIES", "3")))
+api_retry_base_seconds = max(0.0, float(os.environ.get("ROBITS_API_RETRY_BASE_SECONDS", "0.25")))
+api_retry_max_seconds = max(api_retry_base_seconds, float(os.environ.get("ROBITS_API_RETRY_MAX_SECONDS", "4.0")))
+model_call_gate = threading.BoundedSemaphore(max_parallelism)
+memory_db_path = os.environ.get("ROBITS_MEMORY_DB")
+memory_store = SQLiteMemoryStore(memory_db_path) if memory_db_path else None
 SAFE_TOOL_BUILTINS = {
     "bool": bool,
     "dict": dict,
@@ -140,6 +150,14 @@ class ToolRegistry:
                 "create_lifecycle_role": create_lifecycle_role,
                 "pause_lifecycle_role": pause_lifecycle_role,
                 "retire_lifecycle_role": retire_lifecycle_role,
+                "archive_lifecycle_role": archive_lifecycle_role,
+                "list_lifecycle_roles": list_lifecycle_roles,
+                "create_alarm": create_alarm,
+                "list_alarms": list_alarms,
+                "cancel_alarm": cancel_alarm,
+                "memory_search": memory_search,
+                "memory_list_digests": memory_list_digests,
+                "memory_expand_digest": memory_expand_digest,
             },
             local_dict,
         )
@@ -246,7 +264,153 @@ class ToolRegistry:
 
 tool_registry = ToolRegistry()
 
-LIFECYCLE_STATES = ("proposed", "active", "paused", "retired")
+
+def _response_text(response):
+    output_text = getattr(response, "output_text", None)
+    if output_text:
+        return output_text
+    chunks = []
+    for item in getattr(response, "output", []) or []:
+        if getattr(item, "type", None) == "message":
+            for content in getattr(item, "content", []) or []:
+                text = getattr(content, "text", None)
+                if text:
+                    chunks.append(text)
+        elif getattr(item, "type", None) in {"output_text", "text"}:
+            text = getattr(item, "text", None)
+            if text:
+                chunks.append(text)
+    return "".join(chunks)
+
+
+def _response_function_calls(response):
+    calls = []
+    for item in getattr(response, "output", []) or []:
+        if getattr(item, "type", None) != "function_call":
+            continue
+        calls.append(item)
+    return calls
+
+
+def _is_retryable_api_error(error):
+    status_code = getattr(error, "status_code", None)
+    if status_code in {408, 409, 429, 500, 502, 503, 504}:
+        return True
+    name = error.__class__.__name__.lower()
+    return any(token in name for token in ("ratelimit", "timeout", "connection"))
+
+
+def _with_model_retries(operation):
+    attempt = 0
+    while True:
+        try:
+            with model_call_gate:
+                return operation()
+        except Exception as error:
+            if attempt >= max_api_retries or not _is_retryable_api_error(error):
+                raise
+            delay = min(api_retry_max_seconds, api_retry_base_seconds * (2**attempt))
+            if delay:
+                time.sleep(delay + random.uniform(0, delay / 4))
+            attempt += 1
+
+
+class ModelProvider:
+    def generate(self, role, model, sender, messages):
+        raise NotImplementedError
+
+
+class ChatCompletionsProvider(ModelProvider):
+    def __init__(self, api_client):
+        self.client = api_client
+
+    def generate(self, role, model, sender, messages):
+        def request():
+            return self.client.chat.completions.create(
+                model=model,
+                messages=messages,
+                max_tokens=role.max_tokens,
+                n=1,
+                temperature=role.temperature,
+                user=f"robits_{role.name}",
+                stream=True,
+            )
+
+        stream = _with_model_retries(request)
+        content = ""
+        for chunk in stream:
+            if chunk.choices[0].delta.content is not None:
+                content += chunk.choices[0].delta.content
+        return content
+
+
+class ResponsesProvider(ModelProvider):
+    def __init__(self, api_client, registry=None):
+        self.client = api_client
+        self.registry = registry if registry is not None else tool_registry
+
+    def generate(self, role, model, sender, messages):
+        employee_dict = getattr(role, "employee_dict", None)
+        tools = self.registry.as_responses_tools()
+        kwargs = {
+            "model": model,
+            "input": messages,
+            "max_output_tokens": role.max_tokens,
+            "temperature": role.temperature,
+            "user": f"robits_{role.name}",
+        }
+        if tools:
+            kwargs["tools"] = tools
+            kwargs["tool_choice"] = "auto"
+
+        response = _with_model_retries(lambda: self.client.responses.create(**kwargs))
+        for _ in range(8):
+            function_calls = _response_function_calls(response)
+            if not function_calls:
+                return _response_text(response)
+            if employee_dict is None:
+                return "Error: Tool call requested but no employee dictionary is available."
+            outputs = []
+            for call in function_calls:
+                try:
+                    args = json.loads(getattr(call, "arguments", "") or "{}")
+                except json.JSONDecodeError as error:
+                    result = f"Error: Invalid tool arguments JSON: {error}"
+                else:
+                    result = self.registry.execute(getattr(call, "name", ""), args, employee_dict)
+                outputs.append(
+                    {
+                        "type": "function_call_output",
+                        "call_id": getattr(call, "call_id", getattr(call, "id", "")),
+                        "output": result,
+                    }
+                )
+            previous_response_id = getattr(response, "id", None)
+            if previous_response_id:
+                response = _with_model_retries(
+                    lambda: self.client.responses.create(
+                        model=model,
+                        input=outputs,
+                        previous_response_id=previous_response_id,
+                    )
+                )
+            else:
+                kwargs["input"] = messages + outputs
+                response = _with_model_retries(lambda: self.client.responses.create(**kwargs))
+        return "Error: Too many consecutive tool-call rounds."
+
+
+def make_model_provider():
+    if provider_api in {"chat", "chat_completions", "chat-completions"}:
+        return ChatCompletionsProvider(client)
+    return ResponsesProvider(client)
+
+
+model_provider = make_model_provider()
+
+LIFECYCLE_STATES = ("proposed", "active", "paused", "retired", "exited")
+PROTECTED_ROLE_NAMES = {"CEO", "HR"}
+ALARM_RECURRENCES = {"once", "hourly", "daily", "weekly"}
 
 
 @dataclass
@@ -260,6 +424,48 @@ class LifecycleEvent:
     created_at: str = field(
         default_factory=lambda: datetime.now(timezone.utc).isoformat(timespec="seconds")
     )
+
+
+@dataclass
+class Alarm:
+    alarm_id: str
+    agent_name: str
+    reminder: str
+    due_at: str
+    recurrence: str = "once"
+    status: str = "active"
+    created_at: str = field(
+        default_factory=lambda: datetime.now(timezone.utc).isoformat(timespec="seconds")
+    )
+
+
+def _parse_datetime(value):
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError("Timestamp must be a non-empty ISO datetime string.")
+    normalized = value.strip().replace("Z", "+00:00")
+    parsed = datetime.fromisoformat(normalized)
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed
+
+
+def _format_datetime(value):
+    return value.astimezone(timezone.utc).isoformat(timespec="seconds")
+
+
+def _normalize_capabilities(capabilities=None):
+    if capabilities is None:
+        return set()
+    if isinstance(capabilities, str):
+        raw = [capabilities]
+    else:
+        raw = list(capabilities)
+    normalized = set()
+    for capability in raw:
+        if not isinstance(capability, str) or not capability.strip():
+            raise ValueError("Capabilities must be non-empty strings.")
+        normalized.add(capability.strip())
+    return normalized
 
 
 def validate_role_name(role_name):
@@ -315,12 +521,14 @@ def create_lifecycle_role(
     employee_dict,
     role_name,
     role_description,
+    capabilities=None,
     requested_by=None,
     approved_by=None,
 ):
     try:
         normalized_name = validate_role_name(role_name)
         normalized_description = validate_role_description(role_description)
+        normalized_capabilities = _normalize_capabilities(capabilities)
     except ValueError as e:
         return f"Error: {e}"
     if normalized_name in employee_dict:
@@ -329,6 +537,7 @@ def create_lifecycle_role(
         return f"Error: The organization has reached its maximum size of {HR.max_organization_members} members."
 
     new_role = Role(normalized_name, normalized_description, employee_dict)
+    new_role.capabilities = normalized_capabilities
     record_lifecycle_event(
         new_role,
         action="create",
@@ -338,7 +547,10 @@ def create_lifecycle_role(
     )
     employee_dict[normalized_name] = new_role
     actor_text = format_lifecycle_actor_text(requested_by, approved_by)
-    return f"Created a new role: {normalized_name} (state: active){actor_text}"
+    capabilities_text = (
+        f" capabilities={sorted(normalized_capabilities)}" if normalized_capabilities else ""
+    )
+    return f"Created a new role: {normalized_name} (state: active{capabilities_text}){actor_text}"
 
 
 def change_lifecycle_state(
@@ -419,6 +631,220 @@ def retire_lifecycle_role(
     )
 
 
+def _is_role_protected(role_name, role):
+    capabilities = getattr(role, "capabilities", set())
+    return (
+        role_name in PROTECTED_ROLE_NAMES
+        or "protected" in capabilities
+        or "essential" in capabilities
+    )
+
+
+def archive_lifecycle_role(
+    employee_dict,
+    role_name,
+    requested_by=None,
+    approved_by=None,
+    reason=None,
+):
+    try:
+        normalized_name = validate_role_name(role_name)
+    except ValueError as e:
+        return f"Error: {e}"
+    if normalized_name not in employee_dict:
+        return f"Error: Role '{normalized_name}' not found."
+    role = employee_dict[normalized_name]
+    if _is_role_protected(normalized_name, role):
+        return f"Error: Role '{normalized_name}' is protected and cannot be removed from the organization."
+    return change_lifecycle_state(
+        employee_dict,
+        normalized_name,
+        "exited",
+        "archive",
+        requested_by=requested_by,
+        approved_by=approved_by,
+        reason=reason,
+        allowed_from=("active", "paused", "retired"),
+    )
+
+
+def list_lifecycle_roles(employee_dict, include_exited=True):
+    rows = []
+    for name, role in sorted(employee_dict.items()):
+        state = getattr(role, "lifecycle_state", "active")
+        if not include_exited and state == "exited":
+            continue
+        capabilities = sorted(getattr(role, "capabilities", set()))
+        rows.append(
+            {
+                "role_name": name,
+                "lifecycle_state": state,
+                "capabilities": capabilities,
+            }
+        )
+    return json.dumps(rows, sort_keys=True)
+
+
+def _active_alarms(role):
+    return [alarm for alarm in getattr(role, "alarms", []) if alarm.status == "active"]
+
+
+def create_alarm(employee_dict, agent_name, reminder, due_at, recurrence="once"):
+    try:
+        normalized_name = validate_role_name(agent_name)
+        due = _parse_datetime(due_at)
+    except ValueError as e:
+        return f"Error: {e}"
+    if normalized_name not in employee_dict:
+        return f"Error: Role '{normalized_name}' not found."
+    if not isinstance(reminder, str) or not reminder.strip():
+        return "Error: Reminder must be a non-empty string."
+    recurrence = (recurrence or "once").strip().lower()
+    if recurrence not in ALARM_RECURRENCES:
+        return f"Error: Invalid recurrence '{recurrence}'."
+    role = employee_dict[normalized_name]
+    if len(_active_alarms(role)) >= 5:
+        return f"Error: Role '{normalized_name}' already has the maximum of 5 active alarms."
+    alarm = Alarm(
+        alarm_id=f"alarm-{uuid4()}",
+        agent_name=normalized_name,
+        reminder=reminder.strip(),
+        due_at=_format_datetime(due),
+        recurrence=recurrence,
+    )
+    role.alarms.append(alarm)
+    return f"Created alarm '{alarm.alarm_id}' for {normalized_name} at {alarm.due_at}."
+
+
+def list_alarms(employee_dict, agent_name, include_inactive=False):
+    try:
+        normalized_name = validate_role_name(agent_name)
+    except ValueError as e:
+        return f"Error: {e}"
+    if normalized_name not in employee_dict:
+        return f"Error: Role '{normalized_name}' not found."
+    alarms = []
+    for alarm in getattr(employee_dict[normalized_name], "alarms", []):
+        if alarm.status != "active" and not include_inactive:
+            continue
+        alarms.append(
+            {
+                "alarm_id": alarm.alarm_id,
+                "reminder": alarm.reminder,
+                "due_at": alarm.due_at,
+                "recurrence": alarm.recurrence,
+                "status": alarm.status,
+            }
+        )
+    return json.dumps(alarms, sort_keys=True)
+
+
+def cancel_alarm(employee_dict, agent_name, alarm_id):
+    try:
+        normalized_name = validate_role_name(agent_name)
+    except ValueError as e:
+        return f"Error: {e}"
+    if normalized_name not in employee_dict:
+        return f"Error: Role '{normalized_name}' not found."
+    for alarm in getattr(employee_dict[normalized_name], "alarms", []):
+        if alarm.alarm_id == alarm_id:
+            alarm.status = "canceled"
+            return f"Canceled alarm '{alarm_id}' for {normalized_name}."
+    return f"Error: Alarm '{alarm_id}' not found for {normalized_name}."
+
+
+def _require_memory_store():
+    if memory_store is None:
+        return None, "Error: No SQLite memory store is configured."
+    return memory_store, None
+
+
+def memory_search(employee_dict, agent_name, query, limit=10):
+    del employee_dict
+    store, error = _require_memory_store()
+    if error:
+        return error
+    try:
+        normalized_name = validate_role_name(agent_name)
+    except ValueError as e:
+        return f"Error: {e}"
+    if not isinstance(query, str) or not query.strip():
+        return "Error: Memory query must be a non-empty string."
+    results = store.search(query, agent_id=normalized_name, limit=int(limit or 10))
+    return json.dumps([result.__dict__ for result in results], sort_keys=True)
+
+
+def memory_list_digests(employee_dict, agent_name, digest_type=None, limit=10):
+    del employee_dict
+    store, error = _require_memory_store()
+    if error:
+        return error
+    try:
+        normalized_name = validate_role_name(agent_name)
+    except ValueError as e:
+        return f"Error: {e}"
+    digests = store.list_memory_digests(
+        agent_id=normalized_name,
+        digest_type=digest_type,
+        current_only=True,
+        accessible_only=True,
+        limit=int(limit or 10),
+    )
+    return json.dumps(digests, sort_keys=True)
+
+
+def memory_expand_digest(employee_dict, agent_name, digest_id, recursive=True):
+    del employee_dict
+    store, error = _require_memory_store()
+    if error:
+        return error
+    try:
+        normalized_name = validate_role_name(agent_name)
+        digest_id = int(digest_id)
+    except ValueError as e:
+        return f"Error: {e}"
+    digest = store.get_memory_digest(digest_id)
+    if digest is None:
+        return f"Error: Memory digest '{digest_id}' not found."
+    if digest.get("agent_id") not in {None, normalized_name}:
+        return f"Error: Memory digest '{digest_id}' is not accessible to {normalized_name}."
+    if digest.get("system_only") or digest.get("accessibility") != "agent":
+        return f"Error: Memory digest '{digest_id}' is system-only."
+    rows = store.expand_memory_digest_sources(digest_id, recursive=recursive)
+    rows = [
+        {
+            **row.__dict__,
+            "source_path": list(row.source_path),
+        }
+        if hasattr(row, "__dict__")
+        else row
+        for row in rows
+    ]
+    return json.dumps(rows, sort_keys=True)
+
+
+def due_alarm_reminders(role, now=None):
+    now = now or datetime.now(timezone.utc)
+    reminders = []
+    for alarm in _active_alarms(role):
+        due = _parse_datetime(alarm.due_at)
+        if due > now:
+            continue
+        reminders.append(f"Reminder due at {alarm.due_at}: {alarm.reminder}")
+        if alarm.recurrence == "once":
+            alarm.status = "completed"
+        else:
+            delta = {
+                "hourly": timedelta(hours=1),
+                "daily": timedelta(days=1),
+                "weekly": timedelta(weeks=1),
+            }[alarm.recurrence]
+            while due <= now:
+                due += delta
+            alarm.due_at = _format_datetime(due)
+    return reminders
+
+
 def interact(self, model, sender, message):
     if self.template != "" and self.name not in self.conversation_history:
         self.conversation_history[self.name] = [
@@ -429,20 +855,8 @@ def interact(self, model, sender, message):
         messages.append({"role": "user", "content": message, "name": sender})
     print(colored(f"\n---\n// {self.name}\n{json.dumps(messages)}\n---\n", "grey"))
 
-    # Start a streaming session
-    stream = client.chat.completions.create(
-        model=model,
-        messages=messages,
-        max_tokens=self.max_tokens,
-        n=1,
-        temperature=self.temperature,
-        user=f"robits_{self.name}",
-        stream=True,
-    )
-    message = {"role": "assistant", "content": "", "name": self.name}
-    for chunk in stream:
-        if chunk.choices[0].delta.content is not None:
-            message["content"] += chunk.choices[0].delta.content
+    content = model_provider.generate(self, model, sender, messages)
+    message = {"role": "assistant", "content": content or "", "name": self.name}
 
     # Remove any additional whitespace and control characters
     message["content"] = message["content"].strip()
@@ -461,6 +875,7 @@ class Role:
     def __init__(self, name, template, employee_dict, group_template_additions=""):
         self.name = name
         self.template = template + group_template_additions
+        self.employee_dict = employee_dict
         self.conversation_history = {name: [] for name in employee_dict}
         self.group_conversation_history = {}
         self.global_conversation_history = []
@@ -468,6 +883,8 @@ class Role:
         self.max_tokens = random.randint(250, 400) # -1
         self.lifecycle_state = "active"
         self.lifecycle_events = []
+        self.capabilities = set()
+        self.alarms = []
         self.sandbox_metadata = SandboxMetadata.disabled(self.name)
 
     def interact(self, sender, prompt):
@@ -538,6 +955,7 @@ class Ops(Role):
         super().__init__(
             self.__class__.__name__, role_description, employee_dict, group_template_additions
         )
+        self.capabilities = {"operator"}
 
 
 class HR(Role):
@@ -551,6 +969,7 @@ You are part of the Human Resources group. To create a new role, send a message 
         super().__init__(
             self.__class__.__name__, role_description, employee_dict, group_template_additions
         )
+        self.capabilities = {"hr", "protected", "essential"}
 
 
 class Angel(Role):
@@ -564,6 +983,7 @@ class SoftwareEngineer(Role):
         template = """As a Software Engineer (SE), you are responsible for designing, developing, and maintaining software applications. You primarily propose trusted tools when requested by others in your organization."""
         group_template_additions = """You are part of the Engineering group. Tools are trusted, repo-loaded functions described by namespaced OpenAI-compatible metadata. Propose tool behavior in plain language; do not assume untrusted chat output can define executable tools directly."""
         super().__init__(self.__class__.__name__, template, employee_dict, group_template_additions)
+        self.capabilities = {"engineer"}
 
     def interact(self, sender, prompt):
         return interact_costly(self, sender, prompt)
@@ -573,6 +993,10 @@ class Human(Role):
     def __init__(self):
         self.name = "CEO"
         self.template = "As CEO, you are responsible for making high-level decisions and setting the overall direction of the organization."
+        self.lifecycle_state = "active"
+        self.lifecycle_events = []
+        self.capabilities = {"protected", "essential"}
+        self.alarms = []
         self.sandbox_metadata = SandboxMetadata.disabled(self.name)
 
     def interact(self, *_):
@@ -697,6 +1121,11 @@ class RoundRobinScheduler:
         if participant_name not in self.participant_names:
             self.participant_names.append(participant_name)
 
+    def remove_participant(self, participant_name):
+        if participant_name in self.participant_names and len(self.participant_names) > 1:
+            self.participant_names.remove(participant_name)
+            self.index %= len(self.participant_names)
+
 
 class Session:
     def __init__(
@@ -815,22 +1244,30 @@ class Session:
         )
 
     def sync_scheduler_participants(self):
-        for name in self.participants:
-            self.scheduler.add_participant(name)
+        for name, participant in self.participants.items():
+            if getattr(participant, "lifecycle_state", "active") == "active":
+                self.scheduler.add_participant(name)
+            else:
+                self.scheduler.remove_participant(name)
 
     def step(self, message):
         sender = self.last_receiver
+        self.sync_scheduler_participants()
         routed = self.route_message(message, sender.name)
         system_events = self.process_tool_instruction(message)
         self.sync_scheduler_participants()
-        response = routed.receiver.interact(sender.name, routed.prompt)
+        prompt = routed.prompt
+        reminders = due_alarm_reminders(routed.receiver)
+        if reminders:
+            prompt = "\n".join(reminders + [prompt])
+        response = routed.receiver.interact(sender.name, prompt)
         response = "" if response is None else response
         if routed.receiver.name != "CEO" and response != "":
             print(colored(f"{routed.receiver.name} responds: {response}", "cyan"))
         self.record_turn(
             sender=sender.name,
             receiver=routed.receiver.name,
-            prompt=routed.prompt,
+            prompt=prompt,
             response=response,
             directed=routed.directed,
             system_events=system_events,

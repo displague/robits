@@ -4,8 +4,11 @@ import tempfile
 import unittest
 from contextlib import redirect_stdout
 from io import StringIO
+from types import SimpleNamespace
+from unittest.mock import patch
 
 import main
+from robits.memory.sqlite import SQLiteMemoryStore
 
 
 class FakeRole:
@@ -23,6 +26,16 @@ class FakeRole:
 
     def update_group_conversations(self, message):
         self.group_conversation_history.setdefault(self.name, []).append(message)
+
+
+class FakeCreate:
+    def __init__(self, responses):
+        self.responses = list(responses)
+        self.calls = []
+
+    def __call__(self, **kwargs):
+        self.calls.append(kwargs)
+        return self.responses.pop(0)
 
 
 def build_fake_participants():
@@ -275,6 +288,60 @@ class RuntimeTests(unittest.TestCase):
         self.assertEqual([event.action for event in qa.lifecycle_events], ["create", "pause", "retire"])
         self.assertEqual(qa.lifecycle_events[-1].approved_by, "CEO")
 
+    def test_create_and_list_roles_include_capabilities(self):
+        employee_dict = main.build_employee_dict()
+        system = main.System(employee_dict)
+        with redirect_stdout(StringIO()):
+            main.load_tools(system)
+            create_response = system.interact(
+                json.dumps(
+                    {
+                        "exec": "org.create_role",
+                        "args": {
+                            "role_name": "SRE",
+                            "role_description": "Operates runtime infrastructure.",
+                            "capabilities": ["operator", "kubeapi"],
+                        },
+                    }
+                )
+            )
+            list_response = system.interact(
+                json.dumps({"exec": "org.list_roles", "args": {}})
+            )
+
+        role_list = json.loads(list_response.split("Result: ", 1)[1])
+        sre = next(role for role in role_list if role["role_name"] == "SRE")
+
+        self.assertIn("Created a new role: SRE", create_response)
+        self.assertEqual(sre["capabilities"], ["kubeapi", "operator"])
+
+    def test_archive_role_rejects_protected_roles_and_exits_eligible_role(self):
+        employee_dict = main.build_employee_dict()
+        system = main.System(employee_dict)
+        with redirect_stdout(StringIO()):
+            main.load_tools(system)
+            protected_response = system.interact(
+                json.dumps({"exec": "org.archive_role", "args": {"role_name": "CEO"}})
+            )
+            system.interact(
+                json.dumps(
+                    {
+                        "exec": "org.create_role",
+                        "args": {
+                            "role_name": "QA",
+                            "role_description": "Tests the organization",
+                        },
+                    }
+                )
+            )
+            archived_response = system.interact(
+                json.dumps({"exec": "org.archive_role", "args": {"role_name": "QA"}})
+            )
+
+        self.assertIn("protected", protected_response)
+        self.assertIn("exited", archived_response)
+        self.assertEqual(employee_dict["QA"].lifecycle_state, "exited")
+
     def test_lifecycle_rejects_invalid_transitions_without_new_event(self):
         employee_dict = main.build_employee_dict()
         system = main.System(employee_dict)
@@ -456,6 +523,81 @@ class RuntimeTests(unittest.TestCase):
             tool["function"]["parameters"]["required"],
             ["role_name", "role_description"],
         )
+
+    def test_responses_provider_executes_registered_function_call(self):
+        employee_dict = main.build_employee_dict()
+        role = employee_dict["Ops"]
+        system = main.System(employee_dict)
+        with redirect_stdout(StringIO()):
+            main.load_tools(system)
+
+        first_response = SimpleNamespace(
+            id="response-1",
+            output=[
+                SimpleNamespace(
+                    type="function_call",
+                    call_id="call-1",
+                    name="org__create_role",
+                    arguments=json.dumps(
+                        {
+                            "role_name": "QA",
+                            "role_description": "Tests the organization",
+                        }
+                    ),
+                )
+            ],
+        )
+        final_response = SimpleNamespace(id="response-2", output_text="Created QA.")
+        fake_client = SimpleNamespace(
+            responses=SimpleNamespace(
+                create=FakeCreate([first_response, final_response])
+            )
+        )
+        provider = main.ResponsesProvider(fake_client)
+
+        response = provider.generate(
+            role,
+            "test-model",
+            "CEO",
+            [{"role": "user", "content": "create QA", "name": "CEO"}],
+        )
+
+        self.assertEqual(response, "Created QA.")
+        self.assertIn("QA", employee_dict)
+        second_call = fake_client.responses.create.calls[1]
+        self.assertEqual(second_call["previous_response_id"], "response-1")
+        self.assertEqual(second_call["input"][0]["type"], "function_call_output")
+        self.assertIn("Created a new role: QA", second_call["input"][0]["output"])
+
+    def test_model_retry_retries_rate_limit_errors(self):
+        attempts = []
+        original_retries = main.max_api_retries
+        original_base = main.api_retry_base_seconds
+        original_max = main.api_retry_max_seconds
+        try:
+            main.max_api_retries = 2
+            main.api_retry_base_seconds = 0
+            main.api_retry_max_seconds = 0
+
+            class FakeRateLimit(Exception):
+                status_code = 429
+
+            def operation():
+                attempts.append("attempt")
+                if len(attempts) == 1:
+                    raise FakeRateLimit("too many requests")
+                return "ok"
+
+            with patch("main.time.sleep") as sleep:
+                result = main._with_model_retries(operation)
+        finally:
+            main.max_api_retries = original_retries
+            main.api_retry_base_seconds = original_base
+            main.api_retry_max_seconds = original_max
+
+        self.assertEqual(result, "ok")
+        self.assertEqual(len(attempts), 2)
+        sleep.assert_not_called()
 
     def test_namespaced_exec_resolves_tool(self):
         employee_dict = main.build_employee_dict()
@@ -745,6 +887,137 @@ class RuntimeTests(unittest.TestCase):
         self.assertIn("QA", session.scheduler.participant_names)
         self.assertEqual(len(session.transcript[0].system_events), 1)
         self.assertIn("Created a new role: QA", session.transcript[0].system_events[0])
+
+    def test_exited_role_is_removed_from_scheduler(self):
+        participants = build_fake_participants()
+        participants["QA"] = FakeRole("QA", ["done"])
+        participants["QA"].lifecycle_state = "exited"
+        session = main.Session(participants=participants, run_id="session-1")
+
+        session.sync_scheduler_participants()
+
+        self.assertNotIn("QA", session.scheduler.participant_names)
+
+    def test_alarm_tools_create_list_and_cancel_alarm(self):
+        employee_dict = main.build_employee_dict()
+        system = main.System(employee_dict)
+        with redirect_stdout(StringIO()):
+            main.load_tools(system)
+            create_response = system.interact(
+                json.dumps(
+                    {
+                        "exec": "agent.create_alarm",
+                        "args": {
+                            "agent_name": "SE",
+                            "reminder": "Check build health.",
+                            "due_at": "2026-05-08T10:00:00+00:00",
+                        },
+                    }
+                )
+            )
+            alarm_id = employee_dict["SE"].alarms[0].alarm_id
+            list_response = system.interact(
+                json.dumps(
+                    {
+                        "exec": "agent.list_alarms",
+                        "args": {"agent_name": "SE"},
+                    }
+                )
+            )
+            cancel_response = system.interact(
+                json.dumps(
+                    {
+                        "exec": "agent.cancel_alarm",
+                        "args": {"agent_name": "SE", "alarm_id": alarm_id},
+                    }
+                )
+            )
+
+        alarms = json.loads(list_response.split("Result: ", 1)[1])
+
+        self.assertIn("Created alarm", create_response)
+        self.assertEqual(alarms[0]["reminder"], "Check build health.")
+        self.assertIn("Canceled alarm", cancel_response)
+        self.assertEqual(employee_dict["SE"].alarms[0].status, "canceled")
+
+    def test_memory_tools_search_list_and_expand_accessible_digests(self):
+        employee_dict = main.build_employee_dict()
+        system = main.System(employee_dict)
+        original_store = main.memory_store
+        with tempfile.TemporaryDirectory() as temp_dir:
+            store = SQLiteMemoryStore(os.path.join(temp_dir, "memory.sqlite3"))
+            try:
+                store.create_session("session-1")
+                store.upsert_agent("SE", "SoftwareEngineer", "SE")
+                message_id = store.append_message(
+                    "session-1",
+                    "SE",
+                    "SE",
+                    "Robits should preserve source memory.",
+                )
+                digest_id = store.append_memory_digest(
+                    "Digest: preserve source memory.",
+                    [{"source_table": "messages", "source_id": message_id}],
+                    agent_id="SE",
+                    session_id="session-1",
+                    digest_type="identity",
+                )
+                main.memory_store = store
+                with redirect_stdout(StringIO()):
+                    main.load_tools(system)
+                    search_response = system.interact(
+                        json.dumps(
+                            {
+                                "exec": "memory.search",
+                                "args": {"agent_name": "SE", "query": "preserve"},
+                            }
+                        )
+                    )
+                    list_response = system.interact(
+                        json.dumps(
+                            {
+                                "exec": "memory.list_digests",
+                                "args": {"agent_name": "SE", "digest_type": "identity"},
+                            }
+                        )
+                    )
+                    expand_response = system.interact(
+                        json.dumps(
+                            {
+                                "exec": "memory.expand_digest",
+                                "args": {"agent_name": "SE", "digest_id": digest_id},
+                            }
+                        )
+                    )
+            finally:
+                main.memory_store = original_store
+                store.close()
+
+        search_results = json.loads(search_response.split("Result: ", 1)[1])
+        digest_results = json.loads(list_response.split("Result: ", 1)[1])
+        expanded = json.loads(expand_response.split("Result: ", 1)[1])
+
+        self.assertTrue(search_results)
+        self.assertEqual(digest_results[0]["digest_id"], digest_id)
+        self.assertEqual(expanded[0]["record"]["content"], "Robits should preserve source memory.")
+
+    def test_due_alarm_is_injected_into_agent_prompt(self):
+        participants = build_fake_participants()
+        participants["Ops"].alarms = [
+            main.Alarm(
+                alarm_id="alarm-1",
+                agent_name="Ops",
+                reminder="Review runtime load.",
+                due_at="2026-05-08T10:00:00+00:00",
+            )
+        ]
+        session = main.Session(participants=participants, run_id="session-1")
+
+        with redirect_stdout(StringIO()):
+            session.run(initial_message="hello", max_turns=1)
+
+        self.assertIn("Reminder due at", participants["Ops"].received[0][1])
+        self.assertEqual(participants["Ops"].alarms[0].status, "completed")
 
     def test_session_emits_headless_runtime_events(self):
         participants = build_fake_participants()
