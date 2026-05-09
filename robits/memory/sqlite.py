@@ -798,6 +798,7 @@ class SQLiteMemoryStore:
         metadata=None,
         system_only=False,
         accessibility=None,
+        relationship_type=None,
     ):
         self._validate_digest_type(digest_type)
         seed_id = self.append_memory_entry(
@@ -808,6 +809,7 @@ class SQLiteMemoryStore:
             source=source,
             created_at=created_at,
             metadata=metadata,
+            relationship_type=relationship_type,
         )
         return self.append_memory_digest(
             content,
@@ -823,6 +825,7 @@ class SQLiteMemoryStore:
             source=source,
             created_at=created_at,
             metadata=metadata,
+            relationship_type=relationship_type,
         )
 
     def seed_identity_and_goal_digests(
@@ -834,6 +837,7 @@ class SQLiteMemoryStore:
         session_id=None,
         created_at=None,
         metadata=None,
+        identity_relationship_type=None,
     ):
         if short_term_goal_content is None:
             short_term_goal_content = long_term_goal_content
@@ -845,6 +849,7 @@ class SQLiteMemoryStore:
                 session_id=session_id,
                 created_at=created_at,
                 metadata=metadata,
+                relationship_type=identity_relationship_type,
             ),
             "goal_long_term": self.seed_memory_digest(
                 "goal_long_term",
@@ -1001,6 +1006,7 @@ class SQLiteMemoryStore:
         accessible_only=False,
         include_system_only=True,
         limit=100,
+        relationship_type=None,
     ):
         clauses = []
         params: list[Any] = []
@@ -1008,6 +1014,7 @@ class SQLiteMemoryStore:
             ("agent_id", agent_id),
             ("session_id", session_id),
             ("digest_type", digest_type),
+            ("relationship_type", relationship_type),
         ):
             if value is not None:
                 clauses.append(f"{column} = ?")

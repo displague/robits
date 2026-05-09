@@ -72,6 +72,8 @@ memory_digest_interval = max(0, int(os.environ.get("ROBITS_DIGEST_INTERVAL", "0"
 org_chat_context_lines = max(0, int(os.environ.get("ROBITS_ORG_CHAT_CONTEXT_LINES", "20")))
 org_digest_interval = max(0, int(os.environ.get("ROBITS_ORG_DIGEST_INTERVAL", "0")))
 _reasoning_effort_env = os.environ.get("ROBITS_REASONING_EFFORT", "").strip().lower() or None
+_raw_clock_state = os.environ.get("ROBITS_CLOCK_STATE", "on").strip().lower()
+clock_state = _raw_clock_state if _raw_clock_state in {"on", "off"} else "on"
 agent_workspace_store = AgentWorkspaceStore()
 _org_workspace = agent_workspace_store if memory_store is not None else None
 default_location = os.environ.get("ROBITS_LOCATION", "").strip()
@@ -216,6 +218,7 @@ class ToolRegistry:
                 "builtin_computer_use": builtin_computer_use,
                 "builtin_image_generation": builtin_image_generation,
                 "org_chat_read": org_chat_read,
+                "work_todo_add": work_todo_add,
             },
             local_dict,
         )
@@ -660,16 +663,26 @@ def _runtime_timezone_name(tzinfo):
     return getattr(tzinfo, "key", None) or str(tzinfo)
 
 
-def _latest_identity_digest_content(agent_id):
-    if memory_store is None:
-        return None
-    try:
-        digests = memory_store.list_memory_digests(
-            agent_id=agent_id, digest_type="identity", current_only=True, limit=1
-        )
-        return digests[0]["content"] if digests else None
-    except Exception:
-        return None
+def _get_identity_digests(agent_id):
+    """Return (primary_content, secondary_content) ordered by clock_state."""
+    if memory_store is None or not agent_id:
+        return None, None
+
+    def _fetch(rel_type):
+        try:
+            rows = memory_store.list_memory_digests(
+                agent_id=agent_id, digest_type="identity",
+                current_only=True, limit=1, relationship_type=rel_type,
+            )
+            return rows[0]["content"] if rows else None
+        except Exception:
+            return None
+
+    personal = _fetch("personal")
+    work = _fetch("work") or _fetch(None)  # fall back to untagged (legacy)
+    if clock_state == "on":
+        return work, personal
+    return personal, work
 
 
 def agent_runtime_context(role=None):
@@ -682,7 +695,9 @@ def agent_runtime_context(role=None):
         or getattr(role, "name", None)
     )
     agent_name = getattr(role, "name", None)
+    # runtime_role_name is the participant key (FK-safe); fall back to role.name for headless use.
     canonical_id = getattr(role, "runtime_role_name", None) or agent_name
+    primary_id, secondary_id = _get_identity_digests(canonical_id)
     context = {
         "agent_name": agent_name,
         "role_name": role_name,
@@ -692,7 +707,9 @@ def agent_runtime_context(role=None):
         "current_date_local": now_local.date().isoformat(),
         "timezone": _runtime_timezone_name(local_tz),
         "location": default_location or None,
-        "identity_digest": _latest_identity_digest_content(canonical_id) if canonical_id else None,
+        "clock_state": clock_state,
+        "identity_primary": primary_id,
+        "identity_secondary": secondary_id,
     }
     return {key: value for key, value in context.items() if value is not None}
 
@@ -917,6 +934,25 @@ def org_chat_read(employee_dict, limit=20):
         except Exception:
             pass
     return json.dumps({"lines": parsed, "total": len(all_lines)})
+
+
+def work_todo_add(employee_dict, title, content=None):
+    del employee_dict
+    if memory_store is None:
+        return json.dumps({"error": "memory store not available"})
+    agent_id = active_tool_caller_name or getattr(active_tool_caller, "name", None)
+    if not agent_id:
+        return json.dumps({"error": "could not determine caller identity"})
+    try:
+        todo_id = memory_store.append_todo(
+            agent_id=agent_id,
+            title=title,
+            content=content,
+            status="open",
+        )
+        return json.dumps({"todo_id": todo_id, "title": title, "status": "open"})
+    except Exception as e:
+        return json.dumps({"error": str(e)})
 
 
 def grant_tool_access(employee_dict, role_name, tool_name, granted_by=None):
@@ -1508,6 +1544,15 @@ def memory_search(employee_dict, agent_name, query, limit=10, cascade=True):
     else:
         results = store.search(query, agent_id=normalized_name, limit=effective_limit)
     result_json = json.dumps([result.__dict__ for result in results], sort_keys=True)
+    if clock_state == "off" and any(
+        getattr(r, "conversation_type", None) == "org_chat" for r in results
+    ):
+        note = (
+            "[System note: work-related content surfaced in these results. "
+            "Consider parking any useful insights via the work.todo tool "
+            "and return focus to the current personal context.]\n"
+        )
+        result_json = note + result_json
     return _condense_if_large(normalized_name, "memory_search", result_json)
 
 
@@ -1772,10 +1817,15 @@ def due_alarm_reminders(role, now=None):
     return reminders
 
 
-BREVITY_GUIDANCE = (
-    "\nCommunication style: default to concise responses — short clarifying questions, "
-    "statements of intent, and brief insights. Reserve longer responses for moments "
-    "where depth is explicitly needed or signaled by the conversation.\n"
+_ON_CLOCK_GUIDANCE = (
+    "\nCommunication style: default to concise work-focused responses — brief status updates, "
+    "statements of intent, targeted questions. Reserve longer responses for technical depth "
+    "when the context warrants it.\n"
+)
+_OFF_CLOCK_GUIDANCE = (
+    "\nCommunication style: you are off the clock. Engage personally and warmly — "
+    "short, natural conversation; curiosity; empathy. If work topics surface unexpectedly, "
+    "note them briefly and park via the work.todo tool rather than engaging at length.\n"
 )
 
 
@@ -1785,7 +1835,9 @@ def interact(self, model, sender, message):
             {"role": "system", "content": self.template},
         ]
     messages = self.conversation_history.get(self.name, [])
-    system_content = self.template + BREVITY_GUIDANCE + format_agent_context(self)
+    effective_clock = getattr(self, "runtime_clock_state", clock_state)
+    guidance = _ON_CLOCK_GUIDANCE if effective_clock == "on" else _OFF_CLOCK_GUIDANCE
+    system_content = self.template + guidance + format_agent_context(self)
     if messages and messages[0].get("role") == "system":
         messages[0]["content"] = system_content
     elif self.template:
@@ -2110,6 +2162,7 @@ class Session:
         run_id=None,
         max_turns=None,
         event_stream=None,
+        clock_state=None,
     ):
         self.participants = participants if participants is not None else build_employee_dict()
         self.system = system if system is not None else System(self.participants)
@@ -2123,12 +2176,15 @@ class Session:
         self.last_receiver = self.participants.get("CEO") or next(iter(self.participants.values()))
         # Map role.name → participant dict key for FK-safe persistence.
         self._name_to_key = {getattr(p, "name", k): k for k, p in self.participants.items()}
+        _cs = clock_state or globals().get("clock_state", "on")
+        self.clock_state = _cs if _cs in {"on", "off"} else "on"
         self.event_stream.emit(
             "session.created",
             self.run_id,
             {
                 "participants": list(self.participants),
                 "max_turns": self.max_turns,
+                "clock_state": self.clock_state,
             },
         )
         self._org_workspace = _org_workspace
@@ -2405,6 +2461,7 @@ class Session:
         role.runtime_event_stream = self.event_stream
         role.runtime_session_id = self.run_id
         role.runtime_tool_results = []
+        role.runtime_clock_state = self.clock_state
         for name, participant in self.participants.items():
             if participant is role:
                 role.runtime_role_name = name
@@ -2438,7 +2495,8 @@ class Session:
             self.recent_system_events() + system_events,
         )
         # Inject org chat context for the model only — not stored in transcript to avoid bloat.
-        org_context = format_org_chat_context(self.transcript, org_chat_context_lines)
+        effective_org_lines = org_chat_context_lines if self.clock_state == "on" else 0
+        org_context = format_org_chat_context(self.transcript, effective_org_lines)
         model_prompt = org_context + raw_prompt if org_context else raw_prompt
         self.prepare_agent_runtime(routed.receiver)
         response = routed.receiver.interact(sender.name, model_prompt)
