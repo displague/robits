@@ -21,6 +21,7 @@ from robits.memory.sqlite import (
     CHANNEL_ORG_CHAT,
     SOCIAL_PROFESSIONAL,
     SQLiteMemoryStore,
+    compute_phase_shift,
 )
 from robits.runtime.sandbox import SandboxMetadata
 from robits.runtime.tool_proposals import ToolProposalStore
@@ -2313,6 +2314,8 @@ class Session:
             canonical_sender = self._canonical_agent_id(sender)
             canonical_receiver = self._canonical_agent_id(receiver)
             try:
+                sender_phase = memory_store.get_agent_phase(canonical_sender)
+                receiver_phase = memory_store.get_agent_phase(canonical_receiver)
                 if prompt:
                     memory_store.append_message(
                         session_id=self.run_id,
@@ -2321,6 +2324,7 @@ class Session:
                         content=prompt,
                         kind="message",
                         channel_id=self._org_chat_channel_id,
+                        sender_phase=sender_phase,
                     )
                 if response:
                     memory_store.append_message(
@@ -2330,7 +2334,21 @@ class Session:
                         content=response,
                         kind="message",
                         channel_id=self._org_chat_channel_id,
+                        sender_phase=receiver_phase,
                     )
+                # Phase-shift: shift receiver toward sender's phase, weighted by social distance.
+                if self._org_chat_channel_id is not None and sender_phase is not None and receiver_phase is not None:
+                    try:
+                        social_distance = memory_store.get_channel_social_distance(
+                            self._org_chat_channel_id
+                        )
+                        if social_distance is not None:
+                            shifted = compute_phase_shift(
+                                receiver_phase, sender_phase, social_distance
+                            )
+                            memory_store.set_agent_phase(canonical_receiver, shifted)
+                    except Exception:
+                        pass
             except Exception:
                 pass
             if (
