@@ -68,6 +68,7 @@ tool_proposal_store = None
 memory_max_depth = max(0, int(os.environ.get("ROBITS_MEMORY_MAX_DEPTH", "3")))
 memory_max_rows = max(1, int(os.environ.get("ROBITS_MEMORY_MAX_ROWS", "100")))
 memory_cache_threshold = max(512, int(os.environ.get("ROBITS_MEMORY_CACHE_THRESHOLD", "8192")))
+memory_digest_interval = max(0, int(os.environ.get("ROBITS_DIGEST_INTERVAL", "0")))
 agent_workspace_store = AgentWorkspaceStore()
 default_location = os.environ.get("ROBITS_LOCATION", "").strip()
 default_timezone = os.environ.get("ROBITS_TIMEZONE", "").strip()
@@ -446,6 +447,21 @@ def _emit_role_tool_event(role, event_type, payload):
     session_id = getattr(role, "runtime_session_id", None)
     if event_stream is not None and session_id is not None:
         event_stream.emit(event_type, session_id, payload)
+    if memory_store is not None and event_type in {"tool_call.executed", "tool_call.failed"}:
+        agent_id = getattr(role, "name", None) or getattr(role, "runtime_role_name", None)
+        if agent_id:
+            try:
+                memory_store.append_tool_call(
+                    tool_call_id=payload.get("call_id") or str(uuid4()),
+                    agent_id=agent_id,
+                    tool_name=payload.get("tool_name", ""),
+                    arguments=payload.get("arguments"),
+                    result_content=str(payload.get("result", "")),
+                    status="executed" if event_type == "tool_call.executed" else "failed",
+                    session_id=session_id,
+                )
+            except Exception:
+                pass
 
 
 def _record_role_tool_result(role, result):
@@ -1086,6 +1102,29 @@ def record_lifecycle_event(
         role.lifecycle_events = []
     role.lifecycle_events.append(event)
     role.lifecycle_state = lifecycle_state
+    if memory_store is not None:
+        try:
+            memory_store.upsert_agent(
+                role.name,
+                type(role).__name__,
+                display_name=role.name,
+                lifecycle_state=lifecycle_state,
+            )
+            summary = f"[lifecycle:{action}] {role.name} -> {lifecycle_state}"
+            if requested_by:
+                summary += f" (requested_by={requested_by})"
+            if approved_by:
+                summary += f" (approved_by={approved_by})"
+            if reason:
+                summary += f" reason={reason}"
+            memory_store.append_memory_entry(
+                agent_id=role.name,
+                kind="lifecycle",
+                content=summary,
+                source="system",
+            )
+        except Exception:
+            pass
     return event
 
 
@@ -2026,6 +2065,14 @@ class Session:
                 "max_turns": self.max_turns,
             },
         )
+        if memory_store is not None:
+            try:
+                memory_store.create_session(self.run_id)
+                for name, participant in self.participants.items():
+                    role_type = type(participant).__name__
+                    memory_store.upsert_agent(name, role_type, display_name=name)
+            except Exception:
+                pass
 
     def route_message(self, message, last_receiver_name=None):
         prompt_split = message.split(",", 1) if isinstance(message, str) else []
@@ -2130,9 +2177,88 @@ class Session:
                 "system_event_count": len(entry.system_events),
             },
         )
+        if memory_store is not None:
+            try:
+                if prompt:
+                    memory_store.append_message(
+                        session_id=self.run_id,
+                        sender_agent_id=sender,
+                        receiver_agent_id=receiver,
+                        content=prompt,
+                        kind="message",
+                    )
+                if response:
+                    memory_store.append_message(
+                        session_id=self.run_id,
+                        sender_agent_id=receiver,
+                        receiver_agent_id=sender,
+                        content=response,
+                        kind="message",
+                    )
+            except Exception:
+                pass
+            if (
+                memory_digest_interval > 0
+                and self.turns_completed % memory_digest_interval == 0
+            ):
+                self._auto_digest()
         return entry
 
+    def _auto_digest(self):
+        """Create a raw transcript digest covering the last memory_digest_interval turns."""
+        window = self.transcript[-memory_digest_interval:]
+        lines = []
+        for e in window:
+            if e.prompt:
+                lines.append(f"[turn {e.turn}] {e.sender} -> {e.receiver}: {e.prompt[:512]}")
+            if e.response:
+                lines.append(f"[turn {e.turn}] {e.receiver}: {e.response[:512]}")
+        content = "\n".join(lines)
+        if not content.strip():
+            return
+        source_refs = []
+        try:
+            recent_msg_rows = memory_store.connection.execute(
+                """
+                SELECT message_id FROM messages
+                WHERE session_id = ?
+                ORDER BY message_id DESC LIMIT ?
+                """,
+                (self.run_id, memory_digest_interval * 2),
+            ).fetchall()
+            source_refs = [
+                {"source_table": "messages", "source_id": row["message_id"]}
+                for row in recent_msg_rows
+            ]
+        except Exception:
+            pass
+        if not source_refs:
+            return
+        try:
+            for agent_id in list(self.participants):
+                memory_store.append_memory_digest(
+                    content=content,
+                    source_refs=source_refs,
+                    agent_id=agent_id,
+                    session_id=self.run_id,
+                    digest_type="episodic",
+                    accessibility="agent",
+                    system_only=False,
+                )
+        except Exception:
+            pass
+
     def record_thought(self, agent_name, content, visibility="private"):
+        if memory_store is not None:
+            try:
+                memory_store.append_thought(
+                    agent_id=agent_name,
+                    content=content,
+                    session_id=self.run_id,
+                    visibility=visibility,
+                )
+            except Exception:
+                pass
         return self.event_stream.emit(
             "thought.recorded",
             self.run_id,
@@ -2231,6 +2357,11 @@ class Session:
                 "turns_completed": self.turns_completed,
             },
         )
+        if memory_store is not None:
+            try:
+                memory_store.end_session(self.run_id)
+            except Exception:
+                pass
         return self
 
 

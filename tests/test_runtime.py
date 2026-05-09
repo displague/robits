@@ -2370,5 +2370,155 @@ class MemoryToolTests(unittest.TestCase):
         self.assertTrue(result.startswith("Error:"))
 
 
+class SessionMemoryCaptureTests(unittest.TestCase):
+    """Tests that Session persists messages, thoughts, tool calls, and lifecycle events."""
+
+    def setUp(self):
+        self.store_temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.store_temp.cleanup)
+        self.store = SQLiteMemoryStore(Path(self.store_temp.name) / "mem.sqlite3")
+        self.addCleanup(self.store.close)
+
+        self.original_store = main.memory_store
+        self.original_digest_interval = main.memory_digest_interval
+        main.memory_store = self.store
+        main.memory_digest_interval = 0
+        self.addCleanup(self._restore)
+
+    def _restore(self):
+        main.memory_store = self.original_store
+        main.memory_digest_interval = self.original_digest_interval
+
+    def _make_session(self):
+        participants = {
+            "A": SimpleNamespace(
+                name="A",
+                lifecycle_state="active",
+                interact=lambda *a, **kw: "hello",
+                update_group_conversations=lambda m: None,
+                runtime_tool_results=[],
+            ),
+            "B": SimpleNamespace(
+                name="B",
+                lifecycle_state="active",
+                interact=lambda *a, **kw: "world",
+                update_group_conversations=lambda m: None,
+                runtime_tool_results=[],
+            ),
+        }
+        system = SimpleNamespace(interact=lambda *a, **kw: None)
+        scheduler = main.RoundRobinScheduler(list(participants))
+        return main.Session(
+            participants=participants,
+            system=system,
+            scheduler=scheduler,
+        )
+
+    def test_session_creation_is_persisted(self):
+        session = self._make_session()
+        row = self.store.connection.execute(
+            "SELECT session_id FROM sessions WHERE session_id = ?", (session.run_id,)
+        ).fetchone()
+        self.assertIsNotNone(row)
+
+    def test_agents_are_upserted_on_session_init(self):
+        session = self._make_session()
+        agents = self.store.connection.execute(
+            "SELECT agent_id FROM agents WHERE agent_id IN ('A', 'B')"
+        ).fetchall()
+        self.assertEqual({r["agent_id"] for r in agents}, {"A", "B"})
+
+    def test_turn_messages_are_persisted(self):
+        session = self._make_session()
+        session.record_turn("A", "B", "hello prompt", "world response")
+        rows = self.store.connection.execute(
+            "SELECT content FROM messages WHERE session_id = ?", (session.run_id,)
+        ).fetchall()
+        contents = {r["content"] for r in rows}
+        self.assertIn("hello prompt", contents)
+        self.assertIn("world response", contents)
+
+    def test_empty_prompt_and_response_not_persisted(self):
+        session = self._make_session()
+        session.record_turn("A", "B", "", "")
+        rows = self.store.connection.execute(
+            "SELECT COUNT(*) AS n FROM messages WHERE session_id = ?", (session.run_id,)
+        ).fetchone()
+        self.assertEqual(rows["n"], 0)
+
+    def test_thought_is_persisted(self):
+        session = self._make_session()
+        session.record_thought("A", "my private thought")
+        rows = self.store.connection.execute(
+            "SELECT content, visibility FROM thoughts WHERE agent_id = 'A'"
+        ).fetchall()
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["content"], "my private thought")
+        self.assertEqual(rows[0]["visibility"], "private")
+
+    def test_session_ended_at_set_on_run_completion(self):
+        session = self._make_session()
+        session.turns_completed = 0
+        session.run(initial_message="go", max_turns=1)
+        row = self.store.connection.execute(
+            "SELECT ended_at FROM sessions WHERE session_id = ?", (session.run_id,)
+        ).fetchone()
+        self.assertIsNotNone(row["ended_at"])
+
+    def test_auto_digest_fires_at_interval(self):
+        main.memory_digest_interval = 2
+        session = self._make_session()
+        session.record_turn("A", "B", "turn one prompt", "turn one response")
+        session.record_turn("A", "B", "turn two prompt", "turn two response")
+        rows = self.store.connection.execute(
+            "SELECT digest_id FROM memory_digests WHERE session_id = ?", (session.run_id,)
+        ).fetchall()
+        self.assertGreater(len(rows), 0)
+
+    def test_auto_digest_not_fired_before_interval(self):
+        main.memory_digest_interval = 5
+        session = self._make_session()
+        session.record_turn("A", "B", "only one turn", "response")
+        rows = self.store.connection.execute(
+            "SELECT digest_id FROM memory_digests WHERE session_id = ?", (session.run_id,)
+        ).fetchall()
+        self.assertEqual(len(rows), 0)
+
+    def test_lifecycle_event_persisted_as_memory_entry(self):
+        role = SimpleNamespace(
+            name="NewRole",
+            lifecycle_state="active",
+            lifecycle_events=[],
+        )
+        main.record_lifecycle_event(role, "create", "active", requested_by="CEO")
+        rows = self.store.connection.execute(
+            "SELECT content FROM memory_entries WHERE agent_id = 'NewRole' AND kind = 'lifecycle'"
+        ).fetchall()
+        self.assertEqual(len(rows), 1)
+        self.assertIn("create", rows[0]["content"])
+        self.assertIn("active", rows[0]["content"])
+
+    def test_tool_call_persisted_on_executed_event(self):
+        role = SimpleNamespace(
+            name="SE",
+            runtime_event_stream=None,
+            runtime_session_id="test-session",
+        )
+        self.store.create_session("test-session")
+        self.store.upsert_agent("SE", "SoftwareEngineer", "SE")
+        main._emit_role_tool_event(role, "tool_call.executed", {
+            "call_id": "call-1",
+            "tool_name": "org.create_role",
+            "arguments": {"role_name": "QA"},
+            "result": "Created role QA",
+        })
+        rows = self.store.connection.execute(
+            "SELECT tool_name, status FROM tool_calls WHERE agent_id = 'SE'"
+        ).fetchall()
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["tool_name"], "org.create_role")
+        self.assertEqual(rows[0]["status"], "executed")
+
+
 if __name__ == "__main__":
     unittest.main()

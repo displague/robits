@@ -295,6 +295,13 @@ class SQLiteMemoryStore:
         self.connection.commit()
         return session_id
 
+    def end_session(self, session_id, ended_at=None):
+        self.connection.execute(
+            "UPDATE sessions SET ended_at = ? WHERE session_id = ?",
+            (ended_at or _utc_now(), session_id),
+        )
+        self.connection.commit()
+
     def upsert_agent(
         self,
         agent_id,

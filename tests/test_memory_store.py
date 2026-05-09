@@ -691,5 +691,28 @@ class SQLiteMemoryStoreTests(unittest.TestCase):
         self.assertEqual(events[0]["payload_json"], '{"agent": "SE", "content": "Private note."}')
 
 
+    def test_end_session_sets_ended_at(self):
+        store = self.build_store()
+        store.create_session("s-end")
+        row = store.connection.execute(
+            "SELECT ended_at FROM sessions WHERE session_id = 's-end'"
+        ).fetchone()
+        self.assertIsNone(row["ended_at"])
+        store.end_session("s-end")
+        row = store.connection.execute(
+            "SELECT ended_at FROM sessions WHERE session_id = 's-end'"
+        ).fetchone()
+        self.assertIsNotNone(row["ended_at"])
+
+    def test_end_session_accepts_explicit_timestamp(self):
+        store = self.build_store()
+        store.create_session("s-ts")
+        store.end_session("s-ts", ended_at="2024-01-01T00:00:00")
+        row = store.connection.execute(
+            "SELECT ended_at FROM sessions WHERE session_id = 's-ts'"
+        ).fetchone()
+        self.assertEqual(row["ended_at"], "2024-01-01T00:00:00")
+
+
 if __name__ == "__main__":
     unittest.main()
