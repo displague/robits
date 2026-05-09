@@ -62,7 +62,7 @@ api_retry_max_seconds = max(api_retry_base_seconds, float(os.environ.get("ROBITS
 model_call_gate = threading.BoundedSemaphore(max_parallelism)
 memory_db_path = os.environ.get("ROBITS_MEMORY_DB")
 memory_store = SQLiteMemoryStore(memory_db_path) if memory_db_path else None
-tool_proposal_store = ToolProposalStore(os.environ.get("ROBITS_TOOL_PROPOSALS_FILE", "var/tool_proposals.json"))
+tool_proposal_store = None
 default_location = os.environ.get("ROBITS_LOCATION", "").strip()
 default_timezone = os.environ.get("ROBITS_TIMEZONE", "").strip()
 SAFE_TOOL_BUILTINS = {
@@ -852,6 +852,15 @@ def _coerce_string_list(value):
     return value
 
 
+def get_tool_proposal_store():
+    global tool_proposal_store
+    if tool_proposal_store is None:
+        tool_proposal_store = ToolProposalStore(
+            os.environ.get("ROBITS_TOOL_PROPOSALS_FILE", "var/tool_proposals.json")
+        )
+    return tool_proposal_store
+
+
 def propose_tool_change(
     employee_dict,
     requested_by,
@@ -882,7 +891,7 @@ def propose_tool_change(
         tool = tool_registry.get(tool_name)
         if tool.system_tool:
             return f"Error: System tool '{tool_name}' cannot be changed by SE proposal."
-    proposal = tool_proposal_store.create(
+    proposal = get_tool_proposal_store().create(
         requested_by=requested_by,
         tool_name=tool_name,
         action=action,
@@ -898,17 +907,18 @@ def propose_tool_change(
 
 def list_tool_proposals(employee_dict, status=None):
     del employee_dict
-    return json.dumps(tool_proposal_store.list(status=status), sort_keys=True)
+    return json.dumps(get_tool_proposal_store().list(status=status), sort_keys=True)
 
 
 def approve_tool_proposal(employee_dict, proposal_id, approved_by, implementation_notes=""):
     del employee_dict
-    proposal = tool_proposal_store.get(proposal_id)
+    store = get_tool_proposal_store()
+    proposal = store.get(proposal_id)
     if proposal is None:
         return f"Error: Tool proposal '{proposal_id}' not found."
     if proposal["status"] not in {"proposed", "approved"}:
         return f"Error: Tool proposal '{proposal_id}' cannot be approved from status '{proposal['status']}'."
-    updated = tool_proposal_store.update(
+    updated = store.update(
         proposal_id,
         status="approved",
         approver=approved_by,
@@ -921,12 +931,13 @@ def reject_tool_proposal(employee_dict, proposal_id, rejected_by, reason):
     del employee_dict
     if not isinstance(reason, str) or not reason.strip():
         return "Error: Rejection reason must be a non-empty string."
-    proposal = tool_proposal_store.get(proposal_id)
+    store = get_tool_proposal_store()
+    proposal = store.get(proposal_id)
     if proposal is None:
         return f"Error: Tool proposal '{proposal_id}' not found."
     if proposal["status"] in {"operationalized", "rejected"}:
         return f"Error: Tool proposal '{proposal_id}' cannot be rejected from status '{proposal['status']}'."
-    updated = tool_proposal_store.update(
+    updated = store.update(
         proposal_id,
         status="rejected",
         approver=rejected_by,
@@ -936,7 +947,8 @@ def reject_tool_proposal(employee_dict, proposal_id, rejected_by, reason):
 
 
 def rollout_tool_proposal(employee_dict, proposal_id, role_name, granted_by=None, rollout_notes=""):
-    proposal = tool_proposal_store.get(proposal_id)
+    store = get_tool_proposal_store()
+    proposal = store.get(proposal_id)
     if proposal is None:
         return f"Error: Tool proposal '{proposal_id}' not found."
     if proposal["status"] != "approved":
@@ -953,7 +965,7 @@ def rollout_tool_proposal(employee_dict, proposal_id, role_name, granted_by=None
     if grant_result.startswith("Error:"):
         return grant_result
     granted_roles = sorted(set(proposal.get("granted_roles", [])) | {validate_role_name(role_name)})
-    updated = tool_proposal_store.update(
+    updated = store.update(
         proposal_id,
         status="operationalized",
         rollout_notes=rollout_notes or proposal.get("rollout_notes", ""),

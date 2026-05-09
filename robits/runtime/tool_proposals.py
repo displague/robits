@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from copy import deepcopy
 from datetime import datetime, timezone
 from pathlib import Path
 from uuid import uuid4
@@ -16,17 +17,19 @@ class ToolProposalStore:
     def __init__(self, path=None):
         self.path = Path(path) if path else None
         self._proposals = {}
-        if self.path is not None:
-            self.path.parent.mkdir(parents=True, exist_ok=True)
-            if self.path.exists():
+        if self.path is not None and self.path.exists():
+            try:
                 with open(self.path, "r", encoding="utf-8") as handle:
                     data = json.load(handle)
-                for proposal in data.get("proposals", []):
-                    self._proposals[proposal["proposal_id"]] = proposal
+            except (OSError, json.JSONDecodeError) as error:
+                raise ValueError(f"Could not load tool proposal store '{self.path}': {error}") from error
+            for proposal in data.get("proposals", []):
+                self._proposals[proposal["proposal_id"]] = proposal
 
     def _save(self):
         if self.path is None:
             return
+        self.path.parent.mkdir(parents=True, exist_ok=True)
         data = {"proposals": sorted(self._proposals.values(), key=lambda item: item["created_at"])}
         with open(self.path, "w", encoding="utf-8") as handle:
             json.dump(data, handle, indent=2, sort_keys=True)
@@ -55,8 +58,8 @@ class ToolProposalStore:
             "tool_name": tool_name,
             "action": action,
             "description": description,
-            "parameters": parameters or {"type": "object", "properties": {}, "required": []},
-            "required_capabilities": list(required_capabilities or []),
+            "parameters": deepcopy(parameters or {"type": "object", "properties": {}, "required": []}),
+            "required_capabilities": deepcopy(list(required_capabilities or [])),
             "owner_capability": owner_capability,
             "safety_notes": safety_notes or "",
             "implementation_notes": implementation_notes or "",
@@ -70,23 +73,23 @@ class ToolProposalStore:
         }
         self._proposals[proposal["proposal_id"]] = proposal
         self._save()
-        return dict(proposal)
+        return deepcopy(proposal)
 
     def get(self, proposal_id):
         proposal = self._proposals.get(proposal_id)
-        return dict(proposal) if proposal else None
+        return deepcopy(proposal) if proposal else None
 
     def list(self, status=None):
         proposals = sorted(self._proposals.values(), key=lambda item: item["created_at"])
         if status:
             proposals = [proposal for proposal in proposals if proposal["status"] == status]
-        return [dict(proposal) for proposal in proposals]
+        return deepcopy(proposals)
 
     def update(self, proposal_id, **changes):
         proposal = self._proposals.get(proposal_id)
         if proposal is None:
             return None
-        proposal.update(changes)
+        proposal.update(deepcopy(changes))
         proposal["updated_at"] = _utc_now()
         self._save()
-        return dict(proposal)
+        return deepcopy(proposal)
