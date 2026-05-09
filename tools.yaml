@@ -279,6 +279,27 @@
     required: []
   code: |
     return org_chat_read(employee_dict, limit=min(int(limit if limit is not None else 20), 100))
+- name: work.todo
+  required_capabilities: []
+  owner_capability: basic
+  system_tool: false
+  grantable: true
+  description: >
+    Park a work insight or task as a todo item to revisit later.
+    Use this when a work topic surfaces unexpectedly during off-the-clock interactions.
+  parameters:
+    type: object
+    properties:
+      title:
+        type: string
+        description: Short description of the work item to park.
+      content:
+        type: string
+        description: Optional extended notes or context.
+    required:
+      - title
+  code: |
+    return work_todo_add(employee_dict, title=title, content=content)
 - name: agent.create_alarm
   required_capabilities: []
   owner_capability: agent

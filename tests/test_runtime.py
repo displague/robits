@@ -2856,5 +2856,214 @@ class OrgChatReadToolTests(unittest.TestCase):
             self.assertEqual(result["total"], 5)
 
 
+class ClockStateTests(unittest.TestCase):
+    """Tests for on/off-the-clock mode affecting prompts, org context, and identity."""
+
+    def setUp(self):
+        self.original_clock = main.clock_state
+        self.addCleanup(self._restore)
+
+    def _restore(self):
+        main.clock_state = self.original_clock
+
+    def test_on_clock_guidance_used_when_on(self):
+        main.clock_state = "on"
+        self.assertIn("work-focused", main._ON_CLOCK_GUIDANCE)
+
+    def test_off_clock_guidance_used_when_off(self):
+        main.clock_state = "off"
+        self.assertIn("off the clock", main._OFF_CLOCK_GUIDANCE)
+
+    def test_session_stores_clock_state(self):
+        a = SimpleNamespace(name="A", lifecycle_state="active",
+                            interact=lambda *a, **kw: "hi",
+                            update_group_conversations=lambda m: None)
+        session = main.Session(participants={"A": a}, clock_state="off")
+        self.assertEqual(session.clock_state, "off")
+
+    def test_session_clock_state_in_event(self):
+        events = []
+        stream = main.RuntimeEventStream()
+        stream.subscribe(lambda e: events.append(e))
+        a = SimpleNamespace(name="A", lifecycle_state="active",
+                            interact=lambda *a, **kw: "hi",
+                            update_group_conversations=lambda m: None)
+        main.Session(participants={"A": a}, event_stream=stream, clock_state="off")
+        created = next(e for e in events if e.event_type == "session.created")
+        self.assertEqual(created.payload["clock_state"], "off")
+
+    def test_off_clock_suppresses_org_chat_injection(self):
+        received_prompts = []
+
+        class CapturingRole:
+            name = "B"
+            lifecycle_state = "active"
+            conversation_history = {}
+            template = ""
+            max_tokens = 100
+            temperature = 0.0
+            runtime_tool_results = []
+            runtime_event_stream = None
+            runtime_session_id = None
+            runtime_role_name = None
+            allowed_tools = set()
+
+            def interact(self, sender=None, prompt=None):
+                received_prompts.append(prompt or "")
+                return "response"
+
+            def update_group_conversations(self, m):
+                pass
+
+        a = SimpleNamespace(name="A", lifecycle_state="active",
+                            interact=lambda *a, **kw: "initial",
+                            update_group_conversations=lambda m: None)
+        b = CapturingRole()
+        old_lines = main.org_chat_context_lines
+        main.org_chat_context_lines = 5
+        try:
+            session = main.Session(participants={"A": a, "B": b}, clock_state="off")
+            session.transcript.append(main.TranscriptEntry(1, "A", "B", "seed", "response"))
+            session.turns_completed = 1
+            session.last_receiver = a
+            session.step("hello")
+        finally:
+            main.org_chat_context_lines = old_lines
+
+        self.assertFalse(any("Recent org chat" in p for p in received_prompts))
+
+    def test_identity_primary_secondary_swapped_by_clock(self):
+        store_temp = tempfile.TemporaryDirectory()
+        store = SQLiteMemoryStore(Path(store_temp.name) / "id.sqlite3")
+        store.upsert_agent("alice", "Role", "Alice")
+        store.seed_memory_digest("identity", "personal identity content",
+                                  agent_id="alice", relationship_type="personal")
+        store.seed_memory_digest("identity", "work identity content",
+                                  agent_id="alice", relationship_type="work")
+        old_store = main.memory_store
+        main.memory_store = store
+        try:
+            main.clock_state = "on"
+            primary_on, secondary_on = main._get_identity_digests("alice")
+            main.clock_state = "off"
+            primary_off, secondary_off = main._get_identity_digests("alice")
+        finally:
+            main.memory_store = old_store
+            main.clock_state = self.original_clock
+            store.close()
+            store_temp.cleanup()
+
+        self.assertIn("work", primary_on)
+        self.assertIn("personal", secondary_on)
+        self.assertIn("personal", primary_off)
+        self.assertIn("work", secondary_off)
+
+
+class MemorySearchParkingTests(unittest.TestCase):
+    """Tests for off-clock parking reminder when org_chat results surface."""
+
+    def setUp(self):
+        self.store_temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.store_temp.cleanup)
+        self.store = SQLiteMemoryStore(Path(self.store_temp.name) / "p.sqlite3")
+        self.addCleanup(self.store.close)
+        self.original_store = main.memory_store
+        self.original_clock = main.clock_state
+        main.memory_store = self.store
+        self.addCleanup(self._restore)
+
+    def _restore(self):
+        main.memory_store = self.original_store
+        main.clock_state = self.original_clock
+
+    def _seed_org_message(self, agent_id="bob"):
+        self.store.upsert_agent(agent_id, "Role", agent_id)
+        self.store.create_session("s1")
+        self.store.append_message("s1", agent_id, agent_id, "project deadline is Friday",
+                                   conversation_type="org_chat")
+
+    def test_off_clock_org_result_prepends_parking_note(self):
+        self._seed_org_message()
+        main.clock_state = "off"
+        old_caller = main.active_tool_caller
+        main.active_tool_caller = SimpleNamespace(name="bob", allowed_tools={"memory.*"})
+        try:
+            result = main.memory_search({}, "bob", "project deadline")
+        finally:
+            main.active_tool_caller = old_caller
+        self.assertIn("work.todo", result)
+        self.assertIn("System note", result)
+
+    def test_on_clock_no_parking_note(self):
+        self._seed_org_message()
+        main.clock_state = "on"
+        old_caller = main.active_tool_caller
+        main.active_tool_caller = SimpleNamespace(name="bob", allowed_tools={"memory.*"})
+        try:
+            result = main.memory_search({}, "bob", "project deadline")
+        finally:
+            main.active_tool_caller = old_caller
+        self.assertNotIn("System note", result)
+
+    def test_off_clock_personal_result_no_parking_note(self):
+        self.store.upsert_agent("carol", "Role", "carol")
+        self.store.create_session("s2")
+        self.store.append_message("s2", "carol", "carol", "family picnic plans",
+                                   conversation_type="personal")
+        main.clock_state = "off"
+        old_caller = main.active_tool_caller
+        main.active_tool_caller = SimpleNamespace(name="carol", allowed_tools={"memory.*"})
+        try:
+            result = main.memory_search({}, "carol", "picnic")
+        finally:
+            main.active_tool_caller = old_caller
+        self.assertNotIn("System note", result)
+
+
+class WorkTodoToolTests(unittest.TestCase):
+    """Tests for work_todo_add function."""
+
+    def setUp(self):
+        self.store_temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.store_temp.cleanup)
+        self.store = SQLiteMemoryStore(Path(self.store_temp.name) / "t.sqlite3")
+        self.addCleanup(self.store.close)
+        self.original_store = main.memory_store
+        self.original_caller = main.active_tool_caller
+        main.memory_store = self.store
+        self.addCleanup(self._restore)
+
+    def _restore(self):
+        main.memory_store = self.original_store
+        main.active_tool_caller = self.original_caller
+
+    def test_creates_todo_record(self):
+        self.store.upsert_agent("dave", "Role", "dave")
+        main.active_tool_caller = SimpleNamespace(name="dave")
+        result = json.loads(main.work_todo_add({}, title="Follow up on Q3 budget"))
+        self.assertEqual(result["title"], "Follow up on Q3 budget")
+        self.assertEqual(result["status"], "open")
+        rows = self.store.list_todos(agent_id="dave")
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["title"], "Follow up on Q3 budget")
+
+    def test_no_memory_store_returns_error(self):
+        main.memory_store = None
+        result = json.loads(main.work_todo_add({}, title="something"))
+        self.assertIn("error", result)
+
+    def test_no_caller_returns_error(self):
+        main.active_tool_caller = SimpleNamespace()  # no .name
+        result = json.loads(main.work_todo_add({}, title="something"))
+        self.assertIn("error", result)
+
+    def test_content_stored(self):
+        self.store.upsert_agent("eve", "Role", "eve")
+        main.active_tool_caller = SimpleNamespace(name="eve")
+        main.work_todo_add({}, title="Research topic", content="detailed notes here")
+        rows = self.store.list_todos(agent_id="eve")
+        self.assertEqual(rows[0]["content"], "detailed notes here")
+
+
 if __name__ == "__main__":
     unittest.main()
