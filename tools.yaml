@@ -159,6 +159,16 @@
         approved_by=approved_by,
         reason=reason,
     )
+- name: agent.context
+  required_capabilities: []
+  owner_capability: agent
+  description: Return the current agent-local runtime context, including identity, session, date-time, timezone, and configured location.
+  parameters:
+    type: object
+    properties: {}
+    required: []
+  code: |
+    return current_agent_context(employee_dict)
 - name: agent.create_alarm
   required_capabilities: []
   owner_capability: agent

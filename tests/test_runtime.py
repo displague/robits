@@ -612,6 +612,10 @@ class RuntimeTests(unittest.TestCase):
             )
         )
         provider = main.ResponsesProvider(fake_client)
+        event_stream = main.RuntimeEventStream()
+        role.runtime_event_stream = event_stream
+        role.runtime_session_id = "session-1"
+        role.runtime_role_name = "HR"
 
         response = provider.generate(
             role,
@@ -626,6 +630,11 @@ class RuntimeTests(unittest.TestCase):
         self.assertEqual(second_call["previous_response_id"], "response-1")
         self.assertEqual(second_call["input"][0]["type"], "function_call_output")
         self.assertIn("Created a new role: QA", second_call["input"][0]["output"])
+        event_types = [event.event_type for event in event_stream.events()]
+        self.assertIn("tool_call.requested", event_types)
+        self.assertIn("tool_call.executed", event_types)
+        self.assertTrue(role.runtime_tool_results)
+        self.assertIn("tool_call.executed: org__create_role", role.runtime_tool_results[0])
 
     def test_responses_provider_exposes_only_role_allowed_tools(self):
         employee_dict = main.build_employee_dict()
@@ -1254,7 +1263,7 @@ class RuntimeTests(unittest.TestCase):
                         "args": {
                             "agent_name": "SE",
                             "reminder": "Check build health.",
-                            "due_at": "2026-05-08T10:00:00+00:00",
+                            "due_at": "2099-05-08T10:00:00+00:00",
                         },
                     }
                 ),
@@ -1299,7 +1308,7 @@ class RuntimeTests(unittest.TestCase):
                         "args": {
                             "agent_name": "SE",
                             "reminder": "Check build health.",
-                            "due_at": "2026-05-08T10:00:00+00:00",
+                            "due_at": "2099-05-08T10:00:00+00:00",
                         },
                     }
                 )
@@ -1320,7 +1329,7 @@ class RuntimeTests(unittest.TestCase):
                         "args": {
                             "agent_name": "HR",
                             "reminder": "Check people.",
-                            "due_at": "2026-05-08T10:00:00+00:00",
+                            "due_at": "2099-05-08T10:00:00+00:00",
                         },
                     }
                 ),
@@ -1329,6 +1338,49 @@ class RuntimeTests(unittest.TestCase):
 
         self.assertIn("cannot manage alarms", response)
         self.assertEqual(employee_dict["HR"].alarms, [])
+
+    def test_agent_context_tool_returns_local_runtime_context(self):
+        employee_dict = main.build_employee_dict()
+        system = main.System(employee_dict)
+        with patch.object(main, "default_location", "Philadelphia, PA"), patch.object(
+            main, "default_timezone", "America/New_York"
+        ):
+            with redirect_stdout(StringIO()):
+                main.load_tools(system)
+                response = system.interact(
+                    json.dumps({"exec": "agent.context", "args": {}}),
+                    caller=employee_dict["SE"],
+                )
+
+        context = json.loads(response.split("Result: ", 1)[1])
+
+        self.assertEqual(context["agent_name"], "SoftwareEngineer")
+        self.assertEqual(context["role_name"], "SE")
+        self.assertEqual(context["location"], "Philadelphia, PA")
+        self.assertEqual(context["timezone"], "America/New_York")
+        self.assertIn("current_datetime_local", context)
+
+    def test_alarm_creation_rejects_past_due_at(self):
+        employee_dict = main.build_employee_dict()
+        system = main.System(employee_dict)
+        with redirect_stdout(StringIO()):
+            main.load_tools(system)
+            response = system.interact(
+                json.dumps(
+                    {
+                        "exec": "agent.create_alarm",
+                        "args": {
+                            "agent_name": "SE",
+                            "reminder": "Check build health.",
+                            "due_at": "2023-01-01T00:00:00+00:00",
+                        },
+                    }
+                ),
+                caller=employee_dict["SE"],
+            )
+
+        self.assertIn("not in the future", response)
+        self.assertEqual(employee_dict["SE"].alarms, [])
 
     def test_memory_tools_search_list_and_expand_accessible_digests(self):
         employee_dict = main.build_employee_dict()
@@ -1497,6 +1549,22 @@ class RuntimeTests(unittest.TestCase):
         self.assertIn("message.routed", event_types)
         self.assertIn("message.recorded", event_types)
         self.assertIn("session.completed", event_types)
+
+    def test_session_records_native_tool_events_in_transcript(self):
+        class NativeToolEventProvider:
+            def generate(self, role, *_):
+                role.runtime_tool_results.append("tool_call.executed: agent__context({}) -> {}")
+                return ""
+
+        participants = main.build_employee_dict()
+        session = main.Session(participants=participants, run_id="session-1")
+
+        with patch.object(main, "model_provider", NativeToolEventProvider()):
+            with redirect_stdout(StringIO()):
+                session.run(initial_message="HR, inspect context", max_turns=1)
+
+        self.assertEqual(session.transcript[0].response, "")
+        self.assertIn("tool_call.executed: agent__context", session.transcript[0].system_events[0])
 
     def test_event_subscriber_errors_do_not_break_runtime(self):
         event_stream = main.RuntimeEventStream()
