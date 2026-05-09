@@ -64,6 +64,9 @@ model_call_gate = threading.BoundedSemaphore(max_parallelism)
 memory_db_path = os.environ.get("ROBITS_MEMORY_DB")
 memory_store = SQLiteMemoryStore(memory_db_path) if memory_db_path else None
 tool_proposal_store = None
+memory_max_depth = max(0, int(os.environ.get("ROBITS_MEMORY_MAX_DEPTH", "3")))
+memory_max_rows = max(1, int(os.environ.get("ROBITS_MEMORY_MAX_ROWS", "100")))
+memory_cache_threshold = max(512, int(os.environ.get("ROBITS_MEMORY_CACHE_THRESHOLD", "8192")))
 agent_workspace_store = AgentWorkspaceStore()
 default_location = os.environ.get("ROBITS_LOCATION", "").strip()
 default_timezone = os.environ.get("ROBITS_TIMEZONE", "").strip()
@@ -1348,7 +1351,41 @@ def _require_memory_store():
     return memory_store, None
 
 
-def memory_search(employee_dict, agent_name, query, limit=10):
+def _write_memory_cache(agent_name, filename, content):
+    """Write content to the agent's .memory-cache/ workspace directory."""
+    cache_path = f".memory-cache/{filename}"
+    try:
+        agent_workspace_store.write(agent_name, cache_path, content)
+        return cache_path
+    except Exception:
+        return None
+
+
+def _condense_if_large(agent_name, tool_label, result_json):
+    """Return result_json directly, or cache it and return a snippet if too large."""
+    if len(result_json) <= memory_cache_threshold:
+        return result_json
+    timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    filename = f"{timestamp}_{tool_label.replace('.', '_')}.json"
+    cache_path = _write_memory_cache(agent_name, filename, result_json)
+    snippet = result_json[:2048]
+    condensed = {
+        "truncated": True,
+        "total_chars": len(result_json),
+        "snippet": snippet,
+    }
+    if cache_path:
+        condensed["cache_path"] = cache_path
+        condensed["note"] = (
+            f"Full result ({len(result_json)} chars) cached in agent workspace at "
+            f"'{cache_path}'. Use agent.files_read to retrieve it."
+        )
+    else:
+        condensed["note"] = "Result truncated; workspace cache unavailable."
+    return json.dumps(condensed, sort_keys=True)
+
+
+def memory_search(employee_dict, agent_name, query, limit=10, cascade=True):
     del employee_dict
     store, error = _require_memory_store()
     if error:
@@ -1361,8 +1398,13 @@ def memory_search(employee_dict, agent_name, query, limit=10):
         return f"Error: Role '{_caller_name_for_error()}' cannot inspect memory for '{normalized_name}'."
     if not isinstance(query, str) or not query.strip():
         return "Error: Memory query must be a non-empty string."
-    results = store.search(query, agent_id=normalized_name, limit=int(limit or 10))
-    return json.dumps([result.__dict__ for result in results], sort_keys=True)
+    effective_limit = min(int(limit or 10), memory_max_rows)
+    if cascade:
+        results = store.search_cascade(query, agent_id=normalized_name, limit=effective_limit)
+    else:
+        results = store.search(query, agent_id=normalized_name, limit=effective_limit)
+    result_json = json.dumps([result.__dict__ for result in results], sort_keys=True)
+    return _condense_if_large(normalized_name, "memory_search", result_json)
 
 
 def memory_list_digests(employee_dict, agent_name, digest_type=None, limit=10):
@@ -1376,17 +1418,19 @@ def memory_list_digests(employee_dict, agent_name, digest_type=None, limit=10):
         return f"Error: {e}"
     if not _caller_can_act_for_agent(normalized_name):
         return f"Error: Role '{_caller_name_for_error()}' cannot inspect memory for '{normalized_name}'."
+    effective_limit = min(int(limit or 10), memory_max_rows)
     digests = store.list_memory_digests(
         agent_id=normalized_name,
         digest_type=digest_type,
         current_only=True,
         accessible_only=True,
-        limit=int(limit or 10),
+        limit=effective_limit,
     )
-    return json.dumps(digests, sort_keys=True)
+    result_json = json.dumps(digests, sort_keys=True)
+    return _condense_if_large(normalized_name, "memory_list_digests", result_json)
 
 
-def memory_expand_digest(employee_dict, agent_name, digest_id, recursive=True):
+def memory_expand_digest(employee_dict, agent_name, digest_id, recursive=True, max_depth=None, max_chars=None):
     del employee_dict
     store, error = _require_memory_store()
     if error:
@@ -1405,7 +1449,15 @@ def memory_expand_digest(employee_dict, agent_name, digest_id, recursive=True):
         return f"Error: Memory digest '{digest_id}' is not accessible to {normalized_name}."
     if digest.get("system_only") or digest.get("accessibility") != "agent":
         return f"Error: Memory digest '{digest_id}' is system-only."
-    rows = store.expand_memory_digest_sources(digest_id, recursive=recursive)
+    effective_depth = min(
+        int(max_depth) if max_depth is not None else memory_max_depth,
+        memory_max_depth,
+    )
+    rows = store.expand_memory_digest_sources(
+        digest_id,
+        recursive=recursive,
+        max_depth=effective_depth if recursive else None,
+    )
     rows = [
         {
             **row.__dict__,
@@ -1415,7 +1467,11 @@ def memory_expand_digest(employee_dict, agent_name, digest_id, recursive=True):
         else row
         for row in rows
     ]
-    return json.dumps(rows, sort_keys=True)
+    result_json = json.dumps(rows, sort_keys=True)
+    effective_max_chars = int(max_chars) if max_chars is not None else None
+    if effective_max_chars is not None and len(result_json) > effective_max_chars:
+        result_json = result_json[:effective_max_chars]
+    return _condense_if_large(normalized_name, "memory_expand_digest", result_json)
 
 
 def due_alarm_reminders(role, now=None):

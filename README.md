@@ -100,6 +100,9 @@ Relevant environment variables:
 - `ROBITS_MODEL` or `OPENAI_MODEL`: default chat model.
 - `ROBITS_CHEAP_MODEL` and `ROBITS_COSTLY_MODEL`: optional per-role overrides.
 - `ROBITS_MEMORY_DB`: optional SQLite memory database path for memory introspection tools.
+- `ROBITS_MEMORY_MAX_DEPTH`: maximum recursive digest expansion depth (default `3`).
+- `ROBITS_MEMORY_MAX_ROWS`: maximum rows returned by any memory tool (default `100`).
+- `ROBITS_MEMORY_CACHE_THRESHOLD`: byte threshold above which memory tool results are offloaded to the agent's private workspace and a condensed snippet is returned (default `8192`).
 - `ROBITS_PROVIDER_API`: model API path, `responses` by default or `chat_completions` for compatibility.
 - `ROBITS_MAX_PARALLELISM`: maximum concurrent model calls, default `1`.
 - `ROBITS_MAX_API_RETRIES`: maximum retry attempts for transient API failures, default `3`.
