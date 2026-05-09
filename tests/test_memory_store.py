@@ -797,7 +797,7 @@ class ChannelTests(unittest.TestCase):
         ).fetchone()
 
         self.assertEqual(id1, id2)
-        self.assertEqual(row["participants_json"], '["CEO","SE"]')
+        self.assertEqual(row["participants_json"], '["CEO", "SE"]')
 
     def test_get_or_create_channel_rejects_non_string_participants(self):
         store = self.build_store()

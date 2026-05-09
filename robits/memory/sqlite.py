@@ -463,7 +463,7 @@ class SQLiteMemoryStore:
         created_at=None,
     ):
         normalized_participants = self._normalize_participants(participants)
-        participants_json = json.dumps(normalized_participants, separators=(",", ":"))
+        participants_json = json.dumps(normalized_participants)
         self._validate_social_distance(social_distance)
         timestamp = created_at or _utc_now()
         self.connection.execute(
@@ -526,7 +526,7 @@ class SQLiteMemoryStore:
     def _validate_social_distance(social_distance):
         if social_distance is None:
             return
-        if not isinstance(social_distance, (int, float)) or isinstance(social_distance, bool):
+        if type(social_distance) not in (int, float):
             raise TypeError("social_distance must be a number between 0.0 and 5.0")
         if social_distance < SOCIAL_SELF or social_distance > SOCIAL_HOSTILE:
             raise ValueError(
