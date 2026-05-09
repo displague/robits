@@ -133,6 +133,7 @@ as client-side function tools that work with any OpenAI-compatible endpoint:
 | Tool | Description | Capability required |
 |---|---|---|
 | `builtin.web_search` | Search the web via DuckDuckGo or `ROBITS_SEARCH_URL` | — |
+| `builtin.weather_lookup` | Look up a current US ZIP-code forecast via public no-key APIs | — |
 | `builtin.file_search` | Search text in an agent's private workspace files | — |
 | `builtin.shell_run` | Run a shell command in the agent's workspace directory | `shell` |
 | `builtin.tool_search` | Search the tool registry by name or description | — |
@@ -140,8 +141,9 @@ as client-side function tools that work with any OpenAI-compatible endpoint:
 | `builtin.computer_use` | Computer-use actions (not implemented) | `computer` |
 | `builtin.image_generation` | Generate images (not implemented) | — |
 
-All `builtin.*` tools are grantable. None are in the default tool grants; operators
-grant access explicitly via `tools.grant`.
+All `builtin.*` tools are grantable. `builtin.weather_lookup` is in the default
+tool grants so agents can satisfy common weather lookup requests; operators
+grant access to other built-ins explicitly via `tools.grant`.
 
 Example execution payload:
 
