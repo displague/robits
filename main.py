@@ -656,7 +656,7 @@ def format_verified_tool_results(system_events):
         return ""
     lines = "\n".join(f"- {event}" for event in verified_events)
     return (
-        "Verified runtime results from your tool calls:\n"
+        "Verified runtime results from recent tool calls:\n"
         f"{lines}\n"
         "You may rely on these results as completed runtime facts. "
         "Do not claim other tool-created artifacts or side effects without a verified result."
