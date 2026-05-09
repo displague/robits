@@ -50,6 +50,7 @@ class ToolProposalStore:
         owner_capability=None,
         safety_notes="",
         implementation_notes="",
+        code="",
     ):
         now = _utc_now()
         proposal = {
@@ -63,6 +64,7 @@ class ToolProposalStore:
             "owner_capability": owner_capability,
             "safety_notes": safety_notes or "",
             "implementation_notes": implementation_notes or "",
+            "code": code or "",
             "status": "proposed",
             "approver": None,
             "rejection_reason": "",

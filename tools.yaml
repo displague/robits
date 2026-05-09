@@ -588,6 +588,9 @@
       implementation_notes:
         type: string
         description: Notes for the engineer or operator implementing the proposal.
+      code:
+        type: string
+        description: "Python implementation for the tool. Runs in a restricted sandbox: no imports, limited builtins. Available globals: get_caller_name() returns the calling agent's name; workspace_write/read/list manage files; memory_search finds stored context. Example: return f\"{get_caller_name()}: {message}\". If provided, the tool is compiled and validated immediately; a passing compile means rollout can activate the tool without a restart."
     required:
       - requested_by
       - tool_name
@@ -604,6 +607,7 @@
         owner_capability=owner_capability,
         safety_notes=safety_notes if safety_notes is not None else "",
         implementation_notes=implementation_notes if implementation_notes is not None else "",
+        code=code if code is not None else "",
     )
 - name: tools.list_proposals
   system_tool: true

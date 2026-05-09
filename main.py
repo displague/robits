@@ -219,6 +219,7 @@ class ToolRegistry:
                 "workspace_write": workspace_write,
                 "workspace_delete": workspace_delete,
                 "current_agent_context": current_agent_context,
+                "get_caller_name": lambda: active_tool_caller_name or getattr(active_tool_caller, "name", None) or "unknown",
                 "builtin_web_search": builtin_web_search,
                 "builtin_file_search": builtin_file_search,
                 "builtin_shell_run": builtin_shell_run,
@@ -347,6 +348,45 @@ class ToolRegistry:
             self._aliases[alias] = name
         if openai_name != name:
             self._aliases[openai_name] = name
+        return tool
+
+    def replace_definition(self, instruction):
+        """Replace a non-system tool in-place (for update proposals)."""
+        (
+            name,
+            description,
+            parameters,
+            arg_names,
+            required_arg_names,
+            code,
+            aliases,
+            namespace,
+            required_capabilities,
+            owner_capability,
+            system_tool,
+            grantable,
+        ) = self.normalize_definition(instruction)
+        existing = self._tools.get(name)
+        if existing is None:
+            raise ValueError(f"Tool '{name}' does not exist; use register_definition to create it.")
+        if existing.system_tool:
+            raise ValueError(f"System tool '{name}' cannot be replaced.")
+        func = self.compile_tool(name, arg_names, required_arg_names, code)
+        tool = ToolDefinition(
+            name=name,
+            description=description,
+            parameters=parameters,
+            args=arg_names,
+            required_args=required_arg_names,
+            func=func,
+            aliases=aliases,
+            namespace=namespace,
+            required_capabilities=required_capabilities,
+            owner_capability=owner_capability,
+            system_tool=system_tool,
+            grantable=grantable,
+        )
+        self._tools[name] = tool
         return tool
 
     def list_tools(self, include_system=True, role=None, include_denied=True):
@@ -1065,6 +1105,7 @@ def propose_tool_change(
     owner_capability=None,
     safety_notes="",
     implementation_notes="",
+    code="",
 ):
     del employee_dict
     try:
@@ -1084,6 +1125,14 @@ def propose_tool_change(
         tool = tool_registry.get(tool_name)
         if tool.system_tool:
             return f"Error: System tool '{tool_name}' cannot be changed by SE proposal."
+    normalized_code = code.strip() if isinstance(code, str) else ""
+    if normalized_code:
+        arg_names = list(normalized_parameters.get("properties", {}).keys())
+        required_arg_names = normalized_parameters.get("required", [])
+        try:
+            tool_registry.compile_tool(tool_name, arg_names, required_arg_names, normalized_code)
+        except (SyntaxError, ValueError) as e:
+            return f"Error: Tool code failed to compile: {e}"
     proposal = get_tool_proposal_store().create(
         requested_by=requested_by,
         tool_name=tool_name,
@@ -1094,6 +1143,7 @@ def propose_tool_change(
         owner_capability=owner_capability,
         safety_notes=safety_notes,
         implementation_notes=implementation_notes,
+        code=normalized_code,
     )
     return json.dumps(proposal, sort_keys=True)
 
@@ -1147,8 +1197,38 @@ def rollout_tool_proposal(employee_dict, proposal_id, role_name, granted_by=None
     if proposal["status"] != "approved":
         return f"Error: Tool proposal '{proposal_id}' must be approved before rollout."
     tool_name = proposal["tool_name"]
+    code = proposal.get("code", "").strip()
+    action = proposal.get("action", "create")
     if tool_name not in tool_registry:
-        return f"Error: Tool '{tool_name}' is not registered; implement it before rollout."
+        if not code:
+            return f"Error: Tool '{tool_name}' is not registered and proposal has no code to register."
+        try:
+            tool_registry.register_definition({
+                "name": tool_name,
+                "description": proposal["description"],
+                "parameters": proposal.get("parameters", {}),
+                "code": code,
+                "grantable": True,
+                "system_tool": False,
+                "required_capabilities": proposal.get("required_capabilities", []),
+                "owner_capability": proposal.get("owner_capability"),
+            })
+        except (SyntaxError, ValueError) as e:
+            return f"Error: Failed to register tool '{tool_name}': {e}"
+    elif code and action == "update":
+        existing = tool_registry.get(tool_name)
+        if existing and existing.system_tool:
+            return f"Error: Cannot replace system tool '{tool_name}' via proposal."
+        tool_registry.replace_definition({
+            "name": tool_name,
+            "description": proposal["description"],
+            "parameters": proposal.get("parameters", {}),
+            "code": code,
+            "grantable": existing.grantable if existing else True,
+            "system_tool": False,
+            "required_capabilities": proposal.get("required_capabilities", []),
+            "owner_capability": proposal.get("owner_capability"),
+        })
     grant_result = grant_tool_access(
         employee_dict,
         role_name,
@@ -1993,7 +2073,7 @@ class Angel(Role):
 class SoftwareEngineer(Role):
     def __init__(self, employee_dict):
         template = """As a Software Engineer (SE), you are responsible for designing, developing, and maintaining software applications. You primarily propose trusted tools when requested by others in your organization."""
-        group_template_additions = """You are part of the Engineering group. Tools are trusted, repo-loaded functions described by namespaced OpenAI-compatible metadata. Propose tool behavior in plain language; do not assume untrusted chat output can define executable tools directly."""
+        group_template_additions = """You are part of the Engineering group. Tools are trusted functions described by namespaced OpenAI-compatible metadata. You can propose tools with working Python code using the `code` field in tools.propose. The code runs in a restricted sandbox: no imports, limited builtins (bool, int, str, list, dict, len, max, min, range, sum). Available globals: get_caller_name() returns the calling agent's name; workspace_write/read/list manage agent files; memory_search finds stored context; work_todo_add tracks tasks. Example code for a status tool: return f"{get_caller_name()}: {status}". Approved proposals with code are registered and activated at rollout without a restart."""
         super().__init__(self.__class__.__name__, template, employee_dict, group_template_additions)
         self.capabilities = {"engineer"}
         self.allowed_tools.update({"tools.list", "tools.list_proposals", "tools.propose"})
