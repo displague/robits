@@ -19,6 +19,7 @@ from uuid import uuid4
 
 from robits.memory.sqlite import SQLiteMemoryStore
 from robits.runtime.sandbox import SandboxMetadata
+from robits.runtime.tool_proposals import ToolProposalStore
 
 
 class TeeStream:
@@ -61,6 +62,7 @@ api_retry_max_seconds = max(api_retry_base_seconds, float(os.environ.get("ROBITS
 model_call_gate = threading.BoundedSemaphore(max_parallelism)
 memory_db_path = os.environ.get("ROBITS_MEMORY_DB")
 memory_store = SQLiteMemoryStore(memory_db_path) if memory_db_path else None
+tool_proposal_store = None
 default_location = os.environ.get("ROBITS_LOCATION", "").strip()
 default_timezone = os.environ.get("ROBITS_TIMEZONE", "").strip()
 SAFE_TOOL_BUILTINS = {
@@ -186,6 +188,10 @@ class ToolRegistry:
                 "revoke_tool_access": revoke_tool_access,
                 "list_registered_tools": list_registered_tools,
                 "propose_tool_change": propose_tool_change,
+                "list_tool_proposals": list_tool_proposals,
+                "approve_tool_proposal": approve_tool_proposal,
+                "reject_tool_proposal": reject_tool_proposal,
+                "rollout_tool_proposal": rollout_tool_proposal,
                 "current_agent_context": current_agent_context,
             },
             local_dict,
@@ -823,10 +829,58 @@ def list_registered_tools(employee_dict, role_name=None, include_system=True, on
     )
 
 
-def propose_tool_change(employee_dict, requested_by, tool_name, description, action="create"):
+def _coerce_json_object(value, default=None):
+    if value is None:
+        return {} if default is None else default
+    if isinstance(value, str):
+        try:
+            value = json.loads(value)
+        except json.JSONDecodeError as error:
+            raise ValueError(f"Invalid JSON object: {error}")
+    if not isinstance(value, dict):
+        raise ValueError("Value must be a JSON object.")
+    return value
+
+
+def _coerce_string_list(value):
+    if value is None:
+        return []
+    if isinstance(value, str):
+        value = [item.strip() for item in value.split(",") if item.strip()]
+    if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
+        raise ValueError("Value must be a list of strings.")
+    return value
+
+
+def get_tool_proposal_store():
+    global tool_proposal_store
+    if tool_proposal_store is None:
+        tool_proposal_store = ToolProposalStore(
+            os.environ.get("ROBITS_TOOL_PROPOSALS_FILE", "var/tool_proposals.json")
+        )
+    return tool_proposal_store
+
+
+def propose_tool_change(
+    employee_dict,
+    requested_by,
+    tool_name,
+    description,
+    action="create",
+    parameters=None,
+    required_capabilities=None,
+    owner_capability=None,
+    safety_notes="",
+    implementation_notes="",
+):
     del employee_dict
     try:
         tool_registry.validate_tool_name(tool_name)
+        normalized_parameters = _coerce_json_object(
+            parameters,
+            {"type": "object", "properties": {}, "required": []},
+        )
+        normalized_capabilities = _coerce_string_list(required_capabilities)
     except ValueError as e:
         return f"Error: {e}"
     if not isinstance(description, str) or not description.strip():
@@ -837,15 +891,87 @@ def propose_tool_change(employee_dict, requested_by, tool_name, description, act
         tool = tool_registry.get(tool_name)
         if tool.system_tool:
             return f"Error: System tool '{tool_name}' cannot be changed by SE proposal."
-    proposal = {
-        "proposal_id": f"tool-proposal-{uuid4()}",
-        "requested_by": requested_by,
-        "tool_name": tool_name,
-        "action": action,
-        "description": description.strip(),
-        "status": "proposed",
-    }
+    proposal = get_tool_proposal_store().create(
+        requested_by=requested_by,
+        tool_name=tool_name,
+        action=action,
+        description=description.strip(),
+        parameters=normalized_parameters,
+        required_capabilities=normalized_capabilities,
+        owner_capability=owner_capability,
+        safety_notes=safety_notes,
+        implementation_notes=implementation_notes,
+    )
     return json.dumps(proposal, sort_keys=True)
+
+
+def list_tool_proposals(employee_dict, status=None):
+    del employee_dict
+    return json.dumps(get_tool_proposal_store().list(status=status), sort_keys=True)
+
+
+def approve_tool_proposal(employee_dict, proposal_id, approved_by, implementation_notes=""):
+    del employee_dict
+    store = get_tool_proposal_store()
+    proposal = store.get(proposal_id)
+    if proposal is None:
+        return f"Error: Tool proposal '{proposal_id}' not found."
+    if proposal["status"] not in {"proposed", "approved"}:
+        return f"Error: Tool proposal '{proposal_id}' cannot be approved from status '{proposal['status']}'."
+    updated = store.update(
+        proposal_id,
+        status="approved",
+        approver=approved_by,
+        implementation_notes=implementation_notes or proposal.get("implementation_notes", ""),
+    )
+    return json.dumps(updated, sort_keys=True)
+
+
+def reject_tool_proposal(employee_dict, proposal_id, rejected_by, reason):
+    del employee_dict
+    if not isinstance(reason, str) or not reason.strip():
+        return "Error: Rejection reason must be a non-empty string."
+    store = get_tool_proposal_store()
+    proposal = store.get(proposal_id)
+    if proposal is None:
+        return f"Error: Tool proposal '{proposal_id}' not found."
+    if proposal["status"] in {"operationalized", "rejected"}:
+        return f"Error: Tool proposal '{proposal_id}' cannot be rejected from status '{proposal['status']}'."
+    updated = store.update(
+        proposal_id,
+        status="rejected",
+        approver=rejected_by,
+        rejection_reason=reason.strip(),
+    )
+    return json.dumps(updated, sort_keys=True)
+
+
+def rollout_tool_proposal(employee_dict, proposal_id, role_name, granted_by=None, rollout_notes=""):
+    store = get_tool_proposal_store()
+    proposal = store.get(proposal_id)
+    if proposal is None:
+        return f"Error: Tool proposal '{proposal_id}' not found."
+    if proposal["status"] != "approved":
+        return f"Error: Tool proposal '{proposal_id}' must be approved before rollout."
+    tool_name = proposal["tool_name"]
+    if tool_name not in tool_registry:
+        return f"Error: Tool '{tool_name}' is not registered; implement it before rollout."
+    grant_result = grant_tool_access(
+        employee_dict,
+        role_name,
+        tool_name,
+        granted_by=granted_by,
+    )
+    if grant_result.startswith("Error:"):
+        return grant_result
+    granted_roles = sorted(set(proposal.get("granted_roles", [])) | {validate_role_name(role_name)})
+    updated = store.update(
+        proposal_id,
+        status="operationalized",
+        rollout_notes=rollout_notes or proposal.get("rollout_notes", ""),
+        granted_roles=granted_roles,
+    )
+    return json.dumps({"proposal": updated, "grant_result": grant_result}, sort_keys=True)
 
 
 def validate_role_name(role_name):
@@ -1406,7 +1532,7 @@ class SoftwareEngineer(Role):
         group_template_additions = """You are part of the Engineering group. Tools are trusted, repo-loaded functions described by namespaced OpenAI-compatible metadata. Propose tool behavior in plain language; do not assume untrusted chat output can define executable tools directly."""
         super().__init__(self.__class__.__name__, template, employee_dict, group_template_additions)
         self.capabilities = {"engineer"}
-        self.allowed_tools.update({"tools.list", "tools.propose"})
+        self.allowed_tools.update({"tools.list", "tools.list_proposals", "tools.propose"})
 
     def interact(self, sender, prompt):
         return interact_costly(self, sender, prompt)
