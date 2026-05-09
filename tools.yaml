@@ -671,3 +671,157 @@
         granted_by=granted_by,
         rollout_notes=rollout_notes if rollout_notes is not None else "",
     )
+- name: builtin.web_search
+  grantable: true
+  owner_capability: agent
+  description: Search the web and return results. Uses ROBITS_SEARCH_URL if set, otherwise falls back to the DuckDuckGo Instant Answers API.
+  parameters:
+    type: object
+    properties:
+      query:
+        type: string
+        description: Search query string.
+      num_results:
+        type: integer
+        description: Maximum number of results to return (default 5, max 20).
+    required:
+      - query
+  code: |
+    return builtin_web_search(employee_dict, query, num_results=num_results if num_results is not None else 5)
+- name: builtin.file_search
+  grantable: true
+  owner_capability: agent
+  description: Search the text content of files in an agent's private workspace and return matching snippets.
+  parameters:
+    type: object
+    properties:
+      agent_name:
+        type: string
+        description: Agent that owns the workspace to search.
+      query:
+        type: string
+        description: Text to search for (case-insensitive substring match).
+      path:
+        type: string
+        description: Relative directory path to search within (default is workspace root).
+      max_results:
+        type: integer
+        description: Maximum number of matching files to return (default 10).
+    required:
+      - agent_name
+      - query
+  code: |
+    return builtin_file_search(
+        employee_dict,
+        agent_name,
+        query,
+        path=path if path is not None else "",
+        max_results=max_results if max_results is not None else 10,
+    )
+- name: builtin.shell_run
+  grantable: true
+  owner_capability: agent
+  required_capabilities:
+    - shell
+  description: Run a shell command in the agent's private workspace directory. Requires the shell capability. Output is captured and returned as stdout, stderr, and returncode.
+  parameters:
+    type: object
+    properties:
+      agent_name:
+        type: string
+        description: Agent whose workspace directory the command runs in.
+      command:
+        type: string
+        description: Shell command string to execute.
+      timeout:
+        type: integer
+        description: Timeout in seconds (default 30, max 300).
+    required:
+      - agent_name
+      - command
+  code: |
+    return builtin_shell_run(
+        employee_dict,
+        agent_name,
+        command,
+        timeout=timeout if timeout is not None else 30,
+    )
+- name: builtin.tool_search
+  grantable: true
+  owner_capability: agent
+  description: Search the tool registry by name or description to discover available tools.
+  parameters:
+    type: object
+    properties:
+      query:
+        type: string
+        description: Keyword to search tool names and descriptions.
+      role_name:
+        type: string
+        description: Optional role name to evaluate tool access for.
+    required:
+      - query
+  code: |
+    return builtin_tool_search(employee_dict, query, role_name=role_name)
+- name: builtin.mcp_call
+  grantable: true
+  owner_capability: agent
+  required_capabilities:
+    - mcp
+  description: Call a tool on an external MCP (Model Context Protocol) server. Not yet implemented; returns an error with guidance.
+  parameters:
+    type: object
+    properties:
+      server_url:
+        type: string
+        description: URL of the MCP server endpoint.
+      tool_name:
+        type: string
+        description: Name of the tool to call on the MCP server.
+      arguments:
+        type: string
+        description: JSON-encoded arguments object to pass to the tool.
+    required:
+      - server_url
+      - tool_name
+  code: |
+    return builtin_mcp_call(employee_dict, server_url, tool_name, arguments=arguments)
+- name: builtin.computer_use
+  grantable: true
+  owner_capability: agent
+  required_capabilities:
+    - computer
+  description: Perform computer-use actions (click, type, screenshot, etc.). Not implemented in this runtime; returns an error.
+  parameters:
+    type: object
+    properties:
+      action:
+        type: string
+        description: Action type (click, type, screenshot, etc.).
+      coordinate:
+        type: string
+        description: Optional screen coordinate for pointer actions, as "x,y".
+    required:
+      - action
+  code: |
+    return builtin_computer_use(employee_dict, action, coordinate=coordinate)
+- name: builtin.image_generation
+  grantable: true
+  owner_capability: agent
+  description: Generate or edit an image using a configured image model. Not implemented in this runtime; returns an error.
+  parameters:
+    type: object
+    properties:
+      prompt:
+        type: string
+        description: Text description of the image to generate.
+      size:
+        type: string
+        description: Image dimensions, e.g. 1024x1024.
+      quality:
+        type: string
+        description: Image quality, e.g. standard or hd.
+    required:
+      - prompt
+  code: |
+    return builtin_image_generation(employee_dict, prompt, size=size, quality=quality)

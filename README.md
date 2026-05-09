@@ -106,6 +106,7 @@ Relevant environment variables:
 - `ROBITS_PROVIDER_API`: model API path, `responses` by default or `chat_completions` for compatibility.
 - `ROBITS_MAX_PARALLELISM`: maximum concurrent model calls, default `1`.
 - `ROBITS_MAX_API_RETRIES`: maximum retry attempts for transient API failures, default `3`.
+- `ROBITS_SEARCH_URL`: optional custom web search endpoint for `builtin.web_search`; falls back to the DuckDuckGo Instant Answers API.
 
 ## Tools
 
@@ -118,6 +119,22 @@ only expose tools allowed for the active role, and execution denies disallowed
 tool calls. Operator roles can grant or revoke tool access, SE can propose
 non-system tool changes, and system tools such as memory internals and HR role
 management cannot be changed through SE proposals.
+
+The `builtin.*` namespace provides equivalents of the OpenAI built-in tool types
+as client-side function tools that work with any OpenAI-compatible endpoint:
+
+| Tool | Description | Capability required |
+|---|---|---|
+| `builtin.web_search` | Search the web via DuckDuckGo or `ROBITS_SEARCH_URL` | — |
+| `builtin.file_search` | Search text in an agent's private workspace files | — |
+| `builtin.shell_run` | Run a shell command in the agent's workspace directory | `shell` |
+| `builtin.tool_search` | Search the tool registry by name or description | — |
+| `builtin.mcp_call` | Call a tool on an MCP server (not yet implemented) | `mcp` |
+| `builtin.computer_use` | Computer-use actions (not implemented) | `computer` |
+| `builtin.image_generation` | Generate images (not implemented) | — |
+
+All `builtin.*` tools are grantable. None are in the default tool grants; operators
+grant access explicitly via `tools.grant`.
 
 Example execution payload:
 
