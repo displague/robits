@@ -178,6 +178,7 @@ class AsyncSQLiteMemoryStore:
         visibility="public",
         relationship_type=None,
         conversation_type=None,
+        channel_id=None,
         source=None,
         created_at=None,
         metadata=None,
@@ -188,10 +189,10 @@ class AsyncSQLiteMemoryStore:
                 """
                 INSERT INTO messages(
                     session_id, sender_agent_id, receiver_agent_id, content, kind,
-                    visibility, relationship_type, conversation_type, source,
+                    visibility, relationship_type, conversation_type, channel_id, source,
                     created_at, metadata_json
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     session_id,
@@ -202,6 +203,7 @@ class AsyncSQLiteMemoryStore:
                     visibility,
                     relationship_type,
                     conversation_type,
+                    channel_id,
                     source,
                     timestamp,
                     _json_dumps(metadata),
@@ -232,6 +234,7 @@ class AsyncSQLiteMemoryStore:
         visibility="private",
         relationship_type=None,
         conversation_type=None,
+        channel_id=None,
         source=None,
         created_at=None,
         metadata=None,
@@ -242,9 +245,9 @@ class AsyncSQLiteMemoryStore:
                 """
                 INSERT INTO thoughts(
                     session_id, agent_id, content, visibility, relationship_type,
-                    conversation_type, source, created_at, metadata_json
+                    conversation_type, channel_id, source, created_at, metadata_json
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     session_id,
@@ -253,6 +256,7 @@ class AsyncSQLiteMemoryStore:
                     visibility,
                     relationship_type,
                     conversation_type,
+                    channel_id,
                     source,
                     timestamp,
                     _json_dumps(metadata),
@@ -721,5 +725,41 @@ class AsyncSQLiteMemoryStore:
             source=source,
             start_at=start_at,
             end_at=end_at,
+            limit=limit,
+        )
+
+    async def get_or_create_channel(
+        self,
+        channel_type,
+        participants=None,
+        *,
+        visibility="public",
+        social_distance=None,
+        clock_phase_hint=None,
+        memory_policy="default",
+        digest_policy="default",
+        prompt_injection_policy="default",
+        metadata=None,
+        created_at=None,
+    ):
+        return await self._run_sync(
+            "get_or_create_channel",
+            channel_type,
+            participants,
+            visibility=visibility,
+            social_distance=social_distance,
+            clock_phase_hint=clock_phase_hint,
+            memory_policy=memory_policy,
+            digest_policy=digest_policy,
+            prompt_injection_policy=prompt_injection_policy,
+            metadata=metadata,
+            created_at=created_at,
+        )
+
+    async def list_channels(self, channel_type=None, participant=None, limit=100):
+        return await self._run_sync(
+            "list_channels",
+            channel_type=channel_type,
+            participant=participant,
             limit=limit,
         )
