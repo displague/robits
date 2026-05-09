@@ -2544,5 +2544,317 @@ class SessionMemoryCaptureTests(unittest.TestCase):
         self.assertEqual(rows[0]["status"], "executed")
 
 
+class OrgChatContextTests(unittest.TestCase):
+    """Tests for format_org_chat_context and JSONL write."""
+
+    def test_empty_transcript_returns_empty_string(self):
+        self.assertEqual(main.format_org_chat_context([], 10), "")
+
+    def test_zero_limit_returns_empty_string(self):
+        entries = [main.TranscriptEntry(1, "A", "B", "hello", "world")]
+        self.assertEqual(main.format_org_chat_context(entries, 0), "")
+
+    def test_formats_recent_entries(self):
+        entries = [
+            main.TranscriptEntry(1, "Alice", "Bob", "question", "answer"),
+            main.TranscriptEntry(2, "Bob", "Alice", "follow-up", "ok"),
+        ]
+        result = main.format_org_chat_context(entries, 5)
+        self.assertIn("Turn 1", result)
+        self.assertIn("Alice", result)
+        self.assertIn("question", result)
+        self.assertIn("answer", result)
+        self.assertIn("Turn 2", result)
+
+    def test_limit_truncates_to_last_n_entries(self):
+        entries = [main.TranscriptEntry(i, "A", "B", f"msg{i}", "") for i in range(1, 6)]
+        result = main.format_org_chat_context(entries, 2)
+        self.assertNotIn("msg1", result)
+        self.assertIn("msg4", result)
+        self.assertIn("msg5", result)
+
+    def test_prompt_truncated_at_400_chars(self):
+        long_prompt = "x" * 600
+        entries = [main.TranscriptEntry(1, "A", "B", long_prompt, "")]
+        result = main.format_org_chat_context(entries, 5)
+        self.assertNotIn("x" * 401, result)
+
+    def test_write_org_chat_jsonl_writes_entry(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = main.AgentWorkspaceStore(tmp)
+            session = main.Session(
+                participants={"A": SimpleNamespace(
+                    name="A", lifecycle_state="active",
+                    interact=lambda *a, **kw: "hi",
+                    update_group_conversations=lambda m: None,
+                )},
+            )
+            session._org_workspace = store
+            entry = main.TranscriptEntry(1, "A", "B", "hello", "world")
+            session._write_org_chat_jsonl(entry)
+            result = store.read("org", "org_chat.jsonl")
+            parsed = json.loads(result["content"].strip())
+            self.assertEqual(parsed["turn"], 1)
+            self.assertEqual(parsed["sender"], "A")
+
+    def test_org_chat_injected_in_step(self):
+        received_prompts = []
+
+        class CapturingRole:
+            name = "B"
+            lifecycle_state = "active"
+            conversation_history = {}
+            template = ""
+            max_tokens = 100
+            temperature = 0.0
+            runtime_tool_results = []
+            runtime_event_stream = None
+            runtime_session_id = None
+            runtime_role_name = None
+            allowed_tools = set()
+
+            def interact(self, sender=None, prompt=None):
+                received_prompts.append(prompt or "")
+                return "response"
+
+            def update_group_conversations(self, m):
+                pass
+
+        a = SimpleNamespace(
+            name="A", lifecycle_state="active",
+            interact=lambda *a, **kw: "initial",
+            update_group_conversations=lambda m: None,
+        )
+        b = CapturingRole()
+        old_lines = main.org_chat_context_lines
+        main.org_chat_context_lines = 5
+        try:
+            session = main.Session(participants={"A": a, "B": b})
+            # seed transcript with one entry manually
+            session.transcript.append(main.TranscriptEntry(1, "A", "B", "seed prompt", "seed response"))
+            session.turns_completed = 1
+            session.last_receiver = a
+            session.step("hello")
+        finally:
+            main.org_chat_context_lines = old_lines
+
+        self.assertTrue(any("Recent org chat" in p for p in received_prompts))
+
+
+class OrgDigestTests(unittest.TestCase):
+    """Tests for _auto_org_digest and list_recent_message_ids_by_type."""
+
+    def setUp(self):
+        self.store_temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.store_temp.cleanup)
+        self.store = SQLiteMemoryStore(Path(self.store_temp.name) / "org.sqlite3")
+        self.addCleanup(self.store.close)
+        self.original_store = main.memory_store
+        self.original_org_interval = main.org_digest_interval
+        main.memory_store = self.store
+        main.org_digest_interval = 2
+        self.addCleanup(self._restore)
+
+    def _restore(self):
+        main.memory_store = self.original_store
+        main.org_digest_interval = self.original_org_interval
+
+    def _make_session(self):
+        participants = {
+            "X": SimpleNamespace(
+                name="X", lifecycle_state="active",
+                interact=lambda *a, **kw: "resp",
+                update_group_conversations=lambda m: None,
+            ),
+            "Y": SimpleNamespace(
+                name="Y", lifecycle_state="active",
+                interact=lambda *a, **kw: "resp",
+                update_group_conversations=lambda m: None,
+            ),
+        }
+        return main.Session(participants=participants)
+
+    def test_messages_tagged_as_org_chat(self):
+        session = self._make_session()
+        session.record_turn("X", "Y", "hello", "world")
+        rows = self.store.connection.execute(
+            "SELECT conversation_type FROM messages WHERE session_id=?", (session.run_id,)
+        ).fetchall()
+        self.assertTrue(all(r["conversation_type"] == "org_chat" for r in rows))
+
+    def test_list_recent_message_ids_by_type_filters_correctly(self):
+        session = self._make_session()
+        session.record_turn("X", "Y", "msg1", "resp1")
+        ids = self.store.list_recent_message_ids_by_type(session.run_id, 10, "org_chat")
+        self.assertGreater(len(ids), 0)
+        # Non-matching type returns empty
+        ids_other = self.store.list_recent_message_ids_by_type(session.run_id, 10, "personal")
+        self.assertEqual(ids_other, [])
+
+    def test_org_digest_fires_at_interval(self):
+        session = self._make_session()
+        # Two turns should trigger digest (interval=2)
+        session.record_turn("X", "Y", "first", "one")
+        session.record_turn("Y", "X", "second", "two")
+        digests = self.store.list_memory_digests(
+            agent_id="X", digest_type="episodic", limit=10
+        )
+        org_digests = [d for d in digests if d.get("conversation_type") == "org_chat"]
+        self.assertEqual(len(org_digests), 1)
+        self.assertIn("Org chat digest", org_digests[0]["content"])
+
+    def test_org_digest_not_fired_before_interval(self):
+        session = self._make_session()
+        session.record_turn("X", "Y", "only one turn", "yes")
+        digests = self.store.list_memory_digests(
+            agent_id="X", digest_type="episodic", limit=10
+        )
+        org_digests = [d for d in digests if d.get("conversation_type") == "org_chat"]
+        self.assertEqual(len(org_digests), 0)
+
+
+class ReasoningEffortTests(unittest.TestCase):
+    """Tests that ResponsesProvider forwards reasoning_effort when set."""
+
+    def _make_fake_response(self, text="done"):
+        output = SimpleNamespace(type="message", content=[SimpleNamespace(type="output_text", text=text)])
+        return SimpleNamespace(id="resp-1", output=[output])
+
+    def _make_provider_and_role(self, role_effort=None):
+        role = SimpleNamespace(
+            name="TestRole",
+            max_tokens=100,
+            temperature=0.0,
+            employee_dict=None,
+            allowed_tools=set(),
+            reasoning_effort=role_effort,
+        )
+        registry = SimpleNamespace(
+            as_responses_tools=lambda r: [],
+        )
+        return role, registry
+
+    def test_valid_effort_forwarded_to_api(self):
+        role, registry = self._make_provider_and_role()
+        captured = {}
+
+        def fake_create(**kwargs):
+            captured.update(kwargs)
+            return self._make_fake_response()
+
+        provider = main.ResponsesProvider.__new__(main.ResponsesProvider)
+        provider.registry = registry
+        provider.client = SimpleNamespace(responses=SimpleNamespace(create=fake_create))
+
+        old_effort = main._reasoning_effort_env
+        main._reasoning_effort_env = "low"
+        try:
+            with redirect_stdout(StringIO()), redirect_stderr(StringIO()):
+                provider.generate(role, "gpt-4o", "sender", [])
+        finally:
+            main._reasoning_effort_env = old_effort
+
+        self.assertEqual(captured.get("reasoning"), {"effort": "low"})
+
+    def test_invalid_effort_not_forwarded(self):
+        role, registry = self._make_provider_and_role()
+        captured = {}
+
+        def fake_create(**kwargs):
+            captured.update(kwargs)
+            return self._make_fake_response()
+
+        provider = main.ResponsesProvider.__new__(main.ResponsesProvider)
+        provider.registry = registry
+        provider.client = SimpleNamespace(responses=SimpleNamespace(create=fake_create))
+
+        old_effort = main._reasoning_effort_env
+        main._reasoning_effort_env = "ultra"
+        try:
+            with redirect_stdout(StringIO()), redirect_stderr(StringIO()):
+                provider.generate(role, "gpt-4o", "sender", [])
+        finally:
+            main._reasoning_effort_env = old_effort
+
+        self.assertNotIn("reasoning", captured)
+
+    def test_role_effort_overrides_env(self):
+        role, registry = self._make_provider_and_role(role_effort="high")
+        captured = {}
+
+        def fake_create(**kwargs):
+            captured.update(kwargs)
+            return self._make_fake_response()
+
+        provider = main.ResponsesProvider.__new__(main.ResponsesProvider)
+        provider.registry = registry
+        provider.client = SimpleNamespace(responses=SimpleNamespace(create=fake_create))
+
+        old_effort = main._reasoning_effort_env
+        main._reasoning_effort_env = "low"
+        try:
+            with redirect_stdout(StringIO()), redirect_stderr(StringIO()):
+                provider.generate(role, "gpt-4o", "sender", [])
+        finally:
+            main._reasoning_effort_env = old_effort
+
+        self.assertEqual(captured.get("reasoning"), {"effort": "high"})
+
+
+class OrgChatReadToolTests(unittest.TestCase):
+    """Tests for the org_chat_read function."""
+
+    def test_returns_empty_when_no_org_workspace(self):
+        old = main._org_workspace
+        main._org_workspace = None
+        try:
+            result = json.loads(main.org_chat_read({}))
+        finally:
+            main._org_workspace = old
+        self.assertEqual(result["lines"], [])
+        self.assertIn("not available", result["note"])
+
+    def test_returns_empty_when_file_missing(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = main.AgentWorkspaceStore(tmp)
+            old = main._org_workspace
+            main._org_workspace = store
+            try:
+                result = json.loads(main.org_chat_read({}))
+            finally:
+                main._org_workspace = old
+            self.assertEqual(result["lines"], [])
+
+    def test_returns_parsed_lines(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = main.AgentWorkspaceStore(tmp)
+            entry = {"turn": 1, "sender": "A", "receiver": "B", "prompt": "hi", "response": "hey"}
+            store.write("org", "org_chat.jsonl", json.dumps(entry) + "\n", append=False)
+            old = main._org_workspace
+            main._org_workspace = store
+            try:
+                result = json.loads(main.org_chat_read({}))
+            finally:
+                main._org_workspace = old
+            self.assertEqual(len(result["lines"]), 1)
+            self.assertEqual(result["lines"][0]["sender"], "A")
+            self.assertEqual(result["total"], 1)
+
+    def test_limit_respected(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = main.AgentWorkspaceStore(tmp)
+            for i in range(5):
+                entry = {"turn": i, "sender": "A", "receiver": "B", "prompt": f"p{i}", "response": ""}
+                store.write("org", "org_chat.jsonl", json.dumps(entry) + "\n", append=True)
+            old = main._org_workspace
+            main._org_workspace = store
+            try:
+                result = json.loads(main.org_chat_read({}, limit=2))
+            finally:
+                main._org_workspace = old
+            self.assertEqual(len(result["lines"]), 2)
+            self.assertEqual(result["total"], 5)
+
+
 if __name__ == "__main__":
     unittest.main()

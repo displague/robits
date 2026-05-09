@@ -261,6 +261,24 @@
       - path
   code: |
     return workspace_delete(employee_dict, agent_name, path)
+- name: org.chat_read
+  required_capabilities: []
+  owner_capability: basic
+  system_tool: false
+  grantable: true
+  description: >
+    Read recent org chat history. Returns the last `limit` turns of inter-agent
+    conversation as a JSON array. Use this to catch up on what other agents discussed.
+  parameters:
+    type: object
+    properties:
+      limit:
+        type: integer
+        description: Number of recent turns to return (default 20, max 100).
+        default: 20
+    required: []
+  code: |
+    return org_chat_read(employee_dict, limit=min(int(kwargs.get("limit", 20)), 100))
 - name: agent.create_alarm
   required_capabilities: []
   owner_capability: agent
