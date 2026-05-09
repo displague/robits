@@ -20,6 +20,7 @@ from uuid import uuid4
 from robits.memory.sqlite import SQLiteMemoryStore
 from robits.runtime.sandbox import SandboxMetadata
 from robits.runtime.tool_proposals import ToolProposalStore
+from robits.runtime.workspace import AgentWorkspaceStore, WorkspacePathError
 
 
 class TeeStream:
@@ -63,6 +64,7 @@ model_call_gate = threading.BoundedSemaphore(max_parallelism)
 memory_db_path = os.environ.get("ROBITS_MEMORY_DB")
 memory_store = SQLiteMemoryStore(memory_db_path) if memory_db_path else None
 tool_proposal_store = None
+agent_workspace_store = AgentWorkspaceStore()
 default_location = os.environ.get("ROBITS_LOCATION", "").strip()
 default_timezone = os.environ.get("ROBITS_TIMEZONE", "").strip()
 SAFE_TOOL_BUILTINS = {
@@ -192,6 +194,10 @@ class ToolRegistry:
                 "approve_tool_proposal": approve_tool_proposal,
                 "reject_tool_proposal": reject_tool_proposal,
                 "rollout_tool_proposal": rollout_tool_proposal,
+                "workspace_list": workspace_list,
+                "workspace_read": workspace_read,
+                "workspace_write": workspace_write,
+                "workspace_delete": workspace_delete,
                 "current_agent_context": current_agent_context,
             },
             local_dict,
@@ -769,6 +775,64 @@ def _caller_can_act_for_agent(agent_name):
 
 def _caller_name_for_error():
     return active_tool_caller_name or getattr(active_tool_caller, "name", "unknown caller")
+
+
+def _workspace_agent_name(agent_name):
+    try:
+        normalized_name = validate_role_name(agent_name)
+    except ValueError as e:
+        return None, f"Error: {e}"
+    if not _caller_can_act_for_agent(normalized_name):
+        return None, f"Error: Role '{_caller_name_for_error()}' cannot access workspace for '{normalized_name}'."
+    return normalized_name, None
+
+
+def workspace_list(employee_dict, agent_name, path=""):
+    del employee_dict
+    normalized_name, error = _workspace_agent_name(agent_name)
+    if error:
+        return error
+    try:
+        return json.dumps(agent_workspace_store.list(normalized_name, path), sort_keys=True)
+    except WorkspacePathError as e:
+        return f"Error: {e}"
+
+
+def workspace_read(employee_dict, agent_name, path, max_bytes=65536):
+    del employee_dict
+    normalized_name, error = _workspace_agent_name(agent_name)
+    if error:
+        return error
+    try:
+        read_limit = 65536 if max_bytes is None else int(max_bytes)
+        return json.dumps(
+            agent_workspace_store.read(normalized_name, path, max_bytes=read_limit),
+            sort_keys=True,
+        )
+    except (WorkspacePathError, ValueError) as e:
+        return f"Error: {e}"
+
+
+def workspace_write(employee_dict, agent_name, path, content, append=False):
+    del employee_dict
+    normalized_name, error = _workspace_agent_name(agent_name)
+    if error:
+        return error
+    try:
+        return json.dumps(agent_workspace_store.write(normalized_name, path, content, append=append), sort_keys=True)
+    except WorkspacePathError as e:
+        return f"Error: {e}"
+
+
+def workspace_delete(employee_dict, agent_name, path):
+    del employee_dict
+    normalized_name, error = _workspace_agent_name(agent_name)
+    if error:
+        return error
+    try:
+        return json.dumps(agent_workspace_store.delete(normalized_name, path), sort_keys=True)
+    except WorkspacePathError as e:
+        return f"Error: {e}"
 
 
 def grant_tool_access(employee_dict, role_name, tool_name, granted_by=None):

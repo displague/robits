@@ -65,11 +65,16 @@ class RuntimeTests(unittest.TestCase):
     def setUp(self):
         main.tool_registry.clear()
         self.original_tool_proposal_store = main.tool_proposal_store
+        self.original_agent_workspace_store = main.agent_workspace_store
         main.tool_proposal_store = main.ToolProposalStore()
+        self.workspace_temp_dir = tempfile.TemporaryDirectory()
+        main.agent_workspace_store = main.AgentWorkspaceStore(self.workspace_temp_dir.name)
         self.addCleanup(self.restore_tool_proposal_store)
+        self.addCleanup(self.workspace_temp_dir.cleanup)
 
     def restore_tool_proposal_store(self):
         main.tool_proposal_store = self.original_tool_proposal_store
+        main.agent_workspace_store = self.original_agent_workspace_store
 
     def test_parse_tool_instruction_handles_surrounding_text(self):
         response = 'Ops should run this:\n{"exec": "create_role", "args": {"role_name": "QA"}}\nDone.'
@@ -1608,6 +1613,120 @@ class RuntimeTests(unittest.TestCase):
         self.assertEqual(context["location"], "Philadelphia, PA")
         self.assertEqual(context["timezone"], "America/New_York")
         self.assertIn("current_datetime_local", context)
+
+    def test_agent_workspace_tools_write_list_read_and_delete_private_files(self):
+        employee_dict = main.build_employee_dict()
+        system = main.System(employee_dict)
+        with redirect_stdout(StringIO()):
+            main.load_tools(system)
+            write_response = system.interact(
+                json.dumps(
+                    {
+                        "exec": "agent.files_write",
+                        "args": {
+                            "agent_name": "SE",
+                            "path": "NOTES.md",
+                            "content": "Remember the build plan.",
+                        },
+                    }
+                ),
+                caller=employee_dict["SE"],
+            )
+            list_response = system.interact(
+                json.dumps({"exec": "agent.files_list", "args": {"agent_name": "SE"}}),
+                caller=employee_dict["SE"],
+            )
+            read_response = system.interact(
+                json.dumps(
+                    {
+                        "exec": "agent.files_read",
+                        "args": {"agent_name": "SE", "path": "NOTES.md"},
+                    }
+                ),
+                caller=employee_dict["SE"],
+            )
+            delete_response = system.interact(
+                json.dumps(
+                    {
+                        "exec": "agent.files_delete",
+                        "args": {"agent_name": "SE", "path": "NOTES.md"},
+                    }
+                ),
+                caller=employee_dict["SE"],
+            )
+
+        written = json.loads(write_response.split("Result: ", 1)[1])
+        listed = json.loads(list_response.split("Result: ", 1)[1])
+        read = json.loads(read_response.split("Result: ", 1)[1])
+        deleted = json.loads(delete_response.split("Result: ", 1)[1])
+
+        self.assertEqual(written["path"], "NOTES.md")
+        self.assertEqual(listed[0]["path"], "NOTES.md")
+        self.assertEqual(read["content"], "Remember the build plan.")
+        self.assertEqual(deleted["kind"], "file")
+
+    def test_agent_workspace_rejects_cross_agent_and_escaping_paths(self):
+        employee_dict = main.build_employee_dict()
+        system = main.System(employee_dict)
+        with redirect_stdout(StringIO()):
+            main.load_tools(system)
+            cross_response = system.interact(
+                json.dumps(
+                    {
+                        "exec": "agent.files_write",
+                        "args": {
+                            "agent_name": "HR",
+                            "path": "NOTES.md",
+                            "content": "nope",
+                        },
+                    }
+                ),
+                caller=employee_dict["SE"],
+            )
+            escape_response = system.interact(
+                json.dumps(
+                    {
+                        "exec": "agent.files_write",
+                        "args": {
+                            "agent_name": "SE",
+                            "path": "../escape.txt",
+                            "content": "nope",
+                        },
+                    }
+                ),
+                caller=employee_dict["SE"],
+            )
+            windows_escape_response = system.interact(
+                json.dumps(
+                    {
+                        "exec": "agent.files_write",
+                        "args": {
+                            "agent_name": "SE",
+                            "path": "..\\escape.txt",
+                            "content": "nope",
+                        },
+                    }
+                ),
+                caller=employee_dict["SE"],
+            )
+            negative_read_response = system.interact(
+                json.dumps(
+                    {
+                        "exec": "agent.files_read",
+                        "args": {
+                            "agent_name": "SE",
+                            "path": "NOTES.md",
+                            "max_bytes": -1,
+                        },
+                    }
+                ),
+                caller=employee_dict["SE"],
+            )
+
+        self.assertIn("cannot access workspace", cross_response)
+        self.assertIn("Path must be relative", escape_response)
+        self.assertIn("POSIX-style separators", windows_escape_response)
+        self.assertIn("max_bytes must be between", negative_read_response)
 
     def test_alarm_creation_rejects_past_due_at(self):
         employee_dict = main.build_employee_dict()
