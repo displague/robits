@@ -94,7 +94,9 @@ class AsyncSQLiteMemoryStoreTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(len(events), 10)
         self.assertEqual([event["sequence"] for event in events], list(range(10)))
-        self.assertGreaterEqual(max(observed_counts), 0)
+        # Reads see committed state only: counts must be non-decreasing
+        self.assertEqual(observed_counts, sorted(observed_counts))
+        self.assertLessEqual(max(observed_counts), 10)
 
     async def test_async_and_sync_stores_can_share_file_backed_database(self):
         store = await self.seed_store()

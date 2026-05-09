@@ -32,7 +32,7 @@ class AsyncSQLiteMemoryStore:
     def __init__(self, path, connection):
         self.path = Path(path)
         self.connection = connection
-        self._write_lock = asyncio.Lock()
+        self._db_lock = asyncio.Lock()
 
     @classmethod
     async def open(cls, path, *, busy_timeout_ms=5000, wal=True):
@@ -67,11 +67,13 @@ class AsyncSQLiteMemoryStore:
         await self.close()
 
     async def _rows(self, statement, params=()):
-        cursor = await self.connection.execute(statement, params)
-        try:
-            return await cursor.fetchall()
-        finally:
-            await cursor.close()
+        async with self._db_lock:
+            cursor = await self.connection.execute(statement, params)
+            try:
+                rows = await cursor.fetchall()
+                return [dict(row) for row in rows]
+            finally:
+                await cursor.close()
 
     async def _index(
         self,
@@ -110,7 +112,7 @@ class AsyncSQLiteMemoryStore:
 
     async def create_session(self, session_id, title=None, started_at=None, metadata=None):
         timestamp = started_at or _utc_now()
-        async with self._write_lock:
+        async with self._db_lock:
             await self.connection.execute(
                 """
                 INSERT OR IGNORE INTO sessions(session_id, title, started_at, metadata_json)
@@ -131,7 +133,7 @@ class AsyncSQLiteMemoryStore:
         metadata=None,
     ):
         timestamp = created_at or _utc_now()
-        async with self._write_lock:
+        async with self._db_lock:
             await self.connection.execute(
                 """
                 INSERT INTO agents(
@@ -171,7 +173,7 @@ class AsyncSQLiteMemoryStore:
         metadata=None,
     ):
         timestamp = created_at or _utc_now()
-        async with self._write_lock:
+        async with self._db_lock:
             cursor = await self.connection.execute(
                 """
                 INSERT INTO messages(
@@ -225,7 +227,7 @@ class AsyncSQLiteMemoryStore:
         metadata=None,
     ):
         timestamp = created_at or _utc_now()
-        async with self._write_lock:
+        async with self._db_lock:
             cursor = await self.connection.execute(
                 """
                 INSERT INTO thoughts(
@@ -273,7 +275,7 @@ class AsyncSQLiteMemoryStore:
         created_at=None,
     ):
         timestamp = created_at or _utc_now()
-        async with self._write_lock:
+        async with self._db_lock:
             cursor = await self.connection.execute(
                 """
                 INSERT INTO runtime_events(
