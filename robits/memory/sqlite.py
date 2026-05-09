@@ -127,14 +127,13 @@ class SQLiteMemoryStore:
                 channel_type TEXT NOT NULL,
                 participants_json TEXT NOT NULL DEFAULT '[]',
                 visibility TEXT NOT NULL DEFAULT 'public',
-                social_distance REAL,
+                social_distance REAL CHECK (social_distance IS NULL OR (social_distance >= 0.0 AND social_distance <= 5.0)),
                 clock_phase_hint REAL,
                 memory_policy TEXT NOT NULL DEFAULT 'default',
                 digest_policy TEXT NOT NULL DEFAULT 'default',
                 prompt_injection_policy TEXT NOT NULL DEFAULT 'default',
                 created_at TEXT NOT NULL,
                 metadata_json TEXT NOT NULL DEFAULT '{}',
-                CHECK (social_distance IS NULL OR (social_distance >= 0.0 AND social_distance <= 5.0)),
                 UNIQUE(channel_type, participants_json)
             );
 

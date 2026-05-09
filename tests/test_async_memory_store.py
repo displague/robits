@@ -155,6 +155,33 @@ class AsyncSQLiteMemoryStoreTests(unittest.IsolatedAsyncioTestCase):
         }
         self.assertTrue(sync_public.issubset(async_public))
 
+    async def test_async_channel_create_and_list(self):
+        from robits.memory.sqlite import CHANNEL_AGENT_DM, SOCIAL_FRIENDLY
+        store = await self.seed_store()
+
+        ch_id = await store.get_or_create_channel(
+            CHANNEL_AGENT_DM,
+            participants=["SE", "HR"],
+            social_distance=SOCIAL_FRIENDLY,
+        )
+        self.assertIsInstance(ch_id, int)
+
+        ch_id2 = await store.get_or_create_channel(
+            CHANNEL_AGENT_DM,
+            participants=["SE", "HR"],
+            social_distance=SOCIAL_FRIENDLY,
+        )
+        self.assertEqual(ch_id, ch_id2, "idempotent: same args yield same id")
+
+        channels = await store.list_channels(channel_type=CHANNEL_AGENT_DM)
+        self.assertEqual(len(channels), 1)
+        self.assertEqual(channels[0]["channel_id"], ch_id)
+        self.assertAlmostEqual(channels[0]["social_distance"], SOCIAL_FRIENDLY)
+
+        by_participant = await store.list_channels(participant="SE")
+        self.assertEqual(len(by_participant), 1)
+        self.assertEqual(by_participant[0]["channel_id"], ch_id)
+
     async def test_sync_parity_methods_delegate_through_async_store(self):
         store = await self.seed_store()
         await store.add_contact("SE", "HR", "coworker")
