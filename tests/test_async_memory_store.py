@@ -24,7 +24,9 @@ class AsyncSQLiteMemoryStoreTests(unittest.IsolatedAsyncioTestCase):
         return store
 
     async def test_async_store_bootstraps_schema_and_writes_messages(self):
+        from robits.memory.sqlite import CHANNEL_ORG_CHAT, SOCIAL_PROFESSIONAL
         store = await self.seed_store()
+        ch = await store.get_or_create_channel(CHANNEL_ORG_CHAT, social_distance=SOCIAL_PROFESSIONAL)
 
         message_id = await store.append_message(
             "session-1",
@@ -32,7 +34,7 @@ class AsyncSQLiteMemoryStoreTests(unittest.IsolatedAsyncioTestCase):
             "SE",
             "Please design async storage.",
             relationship_type="coworker",
-            conversation_type="org_chat",
+            channel_id=ch,
             source="chat",
         )
 
@@ -40,10 +42,12 @@ class AsyncSQLiteMemoryStoreTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(messages[0]["message_id"], message_id)
         self.assertEqual(messages[0]["content"], "Please design async storage.")
-        self.assertEqual(messages[0]["conversation_type"], "org_chat")
+        self.assertEqual(messages[0]["channel_id"], ch)
 
     async def test_concurrent_async_appends_are_serialized_and_visible(self):
+        from robits.memory.sqlite import CHANNEL_ORG_CHAT, SOCIAL_PROFESSIONAL
         store = await self.seed_store()
+        ch = await store.get_or_create_channel(CHANNEL_ORG_CHAT, social_distance=SOCIAL_PROFESSIONAL)
 
         async def append(index):
             return await store.append_message(
@@ -51,14 +55,14 @@ class AsyncSQLiteMemoryStoreTests(unittest.IsolatedAsyncioTestCase):
                 "CEO" if index % 2 == 0 else "HR",
                 "SE",
                 f"Concurrent message {index}.",
-                conversation_type="org_chat",
+                channel_id=ch,
                 source="test",
             )
 
         ids = await asyncio.gather(*(append(index) for index in range(20)))
         messages = await store.list_messages(
             session_id="session-1",
-            conversation_type="org_chat",
+            channel_id=ch,
             limit=25,
         )
 
@@ -106,7 +110,6 @@ class AsyncSQLiteMemoryStoreTests(unittest.IsolatedAsyncioTestCase):
             "CEO",
             "SE",
             "Async write visible to sync reader.",
-            conversation_type="org_chat",
         )
         await store.close()
 
@@ -123,13 +126,11 @@ class AsyncSQLiteMemoryStoreTests(unittest.IsolatedAsyncioTestCase):
             "CEO",
             "SE",
             "Async sqlite message should be searchable.",
-            conversation_type="org_chat",
         )
         await store.append_thought(
             "SE",
             "Async sqlite thought should also be searchable.",
             session_id="session-1",
-            conversation_type="agent_thought",
         )
         await store.close()
 
@@ -154,6 +155,33 @@ class AsyncSQLiteMemoryStoreTests(unittest.IsolatedAsyncioTestCase):
         }
         self.assertTrue(sync_public.issubset(async_public))
 
+    async def test_async_channel_create_and_list(self):
+        from robits.memory.sqlite import CHANNEL_AGENT_DM, SOCIAL_FRIENDLY
+        store = await self.seed_store()
+
+        ch_id = await store.get_or_create_channel(
+            CHANNEL_AGENT_DM,
+            participants=["SE", "HR"],
+            social_distance=SOCIAL_FRIENDLY,
+        )
+        self.assertIsInstance(ch_id, int)
+
+        ch_id2 = await store.get_or_create_channel(
+            CHANNEL_AGENT_DM,
+            participants=["SE", "HR"],
+            social_distance=SOCIAL_FRIENDLY,
+        )
+        self.assertEqual(ch_id, ch_id2, "idempotent: same args yield same id")
+
+        channels = await store.list_channels(channel_type=CHANNEL_AGENT_DM)
+        self.assertEqual(len(channels), 1)
+        self.assertEqual(channels[0]["channel_id"], ch_id)
+        self.assertAlmostEqual(channels[0]["social_distance"], SOCIAL_FRIENDLY)
+
+        by_participant = await store.list_channels(participant="SE")
+        self.assertEqual(len(by_participant), 1)
+        self.assertEqual(by_participant[0]["channel_id"], ch_id)
+
     async def test_sync_parity_methods_delegate_through_async_store(self):
         store = await self.seed_store()
         await store.add_contact("SE", "HR", "coworker")
@@ -168,6 +196,33 @@ class AsyncSQLiteMemoryStoreTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(todos), 1)
         self.assertEqual(todos[0]["todo_id"], todo_id)
         self.assertEqual(todos[0]["title"], "Capture drop-in parity tasks.")
+
+    async def test_channel_methods_delegate_through_async_store(self):
+        from robits.memory.sqlite import CHANNEL_AGENT_DM, SOCIAL_PROFESSIONAL
+
+        store = await self.seed_store()
+        channel_id = await store.get_or_create_channel(
+            CHANNEL_AGENT_DM,
+            participants=["SE", "CEO", "SE"],
+            social_distance=SOCIAL_PROFESSIONAL,
+        )
+        same_channel_id = await store.get_or_create_channel(
+            CHANNEL_AGENT_DM,
+            participants=["CEO", "SE"],
+            social_distance=SOCIAL_PROFESSIONAL,
+        )
+        await store.get_or_create_channel(CHANNEL_AGENT_DM, participants=["agent_%"])
+
+        se_channels = await store.list_channels(
+            channel_type=CHANNEL_AGENT_DM,
+            participant="SE",
+        )
+        wildcard_channels = await store.list_channels(participant="agent_%")
+
+        self.assertEqual(channel_id, same_channel_id)
+        self.assertEqual(len(se_channels), 1)
+        self.assertEqual(se_channels[0]["channel_id"], channel_id)
+        self.assertEqual(len(wildcard_channels), 1)
 
 
 if __name__ == "__main__":

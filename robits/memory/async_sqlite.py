@@ -75,6 +75,16 @@ class AsyncSQLiteMemoryStore:
             finally:
                 await cursor.close()
 
+    async def _channel_type(self, channel_id):
+        if channel_id is None:
+            return None
+        cursor = await self.connection.execute(
+            "SELECT channel_type FROM channels WHERE channel_id = ?", (channel_id,)
+        )
+        row = await cursor.fetchone()
+        await cursor.close()
+        return dict(row)["channel_type"] if row else None
+
     async def _run_sync(self, method_name, *args, **kwargs):
         def runner():
             store = SQLiteMemoryStore(self.path)
@@ -177,7 +187,7 @@ class AsyncSQLiteMemoryStore:
         kind="message",
         visibility="public",
         relationship_type=None,
-        conversation_type=None,
+        channel_id=None,
         source=None,
         created_at=None,
         metadata=None,
@@ -188,7 +198,7 @@ class AsyncSQLiteMemoryStore:
                 """
                 INSERT INTO messages(
                     session_id, sender_agent_id, receiver_agent_id, content, kind,
-                    visibility, relationship_type, conversation_type, source,
+                    visibility, relationship_type, channel_id, source,
                     created_at, metadata_json
                 )
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -201,7 +211,7 @@ class AsyncSQLiteMemoryStore:
                     kind,
                     visibility,
                     relationship_type,
-                    conversation_type,
+                    channel_id,
                     source,
                     timestamp,
                     _json_dumps(metadata),
@@ -209,6 +219,7 @@ class AsyncSQLiteMemoryStore:
             )
             record_id = cursor.lastrowid
             await cursor.close()
+            channel_type = await self._channel_type(channel_id)
             await self._index(
                 "message",
                 record_id,
@@ -217,7 +228,7 @@ class AsyncSQLiteMemoryStore:
                 session_id,
                 source,
                 relationship_type,
-                conversation_type,
+                channel_type,
                 timestamp,
                 content,
             )
@@ -231,7 +242,7 @@ class AsyncSQLiteMemoryStore:
         session_id=None,
         visibility="private",
         relationship_type=None,
-        conversation_type=None,
+        channel_id=None,
         source=None,
         created_at=None,
         metadata=None,
@@ -242,7 +253,7 @@ class AsyncSQLiteMemoryStore:
                 """
                 INSERT INTO thoughts(
                     session_id, agent_id, content, visibility, relationship_type,
-                    conversation_type, source, created_at, metadata_json
+                    channel_id, source, created_at, metadata_json
                 )
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
@@ -252,7 +263,7 @@ class AsyncSQLiteMemoryStore:
                     content,
                     visibility,
                     relationship_type,
-                    conversation_type,
+                    channel_id,
                     source,
                     timestamp,
                     _json_dumps(metadata),
@@ -260,6 +271,7 @@ class AsyncSQLiteMemoryStore:
             )
             record_id = cursor.lastrowid
             await cursor.close()
+            channel_type = await self._channel_type(channel_id)
             await self._index(
                 "thought",
                 record_id,
@@ -268,7 +280,7 @@ class AsyncSQLiteMemoryStore:
                 session_id,
                 source,
                 relationship_type,
-                conversation_type,
+                channel_type,
                 timestamp,
                 content,
             )
@@ -311,7 +323,7 @@ class AsyncSQLiteMemoryStore:
         self,
         session_id=None,
         agent_id=None,
-        conversation_type=None,
+        channel_id=None,
         visibility=None,
         limit=100,
     ):
@@ -323,9 +335,9 @@ class AsyncSQLiteMemoryStore:
         if agent_id is not None:
             clauses.append("(sender_agent_id = ? OR receiver_agent_id = ?)")
             params.extend([agent_id, agent_id])
-        if conversation_type is not None:
-            clauses.append("conversation_type = ?")
-            params.append(conversation_type)
+        if channel_id is not None:
+            clauses.append("channel_id = ?")
+            params.append(channel_id)
         if visibility is not None:
             clauses.append("visibility = ?")
             params.append(visibility)
@@ -344,7 +356,7 @@ class AsyncSQLiteMemoryStore:
         self,
         session_id=None,
         agent_id=None,
-        conversation_type=None,
+        channel_id=None,
         visibility=None,
         limit=100,
     ):
@@ -353,7 +365,7 @@ class AsyncSQLiteMemoryStore:
         for column, value in (
             ("session_id", session_id),
             ("agent_id", agent_id),
-            ("conversation_type", conversation_type),
+            ("channel_id", channel_id),
             ("visibility", visibility),
         ):
             if value is not None:
@@ -404,12 +416,12 @@ class AsyncSQLiteMemoryStore:
     async def list_recent_message_ids(self, session_id, limit):
         return await self._run_sync("list_recent_message_ids", session_id, limit)
 
-    async def list_recent_message_ids_by_type(self, session_id, limit, conversation_type):
+    async def list_recent_message_ids_by_channel(self, session_id, limit, channel_id):
         return await self._run_sync(
-            "list_recent_message_ids_by_type",
+            "list_recent_message_ids_by_channel",
             session_id,
             limit,
-            conversation_type,
+            channel_id,
         )
 
     async def end_session(self, session_id, ended_at=None):
@@ -721,5 +733,41 @@ class AsyncSQLiteMemoryStore:
             source=source,
             start_at=start_at,
             end_at=end_at,
+            limit=limit,
+        )
+
+    async def get_or_create_channel(
+        self,
+        channel_type,
+        participants=None,
+        *,
+        visibility="public",
+        social_distance=None,
+        clock_phase_hint=None,
+        memory_policy="default",
+        digest_policy="default",
+        prompt_injection_policy="default",
+        metadata=None,
+        created_at=None,
+    ):
+        return await self._run_sync(
+            "get_or_create_channel",
+            channel_type,
+            participants,
+            visibility=visibility,
+            social_distance=social_distance,
+            clock_phase_hint=clock_phase_hint,
+            memory_policy=memory_policy,
+            digest_policy=digest_policy,
+            prompt_injection_policy=prompt_injection_policy,
+            metadata=metadata,
+            created_at=created_at,
+        )
+
+    async def list_channels(self, channel_type=None, participant=None, limit=100):
+        return await self._run_sync(
+            "list_channels",
+            channel_type=channel_type,
+            participant=participant,
             limit=limit,
         )

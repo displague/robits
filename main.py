@@ -17,7 +17,11 @@ import sys
 from pathlib import Path
 from uuid import uuid4
 
-from robits.memory.sqlite import SQLiteMemoryStore
+from robits.memory.sqlite import (
+    CHANNEL_ORG_CHAT,
+    SOCIAL_PROFESSIONAL,
+    SQLiteMemoryStore,
+)
 from robits.runtime.sandbox import SandboxMetadata
 from robits.runtime.tool_proposals import ToolProposalStore
 from robits.runtime.workspace import AgentWorkspaceStore, WorkspacePathError
@@ -2188,12 +2192,17 @@ class Session:
             },
         )
         self._org_workspace = _org_workspace
+        self._org_chat_channel_id = None
         if memory_store is not None:
             try:
                 memory_store.create_session(self.run_id)
                 for name, participant in self.participants.items():
                     role_type = type(participant).__name__
                     memory_store.upsert_agent(name, role_type, display_name=name)
+                self._org_chat_channel_id = memory_store.get_or_create_channel(
+                    CHANNEL_ORG_CHAT,
+                    social_distance=SOCIAL_PROFESSIONAL,
+                )
             except Exception:
                 pass
 
@@ -2311,7 +2320,7 @@ class Session:
                         receiver_agent_id=canonical_receiver,
                         content=prompt,
                         kind="message",
-                        conversation_type="org_chat",
+                        channel_id=self._org_chat_channel_id,
                     )
                 if response:
                     memory_store.append_message(
@@ -2320,7 +2329,7 @@ class Session:
                         receiver_agent_id=canonical_sender,
                         content=response,
                         kind="message",
-                        conversation_type="org_chat",
+                        channel_id=self._org_chat_channel_id,
                     )
             except Exception:
                 pass
@@ -2402,8 +2411,8 @@ class Session:
         content = "Org chat digest:\n" + "\n".join(lines)
         source_refs = []
         try:
-            msg_ids = memory_store.list_recent_message_ids_by_type(
-                self.run_id, org_digest_interval * 2, "org_chat"
+            msg_ids = memory_store.list_recent_message_ids_by_channel(
+                self.run_id, org_digest_interval * 2, self._org_chat_channel_id
             )
             source_refs = [{"source_table": "messages", "source_id": mid} for mid in msg_ids]
         except Exception:

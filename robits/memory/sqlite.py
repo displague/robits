@@ -7,6 +7,24 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+# Canonical channel types for relationship-scoped conversations
+CHANNEL_ORG_CHAT = "org_chat"
+CHANNEL_AGENT_THOUGHT = "agent_thought"
+CHANNEL_AGENT_DM = "agent_dm"
+CHANNEL_THERAPIST = "therapist"
+CHANNEL_FAMILY_MEMBER = "family_member"
+CHANNEL_FAMILY_GROUP = "family_group"
+CHANNEL_WORK_PEER = "work_peer"
+CHANNEL_SYSTEM = "system"
+
+# Social-distance scale (float labels for use in channels.social_distance)
+SOCIAL_SELF = 0.0
+SOCIAL_FAMILIAL = 1.0
+SOCIAL_FRIENDLY = 2.0
+SOCIAL_PROFESSIONAL = 3.0
+SOCIAL_UNKNOWN = 4.0
+SOCIAL_HOSTILE = 5.0
+
 
 def _utc_now():
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
@@ -104,6 +122,21 @@ class SQLiteMemoryStore:
                 FOREIGN KEY (contact_agent_id) REFERENCES agents(agent_id)
             );
 
+            CREATE TABLE IF NOT EXISTS channels (
+                channel_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                channel_type TEXT NOT NULL,
+                participants_json TEXT NOT NULL DEFAULT '[]',
+                visibility TEXT NOT NULL DEFAULT 'public',
+                social_distance REAL CHECK (social_distance IS NULL OR (social_distance >= 0.0 AND social_distance <= 5.0)),
+                clock_phase_hint REAL,
+                memory_policy TEXT NOT NULL DEFAULT 'default',
+                digest_policy TEXT NOT NULL DEFAULT 'default',
+                prompt_injection_policy TEXT NOT NULL DEFAULT 'default',
+                created_at TEXT NOT NULL,
+                metadata_json TEXT NOT NULL DEFAULT '{}',
+                UNIQUE(channel_type, participants_json)
+            );
+
             CREATE TABLE IF NOT EXISTS messages (
                 message_id INTEGER PRIMARY KEY AUTOINCREMENT,
                 session_id TEXT NOT NULL,
@@ -113,13 +146,14 @@ class SQLiteMemoryStore:
                 kind TEXT NOT NULL DEFAULT 'message',
                 visibility TEXT NOT NULL DEFAULT 'public',
                 relationship_type TEXT,
-                conversation_type TEXT,
+                channel_id INTEGER,
                 source TEXT,
                 created_at TEXT NOT NULL,
                 metadata_json TEXT NOT NULL DEFAULT '{}',
                 FOREIGN KEY (session_id) REFERENCES sessions(session_id),
                 FOREIGN KEY (sender_agent_id) REFERENCES agents(agent_id),
-                FOREIGN KEY (receiver_agent_id) REFERENCES agents(agent_id)
+                FOREIGN KEY (receiver_agent_id) REFERENCES agents(agent_id),
+                FOREIGN KEY (channel_id) REFERENCES channels(channel_id)
             );
 
             CREATE TABLE IF NOT EXISTS thoughts (
@@ -129,12 +163,13 @@ class SQLiteMemoryStore:
                 content TEXT NOT NULL,
                 visibility TEXT NOT NULL DEFAULT 'private',
                 relationship_type TEXT,
-                conversation_type TEXT,
+                channel_id INTEGER,
                 source TEXT,
                 created_at TEXT NOT NULL,
                 metadata_json TEXT NOT NULL DEFAULT '{}',
                 FOREIGN KEY (session_id) REFERENCES sessions(session_id),
-                FOREIGN KEY (agent_id) REFERENCES agents(agent_id)
+                FOREIGN KEY (agent_id) REFERENCES agents(agent_id),
+                FOREIGN KEY (channel_id) REFERENCES channels(channel_id)
             );
 
             CREATE TABLE IF NOT EXISTS todos (
@@ -255,9 +290,17 @@ class SQLiteMemoryStore:
                 ON memory_digest_sources(digest_id);
             CREATE INDEX IF NOT EXISTS idx_runtime_events_session ON runtime_events(session_id);
             CREATE INDEX IF NOT EXISTS idx_runtime_events_type ON runtime_events(event_type);
+            CREATE INDEX IF NOT EXISTS idx_channels_type ON channels(channel_type);
             """
         )
         self._ensure_memory_digest_columns()
+        self._ensure_channel_schema()
+        self.connection.execute(
+            "CREATE INDEX IF NOT EXISTS idx_messages_channel ON messages(channel_id)"
+        )
+        self.connection.execute(
+            "CREATE INDEX IF NOT EXISTS idx_thoughts_channel ON thoughts(channel_id)"
+        )
         self.connection.execute(
             """
             CREATE INDEX IF NOT EXISTS idx_memory_digests_current
@@ -265,6 +308,17 @@ class SQLiteMemoryStore:
             """
         )
         self.connection.commit()
+
+    def _ensure_channel_schema(self):
+        for table in ("messages", "thoughts"):
+            cols = {
+                row["name"]
+                for row in self.connection.execute(f"PRAGMA table_info({table})").fetchall()
+            }
+            if "channel_id" not in cols:
+                self.connection.execute(
+                    f"ALTER TABLE {table} ADD COLUMN channel_id INTEGER REFERENCES channels(channel_id)"
+                )
 
     def _ensure_memory_digest_columns(self):
         columns = {
@@ -307,15 +361,15 @@ class SQLiteMemoryStore:
         ).fetchall()
         return [row["message_id"] for row in reversed(rows)]
 
-    def list_recent_message_ids_by_type(self, session_id, limit, conversation_type):
-        """Return the last ``limit`` message IDs for a session filtered by conversation_type."""
+    def list_recent_message_ids_by_channel(self, session_id, limit, channel_id):
+        """Return the last ``limit`` message IDs for a session filtered by channel."""
         rows = self.connection.execute(
             """
             SELECT message_id FROM messages
-            WHERE session_id = ? AND conversation_type = ?
+            WHERE session_id = ? AND channel_id = ?
             ORDER BY message_id DESC LIMIT ?
             """,
-            (session_id, conversation_type, limit),
+            (session_id, channel_id, limit),
         ).fetchall()
         return [row["message_id"] for row in reversed(rows)]
 
@@ -393,6 +447,102 @@ class SQLiteMemoryStore:
         )
         self.connection.commit()
 
+    def get_or_create_channel(
+        self,
+        channel_type,
+        participants=None,
+        *,
+        visibility="public",
+        social_distance=None,
+        clock_phase_hint=None,
+        memory_policy="default",
+        digest_policy="default",
+        prompt_injection_policy="default",
+        metadata=None,
+        created_at=None,
+    ):
+        normalized_participants = self._normalize_participants(participants)
+        participants_json = json.dumps(normalized_participants)
+        self._validate_social_distance(social_distance)
+        timestamp = created_at or _utc_now()
+        self.connection.execute(
+            """
+            INSERT OR IGNORE INTO channels(
+                channel_type, participants_json, visibility, social_distance, clock_phase_hint,
+                memory_policy, digest_policy, prompt_injection_policy, created_at, metadata_json
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                channel_type,
+                participants_json,
+                visibility,
+                social_distance,
+                clock_phase_hint,
+                memory_policy,
+                digest_policy,
+                prompt_injection_policy,
+                timestamp,
+                _json_dumps(metadata),
+            ),
+        )
+        self.connection.commit()
+        row = self.connection.execute(
+            "SELECT channel_id FROM channels WHERE channel_type = ? AND participants_json = ?",
+            (channel_type, participants_json),
+        ).fetchone()
+        return row["channel_id"]
+
+    def list_channels(self, channel_type=None, participant=None, limit=100):
+        clauses = []
+        params: list[Any] = []
+        if channel_type is not None:
+            clauses.append("channel_type = ?")
+            params.append(channel_type)
+        if participant is not None:
+            if not isinstance(participant, str):
+                raise TypeError("participant must be a string")
+            clauses.append(
+                "EXISTS (SELECT 1 FROM json_each(channels.participants_json) WHERE json_each.value = ?)"
+            )
+            params.append(participant)
+        where = "WHERE " + " AND ".join(clauses) if clauses else ""
+        rows = self.connection.execute(
+            f"SELECT * FROM channels {where} ORDER BY channel_id LIMIT ?",
+            params + [limit],
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+    @staticmethod
+    def _normalize_participants(participants):
+        values = participants or []
+        for participant in values:
+            if not isinstance(participant, str):
+                raise TypeError("participants must contain only strings")
+        return sorted(set(values))
+
+    @staticmethod
+    def _validate_social_distance(social_distance):
+        if social_distance is None:
+            return
+        # bool is a subclass of int in Python; reject it as a semantic scale value.
+        if not isinstance(social_distance, (int, float)) or isinstance(
+            social_distance, bool
+        ):
+            raise TypeError("social_distance must be a number between 0.0 and 5.0")
+        if social_distance < SOCIAL_SELF or social_distance > SOCIAL_HOSTILE:
+            raise ValueError(
+                f"social_distance must be between {SOCIAL_SELF:.1f} and {SOCIAL_HOSTILE:.1f}"
+            )
+
+    def _channel_type(self, channel_id):
+        if channel_id is None:
+            return None
+        row = self.connection.execute(
+            "SELECT channel_type FROM channels WHERE channel_id = ?", (channel_id,)
+        ).fetchone()
+        return row["channel_type"] if row else None
+
     def append_message(
         self,
         session_id,
@@ -402,7 +552,7 @@ class SQLiteMemoryStore:
         kind="message",
         visibility="public",
         relationship_type=None,
-        conversation_type=None,
+        channel_id=None,
         source=None,
         created_at=None,
         metadata=None,
@@ -412,7 +562,7 @@ class SQLiteMemoryStore:
             """
             INSERT INTO messages(
                 session_id, sender_agent_id, receiver_agent_id, content, kind,
-                visibility, relationship_type, conversation_type, source,
+                visibility, relationship_type, channel_id, source,
                 created_at, metadata_json
             )
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -425,7 +575,7 @@ class SQLiteMemoryStore:
                 kind,
                 visibility,
                 relationship_type,
-                conversation_type,
+                channel_id,
                 source,
                 timestamp,
                 _json_dumps(metadata),
@@ -440,7 +590,7 @@ class SQLiteMemoryStore:
             session_id,
             source,
             relationship_type,
-            conversation_type,
+            self._channel_type(channel_id),
             timestamp,
             content,
         )
@@ -454,7 +604,7 @@ class SQLiteMemoryStore:
         session_id=None,
         visibility="private",
         relationship_type=None,
-        conversation_type=None,
+        channel_id=None,
         source=None,
         created_at=None,
         metadata=None,
@@ -464,7 +614,7 @@ class SQLiteMemoryStore:
             """
             INSERT INTO thoughts(
                 session_id, agent_id, content, visibility, relationship_type,
-                conversation_type, source, created_at, metadata_json
+                channel_id, source, created_at, metadata_json
             )
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
@@ -474,7 +624,7 @@ class SQLiteMemoryStore:
                 content,
                 visibility,
                 relationship_type,
-                conversation_type,
+                channel_id,
                 source,
                 timestamp,
                 _json_dumps(metadata),
@@ -489,7 +639,7 @@ class SQLiteMemoryStore:
             session_id,
             source,
             relationship_type,
-            conversation_type,
+            self._channel_type(channel_id),
             timestamp,
             content,
         )

@@ -106,7 +106,6 @@ class SQLiteMemoryStoreTests(unittest.TestCase):
             "SE",
             "Please design the durable memory substrate.",
             relationship_type="coworker",
-            conversation_type="work",
             source="chat",
         )
 
@@ -124,7 +123,6 @@ class SQLiteMemoryStoreTests(unittest.TestCase):
             "SE",
             "Use sqlite for coworker recall.",
             relationship_type="coworker",
-            conversation_type="work",
             source="chat",
         )
         store.append_thought(
@@ -132,7 +130,6 @@ class SQLiteMemoryStoreTests(unittest.TestCase):
             "The sqlite schema needs FTS indexes for private recollection.",
             session_id="session-1",
             relationship_type="coworker",
-            conversation_type="work",
             source="thinking",
         )
         store.append_tool_call(
@@ -165,14 +162,19 @@ class SQLiteMemoryStoreTests(unittest.TestCase):
         self.assertIn("tool_call", kinds)
         self.assertIn("memory_note", kinds)
 
-    def test_search_filters_relationship_conversation_source_and_dates(self):
+    def test_search_filters_relationship_source_and_dates(self):
         store = self.seed_store()
+        from robits.memory.sqlite import CHANNEL_WORK_PEER, SOCIAL_PROFESSIONAL
+
+        work_channel = store.get_or_create_channel(
+            CHANNEL_WORK_PEER, participants=["SE"], social_distance=SOCIAL_PROFESSIONAL
+        )
         store.append_thought(
             "SE",
             "Coworker plan for sqlite search.",
             session_id="session-1",
             relationship_type="coworker",
-            conversation_type="work",
+            channel_id=work_channel,
             source="thinking",
             created_at="2026-05-07T10:00:00+00:00",
         )
@@ -181,7 +183,6 @@ class SQLiteMemoryStoreTests(unittest.TestCase):
             "Family plan for sqlite search.",
             session_id="session-1",
             relationship_type="family",
-            conversation_type="home",
             source="thinking",
             created_at="2026-05-08T10:00:00+00:00",
         )
@@ -189,7 +190,7 @@ class SQLiteMemoryStoreTests(unittest.TestCase):
         results = store.search(
             "sqlite",
             relationship_type="coworker",
-            conversation_type="work",
+            conversation_type=CHANNEL_WORK_PEER,
             source="thinking",
             start_at="2026-05-07T00:00:00+00:00",
             end_at="2026-05-07T23:59:59+00:00",
@@ -295,7 +296,6 @@ class SQLiteMemoryStoreTests(unittest.TestCase):
             "SE",
             "Use sqlite to recall architecture decisions.",
             relationship_type="coworker",
-            conversation_type="work",
             source="chat",
             created_at="2026-05-07T10:00:00+00:00",
         )
@@ -304,7 +304,6 @@ class SQLiteMemoryStoreTests(unittest.TestCase):
             "The digest should link back to raw records.",
             session_id="session-1",
             relationship_type="coworker",
-            conversation_type="work",
             source="thinking",
             created_at="2026-05-07T10:01:00+00:00",
         )
@@ -734,6 +733,212 @@ class SQLiteMemoryStoreTests(unittest.TestCase):
             "SELECT ended_at FROM sessions WHERE session_id = 's-ts'"
         ).fetchone()
         self.assertEqual(row["ended_at"], "2024-01-01T00:00:00")
+
+
+class ChannelTests(unittest.TestCase):
+    def build_store(self):
+        temp_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(temp_dir.cleanup)
+        store = SQLiteMemoryStore(Path(temp_dir.name) / "memory.sqlite3")
+        self.addCleanup(store.close)
+        return store
+
+    def seed_store(self):
+        store = self.build_store()
+        store.create_session("session-1", title="Planning")
+        store.upsert_agent("CEO", "Human", "CEO")
+        store.upsert_agent("SE", "SoftwareEngineer", "SE")
+        return store
+
+    def test_schema_contains_channels_table(self):
+        store = self.build_store()
+        tables = {
+            row["name"]
+            for row in store.connection.execute(
+                "SELECT name FROM sqlite_master WHERE type IN ('table', 'virtual')"
+            )
+        }
+        self.assertIn("channels", tables)
+
+    def test_messages_and_thoughts_have_channel_id_column(self):
+        store = self.build_store()
+        for table in ("messages", "thoughts"):
+            cols = {
+                row["name"]
+                for row in store.connection.execute(f"PRAGMA table_info({table})")
+            }
+            self.assertIn("channel_id", cols, f"{table} missing channel_id")
+
+    def test_get_or_create_channel_returns_stable_id(self):
+        store = self.build_store()
+        from robits.memory.sqlite import CHANNEL_ORG_CHAT, SOCIAL_PROFESSIONAL
+
+        id1 = store.get_or_create_channel(CHANNEL_ORG_CHAT, social_distance=SOCIAL_PROFESSIONAL)
+        id2 = store.get_or_create_channel(CHANNEL_ORG_CHAT, social_distance=SOCIAL_PROFESSIONAL)
+        self.assertEqual(id1, id2)
+        self.assertIsInstance(id1, int)
+
+    def test_get_or_create_channel_distinguishes_by_type_and_participants(self):
+        store = self.build_store()
+        from robits.memory.sqlite import CHANNEL_AGENT_DM, CHANNEL_ORG_CHAT
+
+        org_id = store.get_or_create_channel(CHANNEL_ORG_CHAT)
+        dm_id = store.get_or_create_channel(CHANNEL_AGENT_DM, participants=["CEO", "SE"])
+        self.assertNotEqual(org_id, dm_id)
+
+    def test_get_or_create_channel_normalizes_duplicate_participants(self):
+        store = self.build_store()
+        from robits.memory.sqlite import CHANNEL_AGENT_DM
+
+        id1 = store.get_or_create_channel(CHANNEL_AGENT_DM, participants=["SE", "CEO", "SE"])
+        id2 = store.get_or_create_channel(CHANNEL_AGENT_DM, participants=["CEO", "SE"])
+        row = store.connection.execute(
+            "SELECT participants_json FROM channels WHERE channel_id = ?", (id1,)
+        ).fetchone()
+
+        self.assertEqual(id1, id2)
+        self.assertEqual(row["participants_json"], '["CEO", "SE"]')
+
+    def test_get_or_create_channel_rejects_non_string_participants(self):
+        store = self.build_store()
+        from robits.memory.sqlite import CHANNEL_AGENT_DM
+
+        with self.assertRaises(TypeError):
+            store.get_or_create_channel(CHANNEL_AGENT_DM, participants=["CEO", 3])
+
+    def test_get_or_create_channel_rejects_out_of_range_social_distance(self):
+        store = self.build_store()
+        from robits.memory.sqlite import CHANNEL_ORG_CHAT
+
+        with self.assertRaises(ValueError):
+            store.get_or_create_channel(CHANNEL_ORG_CHAT, social_distance=6.0)
+        with self.assertRaises(ValueError):
+            store.get_or_create_channel(CHANNEL_ORG_CHAT, social_distance=-1.0)
+
+    def test_list_channels_filters_by_type(self):
+        store = self.build_store()
+        from robits.memory.sqlite import CHANNEL_AGENT_DM, CHANNEL_ORG_CHAT
+
+        store.get_or_create_channel(CHANNEL_ORG_CHAT)
+        store.get_or_create_channel(CHANNEL_AGENT_DM, participants=["CEO", "SE"])
+        store.get_or_create_channel(CHANNEL_AGENT_DM, participants=["CEO", "HR"])
+
+        org_channels = store.list_channels(channel_type=CHANNEL_ORG_CHAT)
+        dm_channels = store.list_channels(channel_type=CHANNEL_AGENT_DM)
+
+        self.assertEqual(len(org_channels), 1)
+        self.assertEqual(len(dm_channels), 2)
+
+    def test_list_channels_filters_by_participant(self):
+        store = self.build_store()
+        from robits.memory.sqlite import CHANNEL_AGENT_DM
+
+        store.get_or_create_channel(CHANNEL_AGENT_DM, participants=["CEO", "SE"])
+        store.get_or_create_channel(CHANNEL_AGENT_DM, participants=["CEO", "HR"])
+        store.get_or_create_channel(CHANNEL_AGENT_DM, participants=["SE", "HR"])
+
+        se_channels = store.list_channels(participant="SE")
+        self.assertEqual(len(se_channels), 2)
+
+    def test_list_channels_participant_filter_handles_like_metacharacters(self):
+        store = self.build_store()
+        from robits.memory.sqlite import CHANNEL_AGENT_DM
+
+        exact_id = store.get_or_create_channel(CHANNEL_AGENT_DM, participants=["agent_%"])
+        store.get_or_create_channel(CHANNEL_AGENT_DM, participants=["agent_12"])
+
+        channels = store.list_channels(participant="agent_%")
+
+        self.assertEqual(len(channels), 1)
+        self.assertEqual(channels[0]["channel_id"], exact_id)
+
+    def test_channel_id_is_stored_on_messages(self):
+        store = self.seed_store()
+        from robits.memory.sqlite import CHANNEL_ORG_CHAT, SOCIAL_PROFESSIONAL
+
+        channel_id = store.get_or_create_channel(
+            CHANNEL_ORG_CHAT, social_distance=SOCIAL_PROFESSIONAL
+        )
+        msg_id = store.append_message(
+            "session-1", "CEO", "SE", "hello via channel", channel_id=channel_id
+        )
+        row = store.connection.execute(
+            "SELECT channel_id FROM messages WHERE message_id = ?", (msg_id,)
+        ).fetchone()
+        self.assertEqual(row["channel_id"], channel_id)
+
+    def test_channel_id_is_stored_on_thoughts(self):
+        store = self.seed_store()
+        from robits.memory.sqlite import CHANNEL_AGENT_THOUGHT
+
+        channel_id = store.get_or_create_channel(CHANNEL_AGENT_THOUGHT, participants=["SE"])
+        thought_id = store.append_thought(
+            "SE", "private thought in channel", session_id="session-1", channel_id=channel_id
+        )
+        row = store.connection.execute(
+            "SELECT channel_id FROM thoughts WHERE thought_id = ?", (thought_id,)
+        ).fetchone()
+        self.assertEqual(row["channel_id"], channel_id)
+
+    def test_channel_social_distance_is_persisted(self):
+        store = self.build_store()
+        from robits.memory.sqlite import CHANNEL_ORG_CHAT, SOCIAL_PROFESSIONAL
+
+        channel_id = store.get_or_create_channel(
+            CHANNEL_ORG_CHAT, social_distance=SOCIAL_PROFESSIONAL
+        )
+        row = store.connection.execute(
+            "SELECT social_distance FROM channels WHERE channel_id = ?", (channel_id,)
+        ).fetchone()
+        self.assertEqual(row["social_distance"], SOCIAL_PROFESSIONAL)
+
+    def test_legacy_messages_without_channel_id_remain_accessible(self):
+        store = self.seed_store()
+        msg_id = store.append_message("session-1", "CEO", "SE", "no channel message")
+        row = store.connection.execute(
+            "SELECT channel_id FROM messages WHERE message_id = ?", (msg_id,)
+        ).fetchone()
+        self.assertIsNone(row["channel_id"])
+
+    def test_existing_db_gains_channel_id_columns_on_open(self):
+        import sqlite3 as _sqlite3
+
+        temp_dir = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
+        self.addCleanup(temp_dir.cleanup)
+        db_path = Path(temp_dir.name) / "legacy.sqlite3"
+
+        legacy = _sqlite3.connect(db_path)
+        legacy.executescript(
+            """
+            CREATE TABLE sessions (session_id TEXT PRIMARY KEY, title TEXT,
+                started_at TEXT NOT NULL, metadata_json TEXT NOT NULL DEFAULT '{}');
+            CREATE TABLE agents (agent_id TEXT PRIMARY KEY, role TEXT NOT NULL,
+                display_name TEXT, lifecycle_state TEXT NOT NULL DEFAULT 'active',
+                created_at TEXT NOT NULL, metadata_json TEXT NOT NULL DEFAULT '{}');
+            CREATE TABLE messages (message_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_id TEXT NOT NULL, sender_agent_id TEXT NOT NULL,
+                receiver_agent_id TEXT, content TEXT NOT NULL,
+                kind TEXT NOT NULL DEFAULT 'message', visibility TEXT NOT NULL DEFAULT 'public',
+                relationship_type TEXT, conversation_type TEXT, source TEXT,
+                created_at TEXT NOT NULL, metadata_json TEXT NOT NULL DEFAULT '{}');
+            CREATE TABLE thoughts (thought_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_id TEXT, agent_id TEXT NOT NULL, content TEXT NOT NULL,
+                visibility TEXT NOT NULL DEFAULT 'private', relationship_type TEXT,
+                conversation_type TEXT, source TEXT, created_at TEXT NOT NULL,
+                metadata_json TEXT NOT NULL DEFAULT '{}');
+            """
+        )
+        legacy.close()
+
+        store = SQLiteMemoryStore(db_path)
+        self.addCleanup(store.close)
+
+        for table in ("messages", "thoughts"):
+            cols = {
+                row["name"]
+                for row in store.connection.execute(f"PRAGMA table_info({table})")
+            }
+            self.assertIn("channel_id", cols, f"migration failed for {table}")
 
 
 if __name__ == "__main__":
