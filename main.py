@@ -650,6 +650,34 @@ def current_agent_context(employee_dict):
     return json.dumps(agent_runtime_context(active_tool_caller), sort_keys=True)
 
 
+def format_verified_tool_results(system_events):
+    verified_events = [event for event in system_events if isinstance(event, str) and event.strip()]
+    if not verified_events:
+        return ""
+    lines = "\n".join(f"- {event}" for event in verified_events)
+    return (
+        "Verified runtime results from recent tool calls:\n"
+        f"{lines}\n"
+        "You may rely on these results as completed runtime facts. "
+        "Do not claim other tool-created artifacts or side effects without a verified result."
+    )
+
+
+def deliver_verified_tool_results(role, system_events):
+    content = format_verified_tool_results(system_events)
+    if not content or not hasattr(role, "conversation_history"):
+        return
+    role_history = role.conversation_history.setdefault(getattr(role, "name", ""), [])
+    role_history.append({"role": "system", "content": content})
+
+
+def prepend_verified_tool_results(prompt, system_events):
+    content = format_verified_tool_results(system_events)
+    if not content:
+        return prompt
+    return f"{content}\n\n{prompt}" if prompt else content
+
+
 def _parse_datetime(value):
     if not isinstance(value, str) or not value.strip():
         raise ValueError("Timestamp must be a non-empty ISO datetime string.")
@@ -1259,7 +1287,7 @@ class Role:
         turn_action_template = """
 On your turn, choose one useful action. You do not need to reply to every message.
 You may reply in plain text, call a tool by returning {"exec":"namespace.tool_name","args":{}}, record a private thought by returning {"action":"think","content":"..."}, or wait silently by returning {"action":"wait"}.
-Only say that you created, changed, or called a tool if you actually returned a tool call for the runtime to execute.
+Only say that you created, changed, or called a tool after the runtime has returned a verified tool result. Without a verified result, describe the work as a request, proposal, or plan instead of a completed fact.
 """
         self.template = template + group_template_additions + turn_action_template
         self.employee_dict = employee_dict
@@ -1706,25 +1734,43 @@ class Session:
                 return
         role.runtime_role_name = getattr(role, "name", None)
 
+    def recent_system_events(self, limit=5):
+        events = []
+        for entry in reversed(self.transcript):
+            for event in reversed(entry.system_events):
+                if isinstance(event, str) and event.strip():
+                    events.append(event)
+                    if len(events) >= limit:
+                        return list(reversed(events))
+        return list(reversed(events))
+
     def step(self, message):
         sender = self.last_receiver
         self.sync_scheduler_participants()
         routed = self.route_message(message, sender.name)
         system_events = self.process_tool_instruction(message, sender=sender)
+        if system_events:
+            deliver_verified_tool_results(sender, system_events)
         self.sync_scheduler_participants()
         prompt = routed.prompt
         reminders = due_alarm_reminders(routed.receiver)
         if reminders:
             prompt = "\n".join(reminders + [prompt])
+        prompt = prepend_verified_tool_results(
+            prompt,
+            self.recent_system_events() + system_events,
+        )
         self.prepare_agent_runtime(routed.receiver)
         response = routed.receiver.interact(sender.name, prompt)
         response = "" if response is None else response
         native_tool_events = list(getattr(routed.receiver, "runtime_tool_results", []))
         if native_tool_events:
             system_events.extend(native_tool_events)
+            deliver_verified_tool_results(routed.receiver, native_tool_events)
         response, response_events = self.process_agent_action(response, sender=routed.receiver)
         if response_events:
             system_events.extend(response_events)
+            deliver_verified_tool_results(routed.receiver, response_events)
             self.sync_scheduler_participants()
         if routed.receiver.name != "CEO" and response != "":
             print(colored(f"{routed.receiver.name} responds: {response}", "cyan"))

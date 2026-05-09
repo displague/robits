@@ -1211,6 +1211,52 @@ class RuntimeTests(unittest.TestCase):
         self.assertEqual(len(session.transcript[0].system_events), 1)
         self.assertIn("Created a new role: QA", session.transcript[0].system_events[0])
 
+    def test_plain_text_tool_claim_does_not_create_verified_result(self):
+        participants = build_fake_participants()
+        participants["HR"] = FakeRole("HR", ["Created QA."])
+        system = main.System(participants)
+        session = main.Session(participants=participants, system=system, run_id="session-1")
+
+        with redirect_stdout(StringIO()):
+            main.load_tools(system)
+            session.run(initial_message="HR, create QA", max_turns=1)
+
+        self.assertNotIn("QA", participants)
+        self.assertEqual(session.transcript[0].response, "Created QA.")
+        self.assertEqual(session.transcript[0].system_events, [])
+
+    def test_agent_tool_action_result_is_returned_to_agent_context(self):
+        class ToolActionProvider:
+            def generate(self, *_):
+                return json.dumps(
+                    {
+                        "exec": "org.create_role",
+                        "args": {
+                            "role_name": "QA",
+                            "role_description": "Tests the organization",
+                        },
+                    }
+                )
+
+        participants = main.build_employee_dict()
+        system = main.System(participants)
+        session = main.Session(participants=participants, system=system, run_id="session-1")
+
+        with patch.object(main, "model_provider", ToolActionProvider()):
+            with redirect_stdout(StringIO()):
+                main.load_tools(system)
+                session.run(initial_message="HR, create QA", max_turns=1)
+
+        history = participants["HR"].conversation_history["HR"]
+        verified_messages = [
+            message["content"]
+            for message in history
+            if message.get("role") == "system" and "Verified runtime results" in message.get("content", "")
+        ]
+
+        self.assertTrue(verified_messages)
+        self.assertIn("Created a new role: QA", verified_messages[-1])
+
     def test_non_string_message_does_not_parse_tool_instruction(self):
         session = main.Session(participants=build_fake_participants(), run_id="session-1")
 
@@ -1565,6 +1611,44 @@ class RuntimeTests(unittest.TestCase):
 
         self.assertEqual(session.transcript[0].response, "")
         self.assertIn("tool_call.executed: agent__context", session.transcript[0].system_events[0])
+
+    def test_recent_verified_events_are_included_in_next_agent_prompt(self):
+        participants = build_fake_participants()
+        session = main.Session(participants=participants, run_id="session-1")
+        session.transcript.append(
+            main.TranscriptEntry(
+                turn=1,
+                sender="HR",
+                receiver="Ops",
+                prompt="create QA",
+                response="",
+                system_events=["Executed tool 'org.create_role' with args {}. Result: Created a new role: QA."],
+            )
+        )
+        session.turns_completed = 1
+
+        with redirect_stdout(StringIO()):
+            session.step("SE, what changed?")
+
+        self.assertIn("Verified runtime results", participants["SE"].received[0][1])
+        self.assertIn("Created a new role: QA", participants["SE"].received[0][1])
+
+    def test_session_returns_native_tool_events_to_agent_context(self):
+        class NativeToolEventProvider:
+            def generate(self, role, *_):
+                role.runtime_tool_results.append("tool_call.executed: agent__context({}) -> {}")
+                return ""
+
+        participants = main.build_employee_dict()
+        session = main.Session(participants=participants, run_id="session-1")
+
+        with patch.object(main, "model_provider", NativeToolEventProvider()):
+            with redirect_stdout(StringIO()):
+                session.run(initial_message="HR, inspect context", max_turns=1)
+
+        history = participants["HR"].conversation_history["HR"]
+        self.assertIn("Verified runtime results", history[-1]["content"])
+        self.assertIn("tool_call.executed: agent__context", history[-1]["content"])
 
     def test_event_subscriber_errors_do_not_break_runtime(self):
         event_stream = main.RuntimeEventStream()
