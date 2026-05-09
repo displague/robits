@@ -1123,7 +1123,12 @@ class SQLiteMemoryStore:
         end_at=None,
         limit=20,
     ):
-        """Search outer FTS records and surface parent digests for inner hits."""
+        """Search outer FTS records and surface parent digests for inner hits.
+
+        Fetch more than ``limit`` inner records so that cascade-surfaced parent
+        digests have room after the final ``outer[:limit]`` trim.
+        """
+        inner_limit = max(limit, limit * 2)
         outer = self.search(
             query,
             agent_id=agent_id,
@@ -1133,7 +1138,7 @@ class SQLiteMemoryStore:
             source=source,
             start_at=start_at,
             end_at=end_at,
-            limit=limit,
+            limit=inner_limit,
         )
 
         # Map FTS kind values to their canonical source_table names so we can

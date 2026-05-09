@@ -1366,7 +1366,7 @@ def _condense_if_large(agent_name, tool_label, result_json):
     if len(result_json) <= memory_cache_threshold:
         return result_json
     timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-    filename = f"{timestamp}_{tool_label.replace('.', '_')}.json"
+    filename = f"{timestamp}_{tool_label.replace('.', '_')}_{uuid4().hex[:8]}.json"
     cache_path = _write_memory_cache(agent_name, filename, result_json)
     snippet = result_json[:2048]
     condensed = {
@@ -1398,7 +1398,7 @@ def memory_search(employee_dict, agent_name, query, limit=10, cascade=True):
         return f"Error: Role '{_caller_name_for_error()}' cannot inspect memory for '{normalized_name}'."
     if not isinstance(query, str) or not query.strip():
         return "Error: Memory query must be a non-empty string."
-    effective_limit = min(int(limit or 10), memory_max_rows)
+    effective_limit = max(1, min(int(limit or 10), memory_max_rows))
     if cascade:
         results = store.search_cascade(query, agent_id=normalized_name, limit=effective_limit)
     else:
@@ -1418,7 +1418,7 @@ def memory_list_digests(employee_dict, agent_name, digest_type=None, limit=10):
         return f"Error: {e}"
     if not _caller_can_act_for_agent(normalized_name):
         return f"Error: Role '{_caller_name_for_error()}' cannot inspect memory for '{normalized_name}'."
-    effective_limit = min(int(limit or 10), memory_max_rows)
+    effective_limit = max(1, min(int(limit or 10), memory_max_rows))
     digests = store.list_memory_digests(
         agent_id=normalized_name,
         digest_type=digest_type,
@@ -1449,9 +1449,12 @@ def memory_expand_digest(employee_dict, agent_name, digest_id, recursive=True, m
         return f"Error: Memory digest '{digest_id}' is not accessible to {normalized_name}."
     if digest.get("system_only") or digest.get("accessibility") != "agent":
         return f"Error: Memory digest '{digest_id}' is system-only."
-    effective_depth = min(
-        int(max_depth) if max_depth is not None else memory_max_depth,
-        memory_max_depth,
+    effective_depth = max(
+        0,
+        min(
+            int(max_depth) if max_depth is not None else memory_max_depth,
+            memory_max_depth,
+        ),
     )
     rows = store.expand_memory_digest_sources(
         digest_id,
@@ -1467,10 +1470,16 @@ def memory_expand_digest(employee_dict, agent_name, digest_id, recursive=True, m
         else row
         for row in rows
     ]
+    rows = rows[:memory_max_rows]
     result_json = json.dumps(rows, sort_keys=True)
-    effective_max_chars = int(max_chars) if max_chars is not None else None
+    effective_max_chars = max(1, int(max_chars)) if max_chars is not None else None
     if effective_max_chars is not None and len(result_json) > effective_max_chars:
-        result_json = result_json[:effective_max_chars]
+        condensed = {
+            "truncated": True,
+            "total_chars": len(result_json),
+            "note": f"Result exceeded max_chars={effective_max_chars}. Use a higher max_chars or memory.search to narrow results.",
+        }
+        return json.dumps(condensed, sort_keys=True)
     return _condense_if_large(normalized_name, "memory_expand_digest", result_json)
 
 
