@@ -526,6 +526,7 @@ class SQLiteMemoryStore:
     def _validate_social_distance(social_distance):
         if social_distance is None:
             return
+        # bool is a subclass of int in Python; reject it as a semantic scale value.
         if not isinstance(social_distance, (int, float)) or isinstance(
             social_distance, bool
         ):

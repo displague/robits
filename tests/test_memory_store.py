@@ -812,6 +812,8 @@ class ChannelTests(unittest.TestCase):
 
         with self.assertRaises(ValueError):
             store.get_or_create_channel(CHANNEL_ORG_CHAT, social_distance=6.0)
+        with self.assertRaises(ValueError):
+            store.get_or_create_channel(CHANNEL_ORG_CHAT, social_distance=-1.0)
 
     def test_list_channels_filters_by_type(self):
         store = self.build_store()
