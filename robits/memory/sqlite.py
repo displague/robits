@@ -26,6 +26,21 @@ SOCIAL_UNKNOWN = 4.0
 SOCIAL_HOSTILE = 5.0
 
 
+SOCIAL_SELF = 0
+SOCIAL_FAMILIAL = 1
+SOCIAL_FRIENDLY = 2
+SOCIAL_PROFESSIONAL = 3
+SOCIAL_UNKNOWN = 4
+SOCIAL_HOSTILE = 5
+
+
+def compute_phase_shift(current_phase: float, event_phase: float, social_distance: float) -> float:
+    """Shift current_phase toward event_phase, weighted by closeness (inverse of social_distance+1)."""
+    weight = 1.0 / (social_distance + 1.0)
+    shifted = current_phase + weight * (event_phase - current_phase)
+    return max(0.0, min(1.0, shifted))
+
+
 def _utc_now():
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
@@ -301,6 +316,8 @@ class SQLiteMemoryStore:
         self.connection.execute(
             "CREATE INDEX IF NOT EXISTS idx_thoughts_channel ON thoughts(channel_id)"
         )
+        self._ensure_agent_phase_column()
+        self._ensure_message_sender_phase_column()
         self.connection.execute(
             """
             CREATE INDEX IF NOT EXISTS idx_memory_digests_current
@@ -336,6 +353,45 @@ class SQLiteMemoryStore:
         for column, statement in migrations.items():
             if column not in columns:
                 self.connection.execute(statement)
+
+    def _ensure_agent_phase_column(self):
+        columns = {
+            row["name"]
+            for row in self.connection.execute("PRAGMA table_info(agents)").fetchall()
+        }
+        if "circadian_phase" not in columns:
+            self.connection.execute(
+                "ALTER TABLE agents ADD COLUMN circadian_phase REAL DEFAULT 0.5"
+            )
+
+    def _ensure_message_sender_phase_column(self):
+        columns = {
+            row["name"]
+            for row in self.connection.execute("PRAGMA table_info(messages)").fetchall()
+        }
+        if "sender_phase" not in columns:
+            self.connection.execute(
+                "ALTER TABLE messages ADD COLUMN sender_phase REAL"
+            )
+
+    def get_agent_phase(self, agent_id) -> "float | None":
+        """Return the current circadian phase for an agent, or None if not found."""
+        row = self.connection.execute(
+            "SELECT circadian_phase FROM agents WHERE agent_id = ?",
+            (agent_id,),
+        ).fetchone()
+        if row is None:
+            return None
+        return row["circadian_phase"]
+
+    def set_agent_phase(self, agent_id, phase: float) -> None:
+        """Update the circadian phase for an agent; clamps to [0.0, 1.0]."""
+        clamped = max(0.0, min(1.0, float(phase)))
+        self.connection.execute(
+            "UPDATE agents SET circadian_phase = ? WHERE agent_id = ?",
+            (clamped, agent_id),
+        )
+        self.connection.commit()
 
     def create_session(self, session_id, title=None, started_at=None, metadata=None):
         created_at = started_at or _utc_now()
@@ -556,6 +612,7 @@ class SQLiteMemoryStore:
         source=None,
         created_at=None,
         metadata=None,
+        sender_phase=None,
     ):
         timestamp = created_at or _utc_now()
         cursor = self.connection.execute(
@@ -563,9 +620,9 @@ class SQLiteMemoryStore:
             INSERT INTO messages(
                 session_id, sender_agent_id, receiver_agent_id, content, kind,
                 visibility, relationship_type, channel_id, source,
-                created_at, metadata_json
+                created_at, metadata_json, sender_phase
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 session_id,
@@ -579,6 +636,7 @@ class SQLiteMemoryStore:
                 source,
                 timestamp,
                 _json_dumps(metadata),
+                sender_phase,
             ),
         )
         record_id = cursor.lastrowid

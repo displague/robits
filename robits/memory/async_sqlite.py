@@ -191,6 +191,7 @@ class AsyncSQLiteMemoryStore:
         source=None,
         created_at=None,
         metadata=None,
+        sender_phase=None,
     ):
         timestamp = created_at or _utc_now()
         async with self._db_lock:
@@ -199,9 +200,9 @@ class AsyncSQLiteMemoryStore:
                 INSERT INTO messages(
                     session_id, sender_agent_id, receiver_agent_id, content, kind,
                     visibility, relationship_type, channel_id, source,
-                    created_at, metadata_json
+                    created_at, metadata_json, sender_phase
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     session_id,
@@ -215,6 +216,7 @@ class AsyncSQLiteMemoryStore:
                     source,
                     timestamp,
                     _json_dumps(metadata),
+                    sender_phase,
                 ),
             )
             record_id = cursor.lastrowid
@@ -771,3 +773,9 @@ class AsyncSQLiteMemoryStore:
             participant=participant,
             limit=limit,
         )
+
+    async def get_agent_phase(self, agent_id) -> "float | None":
+        return await self._run_sync("get_agent_phase", agent_id)
+
+    async def set_agent_phase(self, agent_id, phase: float) -> None:
+        return await self._run_sync("set_agent_phase", agent_id, phase)

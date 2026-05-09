@@ -16,6 +16,7 @@ from .sqlite import (
     SOCIAL_PROFESSIONAL,
     SOCIAL_SELF,
     SOCIAL_UNKNOWN,
+    compute_phase_shift,
     MemoryDigestSource,
     MemorySearchResult,
     SQLiteMemoryStore,
@@ -40,4 +41,5 @@ __all__ = [
     "MemoryDigestSource",
     "MemorySearchResult",
     "SQLiteMemoryStore",
+    "compute_phase_shift",
 ]

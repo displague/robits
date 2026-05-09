@@ -2313,6 +2313,8 @@ class Session:
             canonical_sender = self._canonical_agent_id(sender)
             canonical_receiver = self._canonical_agent_id(receiver)
             try:
+                sender_phase = memory_store.get_agent_phase(canonical_sender)
+                receiver_phase = memory_store.get_agent_phase(canonical_receiver)
                 if prompt:
                     memory_store.append_message(
                         session_id=self.run_id,
@@ -2321,6 +2323,7 @@ class Session:
                         content=prompt,
                         kind="message",
                         channel_id=self._org_chat_channel_id,
+                        sender_phase=sender_phase,
                     )
                 if response:
                     memory_store.append_message(
@@ -2330,7 +2333,23 @@ class Session:
                         content=response,
                         kind="message",
                         channel_id=self._org_chat_channel_id,
+                        sender_phase=receiver_phase,
                     )
+                # Phase-shift: shift receiver toward sender's phase, weighted by social distance.
+                if self._org_chat_channel_id is not None and sender_phase is not None and receiver_phase is not None:
+                    try:
+                        row = memory_store.connection.execute(
+                            "SELECT social_distance FROM channels WHERE channel_id = ?",
+                            (self._org_chat_channel_id,),
+                        ).fetchone()
+                        if row is not None and row["social_distance"] is not None:
+                            from robits.memory.sqlite import compute_phase_shift
+                            shifted = compute_phase_shift(
+                                receiver_phase, sender_phase, float(row["social_distance"])
+                            )
+                            memory_store.set_agent_phase(canonical_receiver, shifted)
+                    except Exception:
+                        pass
             except Exception:
                 pass
             if (
