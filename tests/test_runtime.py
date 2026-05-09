@@ -1995,5 +1995,179 @@ class RuntimeTests(unittest.TestCase):
         self.assertEqual(session.event_stream.events("private"), [event])
 
 
+class BuiltinToolTests(unittest.TestCase):
+    """Tests for builtin.* tool implementations."""
+
+    def setUp(self):
+        self.workspace_temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.workspace_temp.cleanup)
+
+        self.original_workspace = main.agent_workspace_store
+        main.agent_workspace_store = main.AgentWorkspaceStore(self.workspace_temp.name)
+        self.addCleanup(self._restore)
+
+        # Simulate the tool caller being SE.
+        self._prev_caller = main.active_tool_caller
+        self._prev_caller_name = main.active_tool_caller_name
+        fake_role = SimpleNamespace(name="SE", capabilities={"shell", "mcp", "computer"})
+        main.active_tool_caller = fake_role
+        main.active_tool_caller_name = "SE"
+
+    def _restore(self):
+        main.agent_workspace_store = self.original_workspace
+        main.active_tool_caller = self._prev_caller
+        main.active_tool_caller_name = self._prev_caller_name
+
+    # ── builtin.web_search ───────────────────────────────────────────────────
+
+    def test_web_search_validates_empty_query(self):
+        result = main.builtin_web_search({}, "  ")
+        self.assertTrue(result.startswith("Error:"))
+
+    def test_web_search_uses_configured_url(self):
+        original = main.builtin_search_url
+        try:
+            main.builtin_search_url = "http://example.invalid"
+            result = main.builtin_web_search({}, "test query")
+        finally:
+            main.builtin_search_url = original
+        self.assertTrue(result.startswith("Error:"))
+
+    # ── builtin.file_search ──────────────────────────────────────────────────
+
+    def test_file_search_finds_text_in_workspace_file(self):
+        main.agent_workspace_store.write("SE", "notes.txt", "The quick brown fox jumps.")
+        result_json = main.builtin_file_search({}, "SE", "brown fox")
+        results = json.loads(result_json)
+        self.assertEqual(len(results), 1)
+        self.assertEqual(results[0]["path"], "notes.txt")
+        self.assertIn("brown fox", results[0]["snippet"])
+
+    def test_file_search_returns_empty_for_no_match(self):
+        main.agent_workspace_store.write("SE", "notes.txt", "Nothing relevant here.")
+        result_json = main.builtin_file_search({}, "SE", "xyzzy12345")
+        results = json.loads(result_json)
+        self.assertEqual(results, [])
+
+    def test_file_search_blocked_for_different_agent(self):
+        result = main.builtin_file_search({}, "HR", "anything")
+        self.assertTrue(result.startswith("Error:"))
+
+    def test_file_search_validates_empty_query(self):
+        result = main.builtin_file_search({}, "SE", "")
+        self.assertTrue(result.startswith("Error:"))
+
+    # ── builtin.shell_run ────────────────────────────────────────────────────
+
+    def test_shell_run_executes_simple_command(self):
+        result_json = main.builtin_shell_run({}, "SE", "echo hello", timeout=10)
+        result = json.loads(result_json)
+        self.assertIn("hello", result["stdout"])
+        self.assertEqual(result["returncode"], 0)
+
+    def test_shell_run_captures_nonzero_exit(self):
+        result_json = main.builtin_shell_run({}, "SE", "exit 42", timeout=5)
+        result = json.loads(result_json)
+        self.assertEqual(result["returncode"], 42)
+
+    def test_shell_run_blocked_for_different_agent(self):
+        result = main.builtin_shell_run({}, "HR", "echo hi")
+        self.assertTrue(result.startswith("Error:"))
+
+    def test_shell_run_validates_empty_command(self):
+        result = main.builtin_shell_run({}, "SE", "   ")
+        self.assertTrue(result.startswith("Error:"))
+
+    # ── builtin.tool_search ──────────────────────────────────────────────────
+
+    def test_tool_search_finds_tools_by_name_fragment(self):
+        main.tool_registry.clear()
+        with open("tools.yaml", encoding="utf-8") as f:
+            import yaml
+            for entry in yaml.safe_load(f):
+                try:
+                    main.tool_registry.register_definition(entry)
+                except Exception:
+                    pass
+        result_json = main.builtin_tool_search({}, "web_search")
+        results = json.loads(result_json)
+        names = [r["name"] for r in results]
+        self.assertIn("builtin.web_search", names)
+        main.tool_registry.clear()
+
+    def test_tool_search_validates_empty_query(self):
+        result = main.builtin_tool_search({}, "")
+        self.assertTrue(result.startswith("Error:"))
+
+    def test_tool_search_returns_empty_list_for_no_match(self):
+        result_json = main.builtin_tool_search({}, "xyzzy_no_such_tool_xyz")
+        results = json.loads(result_json)
+        self.assertEqual(results, [])
+
+    # ── not-implemented stubs ────────────────────────────────────────────────
+
+    def test_mcp_call_returns_not_implemented(self):
+        result = main.builtin_mcp_call({}, "http://example.com/mcp", "some_tool")
+        self.assertTrue(result.startswith("Error:"))
+
+    def test_computer_use_returns_not_implemented(self):
+        result = main.builtin_computer_use({}, "screenshot")
+        self.assertTrue(result.startswith("Error:"))
+
+    def test_image_generation_returns_not_implemented(self):
+        result = main.builtin_image_generation({}, "a blue sky")
+        self.assertTrue(result.startswith("Error:"))
+
+    # ── tools.yaml integration ───────────────────────────────────────────────
+
+    def test_builtin_tools_load_from_yaml_without_error(self):
+        """All builtin.* entries must compile successfully."""
+        import yaml
+        main.tool_registry.clear()
+        errors = []
+        with open("tools.yaml", encoding="utf-8") as f:
+            for entry in yaml.safe_load(f):
+                try:
+                    main.tool_registry.register_definition(entry)
+                except Exception as exc:
+                    errors.append(f"{entry.get('name')}: {exc}")
+        builtin_names = [n for n in main.tool_registry._tools if n.startswith("builtin.")]
+        self.assertEqual(
+            sorted(builtin_names),
+            sorted([
+                "builtin.web_search",
+                "builtin.file_search",
+                "builtin.shell_run",
+                "builtin.tool_search",
+                "builtin.mcp_call",
+                "builtin.computer_use",
+                "builtin.image_generation",
+            ]),
+        )
+        self.assertEqual(errors, [], f"Tool registration errors: {errors}")
+        main.tool_registry.clear()
+
+    def test_shell_run_requires_shell_capability(self):
+        """Role without shell capability must be denied."""
+        main.tool_registry.clear()
+        import yaml
+        with open("tools.yaml", encoding="utf-8") as f:
+            for entry in yaml.safe_load(f):
+                try:
+                    main.tool_registry.register_definition(entry)
+                except Exception:
+                    pass
+        # Caller has no shell capability.
+        main.active_tool_caller.capabilities = set()
+        result = main.tool_registry.execute(
+            "builtin.shell_run",
+            {"agent_name": "SE", "command": "echo hi"},
+            {},
+            caller=main.active_tool_caller,
+        )
+        self.assertTrue(result.startswith("Error:"))
+        main.tool_registry.clear()
+
+
 if __name__ == "__main__":
     unittest.main()

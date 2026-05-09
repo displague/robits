@@ -61,6 +61,7 @@ max_api_retries = max(0, int(os.environ.get("ROBITS_MAX_API_RETRIES", "3")))
 api_retry_base_seconds = max(0.0, float(os.environ.get("ROBITS_API_RETRY_BASE_SECONDS", "0.25")))
 api_retry_max_seconds = max(api_retry_base_seconds, float(os.environ.get("ROBITS_API_RETRY_MAX_SECONDS", "4.0")))
 model_call_gate = threading.BoundedSemaphore(max_parallelism)
+builtin_search_url = os.environ.get("ROBITS_SEARCH_URL", "").strip()
 memory_db_path = os.environ.get("ROBITS_MEMORY_DB")
 memory_store = SQLiteMemoryStore(memory_db_path) if memory_db_path else None
 tool_proposal_store = None
@@ -199,6 +200,13 @@ class ToolRegistry:
                 "workspace_write": workspace_write,
                 "workspace_delete": workspace_delete,
                 "current_agent_context": current_agent_context,
+                "builtin_web_search": builtin_web_search,
+                "builtin_file_search": builtin_file_search,
+                "builtin_shell_run": builtin_shell_run,
+                "builtin_tool_search": builtin_tool_search,
+                "builtin_mcp_call": builtin_mcp_call,
+                "builtin_computer_use": builtin_computer_use,
+                "builtin_image_generation": builtin_image_generation,
             },
             local_dict,
         )
@@ -1416,6 +1424,164 @@ def memory_expand_digest(employee_dict, agent_name, digest_id, recursive=True):
         for row in rows
     ]
     return json.dumps(rows, sort_keys=True)
+
+
+def builtin_web_search(employee_dict, query, num_results=5):
+    del employee_dict
+    if not isinstance(query, str) or not query.strip():
+        return "Error: Search query must be a non-empty string."
+    n = max(1, min(20, int(num_results or 5)))
+    if builtin_search_url:
+        import urllib.request
+        import urllib.parse
+        url = f"{builtin_search_url}?q={urllib.parse.quote(query.strip())}&num={n}"
+        try:
+            req = urllib.request.Request(url, headers={"User-Agent": "robits/1.0"})
+            with urllib.request.urlopen(req, timeout=15) as resp:
+                return resp.read().decode()
+        except Exception as exc:
+            return f"Error: Search request failed: {exc}"
+    import urllib.request
+    import urllib.parse
+    qs = urllib.parse.urlencode({"q": query.strip(), "format": "json", "no_html": "1", "skip_disambig": "1"})
+    try:
+        req = urllib.request.Request(
+            f"https://api.duckduckgo.com/?{qs}",
+            headers={"User-Agent": "robits/1.0"},
+        )
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            data = json.loads(resp.read().decode())
+    except Exception as exc:
+        return f"Error: Web search failed: {exc}"
+    results = []
+    if data.get("AbstractText"):
+        results.append({
+            "title": data.get("Heading", query.strip()),
+            "url": data.get("AbstractURL", ""),
+            "snippet": data["AbstractText"],
+        })
+
+    def _extract_topics(topics):
+        for topic in topics:
+            if len(results) >= n:
+                break
+            if isinstance(topic, dict) and "Text" in topic:
+                results.append({
+                    "title": topic.get("Text", "")[:80],
+                    "url": topic.get("FirstURL", ""),
+                    "snippet": topic.get("Text", ""),
+                })
+            elif isinstance(topic, dict) and "Topics" in topic:
+                _extract_topics(topic["Topics"])
+
+    _extract_topics(data.get("RelatedTopics", []))
+    return json.dumps(results[:n], sort_keys=True)
+
+
+def builtin_file_search(employee_dict, agent_name, query, path="", max_results=10):
+    del employee_dict
+    if not isinstance(query, str) or not query.strip():
+        return "Error: Search query must be a non-empty string."
+    normalized_name, error = _workspace_agent_name(agent_name)
+    if error:
+        return error
+    workspace = agent_workspace_store.workspace_root(normalized_name)
+    search_root = workspace / path if path else workspace
+    search_root = search_root.resolve()
+    if workspace not in search_root.parents and search_root != workspace:
+        return "Error: Path escapes the agent workspace."
+    query_lower = query.strip().lower()
+    limit = max(1, min(100, int(max_results or 10)))
+    results = []
+    try:
+        candidates = sorted(search_root.rglob("*"), key=lambda p: str(p))
+    except Exception:
+        candidates = []
+    for file_path in candidates:
+        if len(results) >= limit:
+            break
+        if not file_path.is_file():
+            continue
+        try:
+            content = file_path.read_text(encoding="utf-8", errors="replace")
+        except Exception:
+            continue
+        idx = content.lower().find(query_lower)
+        if idx == -1:
+            continue
+        snippet = content[max(0, idx - 80) : idx + 160].strip()
+        results.append({
+            "path": file_path.relative_to(workspace).as_posix(),
+            "snippet": snippet,
+            "size": file_path.stat().st_size,
+        })
+    return json.dumps(results, sort_keys=True)
+
+
+def builtin_shell_run(employee_dict, agent_name, command, timeout=30):
+    del employee_dict
+    import subprocess as _subprocess
+    if not isinstance(command, str) or not command.strip():
+        return "Error: Command must be a non-empty string."
+    normalized_name, error = _workspace_agent_name(agent_name)
+    if error:
+        return error
+    workspace = agent_workspace_store.workspace_root(normalized_name)
+    workspace.mkdir(parents=True, exist_ok=True)
+    try:
+        proc = _subprocess.run(
+            command,
+            shell=True,
+            capture_output=True,
+            text=True,
+            timeout=max(1, min(300, int(timeout or 30))),
+            cwd=str(workspace),
+        )
+        return json.dumps({
+            "stdout": proc.stdout,
+            "stderr": proc.stderr,
+            "returncode": proc.returncode,
+        }, sort_keys=True)
+    except _subprocess.TimeoutExpired:
+        return "Error: Command timed out."
+    except Exception as exc:
+        return f"Error: Shell execution failed: {exc}"
+
+
+def builtin_tool_search(employee_dict, query, role_name=None):
+    if not isinstance(query, str) or not query.strip():
+        return "Error: Tool search query must be a non-empty string."
+    query_lower = query.strip().lower()
+    role = None
+    if role_name:
+        try:
+            normalized = validate_role_name(role_name)
+        except ValueError as exc:
+            return f"Error: {exc}"
+        role = employee_dict.get(normalized)
+        if role is None:
+            return f"Error: Role '{normalized}' not found."
+    rows = tool_registry.list_tools(include_system=True, role=role, include_denied=True)
+    matches = [
+        row for row in rows
+        if query_lower in row["name"].lower() or query_lower in row["description"].lower()
+    ]
+    return json.dumps(matches[:20], sort_keys=True)
+
+
+def builtin_mcp_call(employee_dict, server_url, tool_name, arguments=None):
+    del employee_dict
+    return "Error: builtin.mcp_call is not implemented in this runtime. Configure an MCP server and use a supported MCP connector."
+
+
+def builtin_computer_use(employee_dict, action, coordinate=None):
+    del employee_dict
+    return "Error: builtin.computer_use is not implemented in this runtime."
+
+
+def builtin_image_generation(employee_dict, prompt, size=None, quality=None):
+    del employee_dict
+    return "Error: builtin.image_generation is not implemented in this runtime."
 
 
 def due_alarm_reminders(role, now=None):
