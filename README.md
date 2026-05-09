@@ -137,6 +137,12 @@ For non-interactive smoke checks, provide an initial prompt and turn limit:
 python main.py --prompt "Ops, say hello to HR" --turns 1
 ```
 
+To capture the same console transcript to a file while still watching the run:
+
+```bash
+python main.py --prompt "Ops, say hello to HR" --turns 1 --log run.log
+```
+
 ## Testing
 
 The focused runtime tests do not call an external model service:

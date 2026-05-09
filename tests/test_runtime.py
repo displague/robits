@@ -1,8 +1,9 @@
 import json
 import os
+import sys
 import tempfile
 import unittest
-from contextlib import redirect_stdout
+from contextlib import redirect_stderr, redirect_stdout
 from io import StringIO
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -36,6 +37,18 @@ class FakeCreate:
     def __call__(self, **kwargs):
         self.calls.append(kwargs)
         return self.responses.pop(0)
+
+
+class RecordingStream:
+    def __init__(self):
+        self.content = ""
+        self.flushes = 0
+
+    def write(self, text):
+        self.content += text
+
+    def flush(self):
+        self.flushes += 1
 
 
 def build_fake_participants():
@@ -973,6 +986,47 @@ class RuntimeTests(unittest.TestCase):
                 main.load_tools(system, path)
         finally:
             os.unlink(path)
+
+    def test_parse_args_accepts_log_path(self):
+        args = main.parse_args(["--prompt", "hello", "--turns", "1", "--log", "run.log"])
+
+        self.assertEqual(args.prompt, "hello")
+        self.assertEqual(args.turns, 1)
+        self.assertEqual(args.log, "run.log")
+
+    def test_main_tees_console_output_to_log_file(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            log_path = os.path.join(temp_dir, "logs", "run.log")
+
+            def fake_run_simulation(initial_message=None, max_turns=None):
+                print(f"prompt={initial_message} turns={max_turns}")
+                print("warning stream", file=sys.stderr)
+
+            with patch.object(main, "run_simulation", side_effect=fake_run_simulation):
+                stdout = StringIO()
+                stderr = StringIO()
+                with redirect_stdout(stdout), redirect_stderr(stderr):
+                    main.main(["--prompt", "hello", "--turns", "2", "--log", log_path])
+
+            self.assertIn("prompt=hello turns=2", stdout.getvalue())
+            self.assertIn("warning stream", stderr.getvalue())
+            with open(log_path, "r", encoding="utf-8") as handle:
+                content = handle.read()
+            self.assertIn("prompt=hello turns=2", content)
+            self.assertIn("warning stream", content)
+
+    def test_tee_stream_flushes_after_each_write(self):
+        first = RecordingStream()
+        second = RecordingStream()
+        tee = main.TeeStream(first, second)
+
+        written = tee.write("hello")
+
+        self.assertEqual(written, 5)
+        self.assertEqual(first.content, "hello")
+        self.assertEqual(second.content, "hello")
+        self.assertEqual(first.flushes, 1)
+        self.assertEqual(second.flushes, 1)
 
     def test_session_creation_records_run_id_participants_and_transcript(self):
         participants = build_fake_participants()

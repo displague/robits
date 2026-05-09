@@ -12,11 +12,27 @@ import threading
 from datetime import datetime, timedelta, timezone
 from termcolor import colored
 import argparse
+import sys
 from pathlib import Path
 from uuid import uuid4
 
 from robits.memory.sqlite import SQLiteMemoryStore
 from robits.runtime.sandbox import SandboxMetadata
+
+
+class TeeStream:
+    def __init__(self, *streams):
+        self.streams = streams
+
+    def write(self, text):
+        for stream in self.streams:
+            stream.write(text)
+            stream.flush()
+        return len(text)
+
+    def flush(self):
+        for stream in self.streams:
+            stream.flush()
 
 
 def make_client():
@@ -1640,12 +1656,27 @@ def parse_args(argv=None):
     parser = argparse.ArgumentParser()
     parser.add_argument("--prompt", help="Initial message to start the simulation.")
     parser.add_argument("--turns", type=int, help="Maximum model turns to run.")
+    parser.add_argument("--log", help="Write the console transcript to this file while still printing it.")
     return parser.parse_args(argv)
 
 
 def main(argv=None):
     args = parse_args(argv)
-    run_simulation(initial_message=args.prompt, max_turns=args.turns)
+    if args.log:
+        log_path = Path(args.log)
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(log_path, "w", encoding="utf-8", buffering=1) as log_file:
+            original_stdout = sys.stdout
+            original_stderr = sys.stderr
+            sys.stdout = TeeStream(original_stdout, log_file)
+            sys.stderr = TeeStream(original_stderr, log_file)
+            try:
+                run_simulation(initial_message=args.prompt, max_turns=args.turns)
+            finally:
+                sys.stdout = original_stdout
+                sys.stderr = original_stderr
+    else:
+        run_simulation(initial_message=args.prompt, max_turns=args.turns)
 
 
 if __name__ == "__main__":
