@@ -2027,8 +2027,9 @@ class BuiltinToolTests(unittest.TestCase):
     def test_web_search_uses_configured_url(self):
         original = main.builtin_search_url
         try:
-            main.builtin_search_url = "http://example.invalid"
-            result = main.builtin_web_search({}, "test query")
+            main.builtin_search_url = "http://custom-search.invalid"
+            with patch("urllib.request.urlopen", side_effect=OSError("connection refused")):
+                result = main.builtin_web_search({}, "test query")
         finally:
             main.builtin_search_url = original
         self.assertTrue(result.startswith("Error:"))
@@ -2089,6 +2090,8 @@ class BuiltinToolTests(unittest.TestCase):
                     main.tool_registry.register_definition(entry)
                 except Exception:
                     pass
+        # Grant all tools so builtin_tool_search (which filters to allowed tools) finds results.
+        main.active_tool_caller.allowed_tools = {"builtin.*"}
         result_json = main.builtin_tool_search({}, "web_search")
         results = json.loads(result_json)
         names = [r["name"] for r in results]

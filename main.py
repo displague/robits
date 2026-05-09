@@ -1494,9 +1494,9 @@ def builtin_file_search(employee_dict, agent_name, query, path="", max_results=1
     limit = max(1, min(100, int(max_results or 10)))
     results = []
     try:
-        candidates = sorted(search_root.rglob("*"), key=lambda p: str(p))
+        candidates = search_root.rglob("*")
     except Exception:
-        candidates = []
+        candidates = iter([])
     for file_path in candidates:
         if len(results) >= limit:
             break
@@ -1521,6 +1521,10 @@ def builtin_file_search(employee_dict, agent_name, query, path="", max_results=1
 def builtin_shell_run(employee_dict, agent_name, command, timeout=30):
     del employee_dict
     import subprocess as _subprocess
+    caller_caps = getattr(active_tool_caller, "capabilities", set())
+    if "shell" not in caller_caps:
+        caller_label = getattr(active_tool_caller, "name", "unknown")
+        return f"Error: Role '{caller_label}' does not have the 'shell' capability."
     if not isinstance(command, str) or not command.strip():
         return "Error: Command must be a non-empty string."
     normalized_name, error = _workspace_agent_name(agent_name)
@@ -1552,7 +1556,6 @@ def builtin_tool_search(employee_dict, query, role_name=None):
     if not isinstance(query, str) or not query.strip():
         return "Error: Tool search query must be a non-empty string."
     query_lower = query.strip().lower()
-    role = None
     if role_name:
         try:
             normalized = validate_role_name(role_name)
@@ -1561,7 +1564,9 @@ def builtin_tool_search(employee_dict, query, role_name=None):
         role = employee_dict.get(normalized)
         if role is None:
             return f"Error: Role '{normalized}' not found."
-    rows = tool_registry.list_tools(include_system=True, role=role, include_denied=True)
+    else:
+        role = active_tool_caller
+    rows = tool_registry.list_tools(include_system=False, role=role, include_denied=False)
     matches = [
         row for row in rows
         if query_lower in row["name"].lower() or query_lower in row["description"].lower()
