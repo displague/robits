@@ -64,6 +64,12 @@ def build_fake_participants():
 class RuntimeTests(unittest.TestCase):
     def setUp(self):
         main.tool_registry.clear()
+        self.original_tool_proposal_store = main.tool_proposal_store
+        main.tool_proposal_store = main.ToolProposalStore()
+        self.addCleanup(self.restore_tool_proposal_store)
+
+    def restore_tool_proposal_store(self):
+        main.tool_proposal_store = self.original_tool_proposal_store
 
     def test_parse_tool_instruction_handles_surrounding_text(self):
         response = 'Ops should run this:\n{"exec": "create_role", "args": {"role_name": "QA"}}\nDone.'
@@ -741,6 +747,203 @@ class RuntimeTests(unittest.TestCase):
             )
 
         self.assertIn("System tool", response)
+
+    def test_tool_proposal_lifecycle_can_be_listed_and_approved(self):
+        employee_dict = main.build_employee_dict()
+        system = main.System(employee_dict)
+        with redirect_stdout(StringIO()):
+            main.load_tools(system)
+            propose_response = system.interact(
+                json.dumps(
+                    {
+                        "exec": "tools.propose",
+                        "args": {
+                            "requested_by": "SE",
+                            "tool_name": "weather.lookup",
+                            "description": "Look up current weather for an agent location.",
+                            "parameters": {
+                                "type": "object",
+                                "properties": {"location": {"type": "string"}},
+                                "required": ["location"],
+                            },
+                            "owner_capability": "operator",
+                            "safety_notes": "Network-backed; cache results.",
+                        },
+                    }
+                ),
+                caller=employee_dict["SE"],
+            )
+            proposal = json.loads(propose_response.split("Result: ", 1)[1])
+            list_response = system.interact(
+                json.dumps({"exec": "tools.list_proposals", "args": {"status": "proposed"}}),
+                caller=employee_dict["SE"],
+            )
+            approve_response = system.interact(
+                json.dumps(
+                    {
+                        "exec": "tools.approve_proposal",
+                        "args": {
+                            "proposal_id": proposal["proposal_id"],
+                            "approved_by": "Ops",
+                            "implementation_notes": "Implement as a provider-backed function tool.",
+                        },
+                    }
+                ),
+                caller=employee_dict["Ops"],
+            )
+
+        proposals = json.loads(list_response.split("Result: ", 1)[1])
+        approved = json.loads(approve_response.split("Result: ", 1)[1])
+
+        self.assertEqual(proposal["status"], "proposed")
+        self.assertEqual(proposal["parameters"]["required"], ["location"])
+        self.assertEqual(proposals[0]["proposal_id"], proposal["proposal_id"])
+        self.assertEqual(approved["status"], "approved")
+        self.assertEqual(approved["approver"], "Ops")
+
+    def test_operator_can_reject_tool_proposal(self):
+        employee_dict = main.build_employee_dict()
+        system = main.System(employee_dict)
+        with redirect_stdout(StringIO()):
+            main.load_tools(system)
+            proposal = json.loads(
+                system.interact(
+                    json.dumps(
+                        {
+                            "exec": "tools.propose",
+                            "args": {
+                                "requested_by": "SE",
+                                "tool_name": "weather.lookup",
+                                "description": "Look up current weather.",
+                            },
+                        }
+                    ),
+                    caller=employee_dict["SE"],
+                ).split("Result: ", 1)[1]
+            )
+            reject_response = system.interact(
+                json.dumps(
+                    {
+                        "exec": "tools.reject_proposal",
+                        "args": {
+                            "proposal_id": proposal["proposal_id"],
+                            "rejected_by": "Ops",
+                            "reason": "Needs a safer provider design.",
+                        },
+                    }
+                ),
+                caller=employee_dict["Ops"],
+            )
+
+        rejected = json.loads(reject_response.split("Result: ", 1)[1])
+
+        self.assertEqual(rejected["status"], "rejected")
+        self.assertEqual(rejected["rejection_reason"], "Needs a safer provider design.")
+
+    def test_tool_proposal_rollout_grants_registered_tool_access(self):
+        employee_dict = main.build_employee_dict()
+        system = main.System(employee_dict)
+        with redirect_stdout(StringIO()):
+            main.load_tools(system)
+            system.interact(
+                json.dumps(
+                    {
+                        "name": "weather.lookup",
+                        "description": "Look up current weather.",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {"location": {"type": "string"}},
+                            "required": ["location"],
+                        },
+                        "code": "return 'sunny'",
+                    }
+                ),
+                trusted=True,
+            )
+            proposal = json.loads(
+                system.interact(
+                    json.dumps(
+                        {
+                            "exec": "tools.propose",
+                            "args": {
+                                "requested_by": "SE",
+                                "tool_name": "weather.lookup",
+                                "description": "Roll weather lookup out to SE.",
+                                "action": "update",
+                            },
+                        }
+                    ),
+                    caller=employee_dict["SE"],
+                ).split("Result: ", 1)[1]
+            )
+            system.interact(
+                json.dumps(
+                    {
+                        "exec": "tools.approve_proposal",
+                        "args": {"proposal_id": proposal["proposal_id"], "approved_by": "Ops"},
+                    }
+                ),
+                caller=employee_dict["Ops"],
+            )
+            rollout_response = system.interact(
+                json.dumps(
+                    {
+                        "exec": "tools.rollout_proposal",
+                        "args": {
+                            "proposal_id": proposal["proposal_id"],
+                            "role_name": "SE",
+                            "granted_by": "Ops",
+                        },
+                    }
+                ),
+                caller=employee_dict["Ops"],
+            )
+
+        rollout = json.loads(rollout_response.split("Result: ", 1)[1])
+
+        self.assertEqual(rollout["proposal"]["status"], "operationalized")
+        self.assertIn("weather.lookup", employee_dict["SE"].allowed_tools)
+
+    def test_tool_proposal_rollout_requires_registered_tool(self):
+        employee_dict = main.build_employee_dict()
+        system = main.System(employee_dict)
+        with redirect_stdout(StringIO()):
+            main.load_tools(system)
+            proposal = json.loads(
+                system.interact(
+                    json.dumps(
+                        {
+                            "exec": "tools.propose",
+                            "args": {
+                                "requested_by": "SE",
+                                "tool_name": "weather.lookup",
+                                "description": "Look up current weather.",
+                            },
+                        }
+                    ),
+                    caller=employee_dict["SE"],
+                ).split("Result: ", 1)[1]
+            )
+            system.interact(
+                json.dumps(
+                    {
+                        "exec": "tools.approve_proposal",
+                        "args": {"proposal_id": proposal["proposal_id"], "approved_by": "Ops"},
+                    }
+                ),
+                caller=employee_dict["Ops"],
+            )
+            response = system.interact(
+                json.dumps(
+                    {
+                        "exec": "tools.rollout_proposal",
+                        "args": {"proposal_id": proposal["proposal_id"], "role_name": "SE"},
+                    }
+                ),
+                caller=employee_dict["Ops"],
+            )
+
+        self.assertIn("not registered", response)
 
     def test_tools_list_reports_allowed_access_for_role(self):
         employee_dict = main.build_employee_dict()

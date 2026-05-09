@@ -428,6 +428,23 @@
           - create
           - update
         description: Proposal action.
+      parameters:
+        type: object
+        description: Proposed JSON Schema parameters for the model-facing function.
+      required_capabilities:
+        type: array
+        items:
+          type: string
+        description: Capabilities required to call the proposed tool.
+      owner_capability:
+        type: string
+        description: Capability that owns operational approval for this tool.
+      safety_notes:
+        type: string
+        description: Safety or operational constraints for implementation.
+      implementation_notes:
+        type: string
+        description: Notes for the engineer or operator implementing the proposal.
     required:
       - requested_by
       - tool_name
@@ -439,4 +456,114 @@
         tool_name,
         description,
         action=action if action is not None else "create",
+        parameters=parameters,
+        required_capabilities=required_capabilities,
+        owner_capability=owner_capability,
+        safety_notes=safety_notes if safety_notes is not None else "",
+        implementation_notes=implementation_notes if implementation_notes is not None else "",
+    )
+- name: tools.list_proposals
+  system_tool: true
+  grantable: false
+  description: List managed tool proposals and their lifecycle status.
+  parameters:
+    type: object
+    properties:
+      status:
+        type: string
+        enum:
+          - proposed
+          - approved
+          - rejected
+          - operationalized
+        description: Optional proposal status filter.
+    required: []
+  code: |
+    return list_tool_proposals(employee_dict, status=status)
+- name: tools.approve_proposal
+  system_tool: true
+  grantable: false
+  required_capabilities:
+    - operator
+  owner_capability: operator
+  description: Approve a proposed tool change for implementation or rollout.
+  parameters:
+    type: object
+    properties:
+      proposal_id:
+        type: string
+        description: Proposal ID to approve.
+      approved_by:
+        type: string
+        description: Operator approving the proposal.
+      implementation_notes:
+        type: string
+        description: Notes on implementation or rollout conditions.
+    required:
+      - proposal_id
+      - approved_by
+  code: |
+    return approve_tool_proposal(
+        employee_dict,
+        proposal_id,
+        approved_by,
+        implementation_notes=implementation_notes if implementation_notes is not None else "",
+    )
+- name: tools.reject_proposal
+  system_tool: true
+  grantable: false
+  required_capabilities:
+    - operator
+  owner_capability: operator
+  description: Reject a proposed tool change with a reason.
+  parameters:
+    type: object
+    properties:
+      proposal_id:
+        type: string
+        description: Proposal ID to reject.
+      rejected_by:
+        type: string
+        description: Operator rejecting the proposal.
+      reason:
+        type: string
+        description: Reason for rejection.
+    required:
+      - proposal_id
+      - rejected_by
+      - reason
+  code: |
+    return reject_tool_proposal(employee_dict, proposal_id, rejected_by, reason)
+- name: tools.rollout_proposal
+  system_tool: true
+  grantable: false
+  required_capabilities:
+    - operator
+  owner_capability: operator
+  description: Roll out an approved, implemented proposal by granting its tool to a role.
+  parameters:
+    type: object
+    properties:
+      proposal_id:
+        type: string
+        description: Proposal ID to roll out.
+      role_name:
+        type: string
+        description: Role receiving access to the approved tool.
+      granted_by:
+        type: string
+        description: Operator granting access.
+      rollout_notes:
+        type: string
+        description: Notes about rollout scope or operating constraints.
+    required:
+      - proposal_id
+      - role_name
+  code: |
+    return rollout_tool_proposal(
+        employee_dict,
+        proposal_id,
+        role_name,
+        granted_by=granted_by,
+        rollout_notes=rollout_notes if rollout_notes is not None else "",
     )
