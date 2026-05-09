@@ -295,6 +295,25 @@ class SQLiteMemoryStore:
         self.connection.commit()
         return session_id
 
+    def list_recent_message_ids(self, session_id, limit):
+        """Return the last ``limit`` message IDs for a session in chronological order."""
+        rows = self.connection.execute(
+            """
+            SELECT message_id FROM messages
+            WHERE session_id = ?
+            ORDER BY message_id DESC LIMIT ?
+            """,
+            (session_id, limit),
+        ).fetchall()
+        return [row["message_id"] for row in reversed(rows)]
+
+    def end_session(self, session_id, ended_at=None):
+        self.connection.execute(
+            "UPDATE sessions SET ended_at = ? WHERE session_id = ?",
+            (ended_at or _utc_now(), session_id),
+        )
+        self.connection.commit()
+
     def upsert_agent(
         self,
         agent_id,

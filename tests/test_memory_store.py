@@ -691,5 +691,50 @@ class SQLiteMemoryStoreTests(unittest.TestCase):
         self.assertEqual(events[0]["payload_json"], '{"agent": "SE", "content": "Private note."}')
 
 
+    def test_list_recent_message_ids_returns_chronological_order(self):
+        store = self.build_store()
+        store.create_session("s-order")
+        store.upsert_agent("A", "Role", "A")
+        store.upsert_agent("B", "Role", "B")
+        id1 = store.append_message("s-order", "A", "B", "first")
+        id2 = store.append_message("s-order", "B", "A", "second")
+        id3 = store.append_message("s-order", "A", "B", "third")
+        ids = store.list_recent_message_ids("s-order", 3)
+        self.assertEqual(ids, [id1, id2, id3])
+
+    def test_list_recent_message_ids_limits_to_last_n(self):
+        store = self.build_store()
+        store.create_session("s-limit")
+        store.upsert_agent("A", "Role", "A")
+        store.upsert_agent("B", "Role", "B")
+        store.append_message("s-limit", "A", "B", "first")
+        id2 = store.append_message("s-limit", "B", "A", "second")
+        id3 = store.append_message("s-limit", "A", "B", "third")
+        ids = store.list_recent_message_ids("s-limit", 2)
+        self.assertEqual(ids, [id2, id3])
+
+    def test_end_session_sets_ended_at(self):
+        store = self.build_store()
+        store.create_session("s-end")
+        row = store.connection.execute(
+            "SELECT ended_at FROM sessions WHERE session_id = 's-end'"
+        ).fetchone()
+        self.assertIsNone(row["ended_at"])
+        store.end_session("s-end")
+        row = store.connection.execute(
+            "SELECT ended_at FROM sessions WHERE session_id = 's-end'"
+        ).fetchone()
+        self.assertIsNotNone(row["ended_at"])
+
+    def test_end_session_accepts_explicit_timestamp(self):
+        store = self.build_store()
+        store.create_session("s-ts")
+        store.end_session("s-ts", ended_at="2024-01-01T00:00:00")
+        row = store.connection.execute(
+            "SELECT ended_at FROM sessions WHERE session_id = 's-ts'"
+        ).fetchone()
+        self.assertEqual(row["ended_at"], "2024-01-01T00:00:00")
+
+
 if __name__ == "__main__":
     unittest.main()
