@@ -69,7 +69,11 @@ memory_max_depth = max(0, int(os.environ.get("ROBITS_MEMORY_MAX_DEPTH", "3")))
 memory_max_rows = max(1, int(os.environ.get("ROBITS_MEMORY_MAX_ROWS", "100")))
 memory_cache_threshold = max(512, int(os.environ.get("ROBITS_MEMORY_CACHE_THRESHOLD", "8192")))
 memory_digest_interval = max(0, int(os.environ.get("ROBITS_DIGEST_INTERVAL", "0")))
+org_chat_context_lines = max(0, int(os.environ.get("ROBITS_ORG_CHAT_CONTEXT_LINES", "20")))
+org_digest_interval = max(0, int(os.environ.get("ROBITS_ORG_DIGEST_INTERVAL", "0")))
+_reasoning_effort_env = os.environ.get("ROBITS_REASONING_EFFORT", "").strip().lower() or None
 agent_workspace_store = AgentWorkspaceStore()
+_org_workspace = agent_workspace_store if memory_store is not None else None
 default_location = os.environ.get("ROBITS_LOCATION", "").strip()
 default_timezone = os.environ.get("ROBITS_TIMEZONE", "").strip()
 SAFE_TOOL_BUILTINS = {
@@ -211,6 +215,7 @@ class ToolRegistry:
                 "builtin_mcp_call": builtin_mcp_call,
                 "builtin_computer_use": builtin_computer_use,
                 "builtin_image_generation": builtin_image_generation,
+                "org_chat_read": org_chat_read,
             },
             local_dict,
         )
@@ -532,6 +537,9 @@ class ResponsesProvider(ModelProvider):
         if tools:
             kwargs["tools"] = tools
             kwargs["tool_choice"] = "auto"
+        effort = getattr(role, "reasoning_effort", None) or _reasoning_effort_env
+        if effort and effort in {"low", "medium", "high"}:
+            kwargs["reasoning"] = {"effort": effort}
 
         response = _with_model_retries(lambda: self.client.responses.create(**kwargs))
         for _ in range(8):
@@ -652,6 +660,18 @@ def _runtime_timezone_name(tzinfo):
     return getattr(tzinfo, "key", None) or str(tzinfo)
 
 
+def _latest_identity_digest_content(agent_id):
+    if memory_store is None:
+        return None
+    try:
+        digests = memory_store.list_memory_digests(
+            agent_id=agent_id, digest_type="identity", current_only=True, limit=1
+        )
+        return digests[0]["content"] if digests else None
+    except Exception:
+        return None
+
+
 def agent_runtime_context(role=None):
     now_utc = datetime.now(timezone.utc)
     local_tz = _runtime_timezone()
@@ -661,8 +681,10 @@ def agent_runtime_context(role=None):
         or getattr(role, "runtime_role_name", None)
         or getattr(role, "name", None)
     )
+    agent_name = getattr(role, "name", None)
+    canonical_id = getattr(role, "runtime_role_name", None) or agent_name
     context = {
-        "agent_name": getattr(role, "name", None),
+        "agent_name": agent_name,
         "role_name": role_name,
         "session_id": getattr(role, "runtime_session_id", None),
         "current_datetime_utc": now_utc.isoformat(timespec="seconds"),
@@ -670,6 +692,7 @@ def agent_runtime_context(role=None):
         "current_date_local": now_local.date().isoformat(),
         "timezone": _runtime_timezone_name(local_tz),
         "location": default_location or None,
+        "identity_digest": _latest_identity_digest_content(canonical_id) if canonical_id else None,
     }
     return {key: value for key, value in context.items() if value is not None}
 
@@ -682,6 +705,18 @@ def format_agent_context(role=None):
         "Use this context for dates, times, location, identity, and session references. "
         "Do not invent missing context; call agent.context if you need to refresh it.\n"
     )
+
+
+def format_org_chat_context(transcript, limit):
+    if not transcript or limit == 0:
+        return ""
+    recent = transcript[-limit:]
+    lines = []
+    for e in recent:
+        lines.append(f"[Turn {e.turn}] {e.sender} -> {e.receiver}: {e.prompt[:400]}")
+        if e.response:
+            lines.append(f"  -> {e.response[:400]}")
+    return "\nRecent org chat:\n" + "\n".join(lines) + "\n"
 
 
 def current_agent_context(employee_dict):
@@ -860,6 +895,28 @@ def workspace_delete(employee_dict, agent_name, path):
         return json.dumps(agent_workspace_store.delete(normalized_name, path), sort_keys=True)
     except WorkspacePathError as e:
         return f"Error: {e}"
+
+
+def org_chat_read(employee_dict, limit=20):
+    del employee_dict
+    if _org_workspace is None:
+        return json.dumps({"lines": [], "note": "org chat not available"})
+    try:
+        result = _org_workspace.read("org", "org_chat.jsonl")
+    except Exception:
+        return json.dumps({"lines": [], "note": "no org chat history yet"})
+    effective_limit = max(0, min(int(limit or 20), 100))
+    if effective_limit == 0:
+        return json.dumps({"lines": [], "total": 0})
+    all_lines = [ln for ln in result["content"].splitlines() if ln.strip()]
+    tail = all_lines[-effective_limit:]
+    parsed = []
+    for ln in tail:
+        try:
+            parsed.append(json.loads(ln))
+        except Exception:
+            pass
+    return json.dumps({"lines": parsed, "total": len(all_lines)})
 
 
 def grant_tool_access(employee_dict, role_name, tool_name, granted_by=None):
@@ -1715,13 +1772,20 @@ def due_alarm_reminders(role, now=None):
     return reminders
 
 
+BREVITY_GUIDANCE = (
+    "\nCommunication style: default to concise responses — short clarifying questions, "
+    "statements of intent, and brief insights. Reserve longer responses for moments "
+    "where depth is explicitly needed or signaled by the conversation.\n"
+)
+
+
 def interact(self, model, sender, message):
     if self.template != "" and self.name not in self.conversation_history:
         self.conversation_history[self.name] = [
             {"role": "system", "content": self.template},
         ]
     messages = self.conversation_history.get(self.name, [])
-    system_content = self.template + format_agent_context(self)
+    system_content = self.template + BREVITY_GUIDANCE + format_agent_context(self)
     if messages and messages[0].get("role") == "system":
         messages[0]["content"] = system_content
     elif self.template:
@@ -2067,6 +2131,7 @@ class Session:
                 "max_turns": self.max_turns,
             },
         )
+        self._org_workspace = _org_workspace
         if memory_store is not None:
             try:
                 memory_store.create_session(self.run_id)
@@ -2190,6 +2255,7 @@ class Session:
                         receiver_agent_id=canonical_receiver,
                         content=prompt,
                         kind="message",
+                        conversation_type="org_chat",
                     )
                 if response:
                     memory_store.append_message(
@@ -2198,6 +2264,7 @@ class Session:
                         receiver_agent_id=canonical_sender,
                         content=response,
                         kind="message",
+                        conversation_type="org_chat",
                     )
             except Exception:
                 pass
@@ -2206,6 +2273,12 @@ class Session:
                 and self.turns_completed % memory_digest_interval == 0
             ):
                 self._auto_digest()
+            if (
+                org_digest_interval > 0
+                and self.turns_completed % org_digest_interval == 0
+            ):
+                self._auto_org_digest()
+        self._write_org_chat_jsonl(entry)
         return entry
 
     def _auto_digest(self):
@@ -2246,6 +2319,55 @@ class Session:
                 )
         except Exception:
             pass
+
+    def _write_org_chat_jsonl(self, entry):
+        if self._org_workspace is None:
+            return
+        line = json.dumps({
+            "turn": entry.turn,
+            "sender": entry.sender,
+            "receiver": entry.receiver,
+            "prompt": entry.prompt,
+            "response": entry.response,
+        })
+        try:
+            self._org_workspace.write("org", "org_chat.jsonl", line + "\n", append=True)
+        except Exception:
+            pass
+
+    def _auto_org_digest(self):
+        if memory_store is None:
+            return
+        window = self.transcript[-org_digest_interval:]
+        lines = [
+            f"[turn {e.turn}] {e.sender}->{e.receiver}: {e.prompt[:300]} | {e.response[:300]}"
+            for e in window
+        ]
+        content = "Org chat digest:\n" + "\n".join(lines)
+        source_refs = []
+        try:
+            msg_ids = memory_store.list_recent_message_ids_by_type(
+                self.run_id, org_digest_interval * 2, "org_chat"
+            )
+            source_refs = [{"source_table": "messages", "source_id": mid} for mid in msg_ids]
+        except Exception:
+            pass
+        if not source_refs:
+            return
+        for agent_id in list(self.participants):
+            try:
+                memory_store.append_memory_digest(
+                    content=content,
+                    source_refs=source_refs,
+                    agent_id=agent_id,
+                    session_id=self.run_id,
+                    digest_type="episodic",
+                    conversation_type="org_chat",
+                    accessibility="agent",
+                    system_only=False,
+                )
+            except Exception:
+                pass
 
     def record_thought(self, agent_name, content, visibility="private"):
         if memory_store is not None:
@@ -2311,12 +2433,15 @@ class Session:
         reminders = due_alarm_reminders(routed.receiver)
         if reminders:
             prompt = "\n".join(reminders + [prompt])
-        prompt = prepend_verified_tool_results(
+        raw_prompt = prepend_verified_tool_results(
             prompt,
             self.recent_system_events() + system_events,
         )
+        # Inject org chat context for the model only — not stored in transcript to avoid bloat.
+        org_context = format_org_chat_context(self.transcript, org_chat_context_lines)
+        model_prompt = org_context + raw_prompt if org_context else raw_prompt
         self.prepare_agent_runtime(routed.receiver)
-        response = routed.receiver.interact(sender.name, prompt)
+        response = routed.receiver.interact(sender.name, model_prompt)
         response = "" if response is None else response
         native_tool_events = list(getattr(routed.receiver, "runtime_tool_results", []))
         if native_tool_events:
@@ -2332,7 +2457,7 @@ class Session:
         self.record_turn(
             sender=sender.name,
             receiver=routed.receiver.name,
-            prompt=prompt,
+            prompt=raw_prompt,
             response=response,
             directed=routed.directed,
             system_events=system_events,

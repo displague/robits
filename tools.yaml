@@ -261,6 +261,24 @@
       - path
   code: |
     return workspace_delete(employee_dict, agent_name, path)
+- name: org.chat_read
+  required_capabilities: []
+  owner_capability: basic
+  system_tool: false
+  grantable: true
+  description: >
+    Read recent org chat history. Returns a JSON object with `lines` (array of turn objects) and `total` (total turns available) fields.
+    Use this to catch up on what other agents discussed.
+  parameters:
+    type: object
+    properties:
+      limit:
+        type: integer
+        description: Number of recent turns to return (default 20, max 100).
+        default: 20
+    required: []
+  code: |
+    return org_chat_read(employee_dict, limit=min(int(limit if limit is not None else 20), 100))
 - name: agent.create_alarm
   required_capabilities: []
   owner_capability: agent

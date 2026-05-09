@@ -307,6 +307,18 @@ class SQLiteMemoryStore:
         ).fetchall()
         return [row["message_id"] for row in reversed(rows)]
 
+    def list_recent_message_ids_by_type(self, session_id, limit, conversation_type):
+        """Return the last ``limit`` message IDs for a session filtered by conversation_type."""
+        rows = self.connection.execute(
+            """
+            SELECT message_id FROM messages
+            WHERE session_id = ? AND conversation_type = ?
+            ORDER BY message_id DESC LIMIT ?
+            """,
+            (session_id, conversation_type, limit),
+        ).fetchall()
+        return [row["message_id"] for row in reversed(rows)]
+
     def end_session(self, session_id, ended_at=None):
         self.connection.execute(
             "UPDATE sessions SET ended_at = ? WHERE session_id = ?",
