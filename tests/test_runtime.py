@@ -2642,7 +2642,7 @@ class OrgChatContextTests(unittest.TestCase):
 
 
 class OrgDigestTests(unittest.TestCase):
-    """Tests for _auto_org_digest and list_recent_message_ids_by_type."""
+    """Tests for _auto_org_digest and list_recent_message_ids_by_channel."""
 
     def setUp(self):
         self.store_temp = tempfile.TemporaryDirectory()
@@ -2674,21 +2674,24 @@ class OrgDigestTests(unittest.TestCase):
         }
         return main.Session(participants=participants)
 
-    def test_messages_tagged_as_org_chat(self):
+    def test_messages_tagged_with_org_chat_channel(self):
         session = self._make_session()
         session.record_turn("X", "Y", "hello", "world")
         rows = self.store.connection.execute(
-            "SELECT conversation_type FROM messages WHERE session_id=?", (session.run_id,)
+            "SELECT channel_id FROM messages WHERE session_id=?", (session.run_id,)
         ).fetchall()
-        self.assertTrue(all(r["conversation_type"] == "org_chat" for r in rows))
+        # All messages should reference the org_chat channel
+        self.assertTrue(all(r["channel_id"] == session._org_chat_channel_id for r in rows))
 
-    def test_list_recent_message_ids_by_type_filters_correctly(self):
+    def test_list_recent_message_ids_by_channel_filters_correctly(self):
         session = self._make_session()
         session.record_turn("X", "Y", "msg1", "resp1")
-        ids = self.store.list_recent_message_ids_by_type(session.run_id, 10, "org_chat")
+        ids = self.store.list_recent_message_ids_by_channel(
+            session.run_id, 10, session._org_chat_channel_id
+        )
         self.assertGreater(len(ids), 0)
-        # Non-matching type returns empty
-        ids_other = self.store.list_recent_message_ids_by_type(session.run_id, 10, "personal")
+        # Non-matching channel returns empty
+        ids_other = self.store.list_recent_message_ids_by_channel(session.run_id, 10, 9999)
         self.assertEqual(ids_other, [])
 
     def test_org_digest_fires_at_interval(self):
@@ -3094,8 +3097,10 @@ class MemorySearchParkingTests(unittest.TestCase):
     def _seed_org_message(self, agent_id="bob"):
         self.store.upsert_agent(agent_id, "Role", agent_id)
         self.store.create_session("s1")
+        from robits.memory.sqlite import CHANNEL_ORG_CHAT, SOCIAL_PROFESSIONAL
+        ch = self.store.get_or_create_channel(CHANNEL_ORG_CHAT, social_distance=SOCIAL_PROFESSIONAL)
         self.store.append_message("s1", agent_id, agent_id, "project deadline is Friday",
-                                   conversation_type="org_chat")
+                                   channel_id=ch)
 
     def test_off_clock_org_result_prepends_parking_note(self):
         self._seed_org_message()
@@ -3123,8 +3128,7 @@ class MemorySearchParkingTests(unittest.TestCase):
     def test_off_clock_personal_result_no_parking_note(self):
         self.store.upsert_agent("carol", "Role", "carol")
         self.store.create_session("s2")
-        self.store.append_message("s2", "carol", "carol", "family picnic plans",
-                                   conversation_type="personal")
+        self.store.append_message("s2", "carol", "carol", "family picnic plans")
         main.clock_state = "off"
         old_caller = main.active_tool_caller
         main.active_tool_caller = SimpleNamespace(name="carol", allowed_tools={"memory.*"})

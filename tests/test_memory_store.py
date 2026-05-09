@@ -106,7 +106,6 @@ class SQLiteMemoryStoreTests(unittest.TestCase):
             "SE",
             "Please design the durable memory substrate.",
             relationship_type="coworker",
-            conversation_type="work",
             source="chat",
         )
 
@@ -124,7 +123,6 @@ class SQLiteMemoryStoreTests(unittest.TestCase):
             "SE",
             "Use sqlite for coworker recall.",
             relationship_type="coworker",
-            conversation_type="work",
             source="chat",
         )
         store.append_thought(
@@ -132,7 +130,6 @@ class SQLiteMemoryStoreTests(unittest.TestCase):
             "The sqlite schema needs FTS indexes for private recollection.",
             session_id="session-1",
             relationship_type="coworker",
-            conversation_type="work",
             source="thinking",
         )
         store.append_tool_call(
@@ -165,14 +162,19 @@ class SQLiteMemoryStoreTests(unittest.TestCase):
         self.assertIn("tool_call", kinds)
         self.assertIn("memory_note", kinds)
 
-    def test_search_filters_relationship_conversation_source_and_dates(self):
+    def test_search_filters_relationship_source_and_dates(self):
         store = self.seed_store()
+        from robits.memory.sqlite import CHANNEL_WORK_PEER, SOCIAL_PROFESSIONAL
+
+        work_channel = store.get_or_create_channel(
+            CHANNEL_WORK_PEER, participants=["SE"], social_distance=SOCIAL_PROFESSIONAL
+        )
         store.append_thought(
             "SE",
             "Coworker plan for sqlite search.",
             session_id="session-1",
             relationship_type="coworker",
-            conversation_type="work",
+            channel_id=work_channel,
             source="thinking",
             created_at="2026-05-07T10:00:00+00:00",
         )
@@ -181,7 +183,6 @@ class SQLiteMemoryStoreTests(unittest.TestCase):
             "Family plan for sqlite search.",
             session_id="session-1",
             relationship_type="family",
-            conversation_type="home",
             source="thinking",
             created_at="2026-05-08T10:00:00+00:00",
         )
@@ -189,7 +190,7 @@ class SQLiteMemoryStoreTests(unittest.TestCase):
         results = store.search(
             "sqlite",
             relationship_type="coworker",
-            conversation_type="work",
+            conversation_type=CHANNEL_WORK_PEER,
             source="thinking",
             start_at="2026-05-07T00:00:00+00:00",
             end_at="2026-05-07T23:59:59+00:00",
@@ -295,7 +296,6 @@ class SQLiteMemoryStoreTests(unittest.TestCase):
             "SE",
             "Use sqlite to recall architecture decisions.",
             relationship_type="coworker",
-            conversation_type="work",
             source="chat",
             created_at="2026-05-07T10:00:00+00:00",
         )
@@ -304,7 +304,6 @@ class SQLiteMemoryStoreTests(unittest.TestCase):
             "The digest should link back to raw records.",
             session_id="session-1",
             relationship_type="coworker",
-            conversation_type="work",
             source="thinking",
             created_at="2026-05-07T10:01:00+00:00",
         )
@@ -863,7 +862,7 @@ class ChannelTests(unittest.TestCase):
     def test_existing_db_gains_channel_id_columns_on_open(self):
         import sqlite3 as _sqlite3
 
-        temp_dir = tempfile.TemporaryDirectory()
+        temp_dir = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
         self.addCleanup(temp_dir.cleanup)
         db_path = Path(temp_dir.name) / "legacy.sqlite3"
 

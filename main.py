@@ -2320,7 +2320,6 @@ class Session:
                         receiver_agent_id=canonical_receiver,
                         content=prompt,
                         kind="message",
-                        conversation_type="org_chat",
                         channel_id=self._org_chat_channel_id,
                     )
                 if response:
@@ -2330,7 +2329,6 @@ class Session:
                         receiver_agent_id=canonical_sender,
                         content=response,
                         kind="message",
-                        conversation_type="org_chat",
                         channel_id=self._org_chat_channel_id,
                     )
             except Exception:
@@ -2413,8 +2411,8 @@ class Session:
         content = "Org chat digest:\n" + "\n".join(lines)
         source_refs = []
         try:
-            msg_ids = memory_store.list_recent_message_ids_by_type(
-                self.run_id, org_digest_interval * 2, "org_chat"
+            msg_ids = memory_store.list_recent_message_ids_by_channel(
+                self.run_id, org_digest_interval * 2, self._org_chat_channel_id
             )
             source_refs = [{"source_table": "messages", "source_id": mid} for mid in msg_ids]
         except Exception:

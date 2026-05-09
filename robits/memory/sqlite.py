@@ -122,6 +122,21 @@ class SQLiteMemoryStore:
                 FOREIGN KEY (contact_agent_id) REFERENCES agents(agent_id)
             );
 
+            CREATE TABLE IF NOT EXISTS channels (
+                channel_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                channel_type TEXT NOT NULL,
+                participants_json TEXT NOT NULL DEFAULT '[]',
+                visibility TEXT NOT NULL DEFAULT 'public',
+                social_distance REAL,
+                clock_phase_hint REAL,
+                memory_policy TEXT NOT NULL DEFAULT 'default',
+                digest_policy TEXT NOT NULL DEFAULT 'default',
+                prompt_injection_policy TEXT NOT NULL DEFAULT 'default',
+                created_at TEXT NOT NULL,
+                metadata_json TEXT NOT NULL DEFAULT '{}',
+                UNIQUE(channel_type, participants_json)
+            );
+
             CREATE TABLE IF NOT EXISTS messages (
                 message_id INTEGER PRIMARY KEY AUTOINCREMENT,
                 session_id TEXT NOT NULL,
@@ -131,13 +146,14 @@ class SQLiteMemoryStore:
                 kind TEXT NOT NULL DEFAULT 'message',
                 visibility TEXT NOT NULL DEFAULT 'public',
                 relationship_type TEXT,
-                conversation_type TEXT,
+                channel_id INTEGER,
                 source TEXT,
                 created_at TEXT NOT NULL,
                 metadata_json TEXT NOT NULL DEFAULT '{}',
                 FOREIGN KEY (session_id) REFERENCES sessions(session_id),
                 FOREIGN KEY (sender_agent_id) REFERENCES agents(agent_id),
-                FOREIGN KEY (receiver_agent_id) REFERENCES agents(agent_id)
+                FOREIGN KEY (receiver_agent_id) REFERENCES agents(agent_id),
+                FOREIGN KEY (channel_id) REFERENCES channels(channel_id)
             );
 
             CREATE TABLE IF NOT EXISTS thoughts (
@@ -147,12 +163,13 @@ class SQLiteMemoryStore:
                 content TEXT NOT NULL,
                 visibility TEXT NOT NULL DEFAULT 'private',
                 relationship_type TEXT,
-                conversation_type TEXT,
+                channel_id INTEGER,
                 source TEXT,
                 created_at TEXT NOT NULL,
                 metadata_json TEXT NOT NULL DEFAULT '{}',
                 FOREIGN KEY (session_id) REFERENCES sessions(session_id),
-                FOREIGN KEY (agent_id) REFERENCES agents(agent_id)
+                FOREIGN KEY (agent_id) REFERENCES agents(agent_id),
+                FOREIGN KEY (channel_id) REFERENCES channels(channel_id)
             );
 
             CREATE TABLE IF NOT EXISTS todos (
@@ -249,21 +266,6 @@ class SQLiteMemoryStore:
                 FOREIGN KEY (session_id) REFERENCES sessions(session_id)
             );
 
-            CREATE TABLE IF NOT EXISTS channels (
-                channel_id INTEGER PRIMARY KEY AUTOINCREMENT,
-                channel_type TEXT NOT NULL,
-                participants_json TEXT NOT NULL DEFAULT '[]',
-                visibility TEXT NOT NULL DEFAULT 'public',
-                social_distance REAL,
-                clock_phase_hint REAL,
-                memory_policy TEXT NOT NULL DEFAULT 'default',
-                digest_policy TEXT NOT NULL DEFAULT 'default',
-                prompt_injection_policy TEXT NOT NULL DEFAULT 'default',
-                created_at TEXT NOT NULL,
-                metadata_json TEXT NOT NULL DEFAULT '{}',
-                UNIQUE(channel_type, participants_json)
-            );
-
             CREATE VIRTUAL TABLE IF NOT EXISTS memory_fts USING fts5(
                 kind UNINDEXED,
                 record_id UNINDEXED,
@@ -292,7 +294,13 @@ class SQLiteMemoryStore:
             """
         )
         self._ensure_memory_digest_columns()
-        self._ensure_channel_id_columns()
+        self._ensure_channel_schema()
+        self.connection.execute(
+            "CREATE INDEX IF NOT EXISTS idx_messages_channel ON messages(channel_id)"
+        )
+        self.connection.execute(
+            "CREATE INDEX IF NOT EXISTS idx_thoughts_channel ON thoughts(channel_id)"
+        )
         self.connection.execute(
             """
             CREATE INDEX IF NOT EXISTS idx_memory_digests_current
@@ -301,7 +309,7 @@ class SQLiteMemoryStore:
         )
         self.connection.commit()
 
-    def _ensure_channel_id_columns(self):
+    def _ensure_channel_schema(self):
         for table in ("messages", "thoughts"):
             cols = {
                 row["name"]
@@ -353,15 +361,15 @@ class SQLiteMemoryStore:
         ).fetchall()
         return [row["message_id"] for row in reversed(rows)]
 
-    def list_recent_message_ids_by_type(self, session_id, limit, conversation_type):
-        """Return the last ``limit`` message IDs for a session filtered by conversation_type."""
+    def list_recent_message_ids_by_channel(self, session_id, limit, channel_id):
+        """Return the last ``limit`` message IDs for a session filtered by channel."""
         rows = self.connection.execute(
             """
             SELECT message_id FROM messages
-            WHERE session_id = ? AND conversation_type = ?
+            WHERE session_id = ? AND channel_id = ?
             ORDER BY message_id DESC LIMIT ?
             """,
-            (session_id, conversation_type, limit),
+            (session_id, channel_id, limit),
         ).fetchall()
         return [row["message_id"] for row in reversed(rows)]
 
@@ -499,6 +507,14 @@ class SQLiteMemoryStore:
         ).fetchall()
         return [dict(row) for row in rows]
 
+    def _channel_type(self, channel_id):
+        if channel_id is None:
+            return None
+        row = self.connection.execute(
+            "SELECT channel_type FROM channels WHERE channel_id = ?", (channel_id,)
+        ).fetchone()
+        return row["channel_type"] if row else None
+
     def append_message(
         self,
         session_id,
@@ -508,7 +524,6 @@ class SQLiteMemoryStore:
         kind="message",
         visibility="public",
         relationship_type=None,
-        conversation_type=None,
         channel_id=None,
         source=None,
         created_at=None,
@@ -519,10 +534,10 @@ class SQLiteMemoryStore:
             """
             INSERT INTO messages(
                 session_id, sender_agent_id, receiver_agent_id, content, kind,
-                visibility, relationship_type, conversation_type, channel_id, source,
+                visibility, relationship_type, channel_id, source,
                 created_at, metadata_json
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 session_id,
@@ -532,7 +547,6 @@ class SQLiteMemoryStore:
                 kind,
                 visibility,
                 relationship_type,
-                conversation_type,
                 channel_id,
                 source,
                 timestamp,
@@ -548,7 +562,7 @@ class SQLiteMemoryStore:
             session_id,
             source,
             relationship_type,
-            conversation_type,
+            self._channel_type(channel_id),
             timestamp,
             content,
         )
@@ -562,7 +576,6 @@ class SQLiteMemoryStore:
         session_id=None,
         visibility="private",
         relationship_type=None,
-        conversation_type=None,
         channel_id=None,
         source=None,
         created_at=None,
@@ -573,9 +586,9 @@ class SQLiteMemoryStore:
             """
             INSERT INTO thoughts(
                 session_id, agent_id, content, visibility, relationship_type,
-                conversation_type, channel_id, source, created_at, metadata_json
+                channel_id, source, created_at, metadata_json
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 session_id,
@@ -583,7 +596,6 @@ class SQLiteMemoryStore:
                 content,
                 visibility,
                 relationship_type,
-                conversation_type,
                 channel_id,
                 source,
                 timestamp,
@@ -599,7 +611,7 @@ class SQLiteMemoryStore:
             session_id,
             source,
             relationship_type,
-            conversation_type,
+            self._channel_type(channel_id),
             timestamp,
             content,
         )

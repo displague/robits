@@ -24,7 +24,9 @@ class AsyncSQLiteMemoryStoreTests(unittest.IsolatedAsyncioTestCase):
         return store
 
     async def test_async_store_bootstraps_schema_and_writes_messages(self):
+        from robits.memory.sqlite import CHANNEL_ORG_CHAT, SOCIAL_PROFESSIONAL
         store = await self.seed_store()
+        ch = await store.get_or_create_channel(CHANNEL_ORG_CHAT, social_distance=SOCIAL_PROFESSIONAL)
 
         message_id = await store.append_message(
             "session-1",
@@ -32,7 +34,7 @@ class AsyncSQLiteMemoryStoreTests(unittest.IsolatedAsyncioTestCase):
             "SE",
             "Please design async storage.",
             relationship_type="coworker",
-            conversation_type="org_chat",
+            channel_id=ch,
             source="chat",
         )
 
@@ -40,10 +42,12 @@ class AsyncSQLiteMemoryStoreTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(messages[0]["message_id"], message_id)
         self.assertEqual(messages[0]["content"], "Please design async storage.")
-        self.assertEqual(messages[0]["conversation_type"], "org_chat")
+        self.assertEqual(messages[0]["channel_id"], ch)
 
     async def test_concurrent_async_appends_are_serialized_and_visible(self):
+        from robits.memory.sqlite import CHANNEL_ORG_CHAT, SOCIAL_PROFESSIONAL
         store = await self.seed_store()
+        ch = await store.get_or_create_channel(CHANNEL_ORG_CHAT, social_distance=SOCIAL_PROFESSIONAL)
 
         async def append(index):
             return await store.append_message(
@@ -51,14 +55,14 @@ class AsyncSQLiteMemoryStoreTests(unittest.IsolatedAsyncioTestCase):
                 "CEO" if index % 2 == 0 else "HR",
                 "SE",
                 f"Concurrent message {index}.",
-                conversation_type="org_chat",
+                channel_id=ch,
                 source="test",
             )
 
         ids = await asyncio.gather(*(append(index) for index in range(20)))
         messages = await store.list_messages(
             session_id="session-1",
-            conversation_type="org_chat",
+            channel_id=ch,
             limit=25,
         )
 
@@ -106,7 +110,6 @@ class AsyncSQLiteMemoryStoreTests(unittest.IsolatedAsyncioTestCase):
             "CEO",
             "SE",
             "Async write visible to sync reader.",
-            conversation_type="org_chat",
         )
         await store.close()
 
@@ -123,13 +126,11 @@ class AsyncSQLiteMemoryStoreTests(unittest.IsolatedAsyncioTestCase):
             "CEO",
             "SE",
             "Async sqlite message should be searchable.",
-            conversation_type="org_chat",
         )
         await store.append_thought(
             "SE",
             "Async sqlite thought should also be searchable.",
             session_id="session-1",
-            conversation_type="agent_thought",
         )
         await store.close()
 
