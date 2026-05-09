@@ -342,7 +342,7 @@
   system_tool: true
   grantable: true
   owner_capability: system
-  description: Search an agent's accessible SQLite memory records.
+  description: Search an agent's accessible SQLite memory records. Returns outer-level FTS hits and surfaces parent digests for any inner records that also match.
   parameters:
     type: object
     properties:
@@ -355,6 +355,9 @@
       limit:
         type: integer
         description: Maximum number of records to return.
+      cascade:
+        type: boolean
+        description: Also search inner source records of digests and surface parent digests for matches (default true).
     required:
       - agent_name
       - query
@@ -364,6 +367,7 @@
         agent_name,
         query,
         limit=limit if limit is not None else 10,
+        cascade=cascade if cascade is not None else True,
     )
 - name: memory.list_digests
   system_tool: true
@@ -413,6 +417,12 @@
       recursive:
         type: boolean
         description: Include cascading digest sources recursively.
+      max_depth:
+        type: integer
+        description: Maximum recursive expansion depth (capped by ROBITS_MEMORY_MAX_DEPTH).
+      max_chars:
+        type: integer
+        description: Maximum characters to include in the returned result before truncation.
     required:
       - agent_name
       - digest_id
@@ -422,6 +432,8 @@
         agent_name,
         digest_id,
         recursive=recursive if recursive is not None else True,
+        max_depth=max_depth,
+        max_chars=max_chars,
     )
 - name: tools.list
   system_tool: true
