@@ -169,6 +169,98 @@
     required: []
   code: |
     return current_agent_context(employee_dict)
+- name: agent.files_list
+  required_capabilities: []
+  owner_capability: agent
+  description: List files in an agent's private workspace.
+  parameters:
+    type: object
+    properties:
+      agent_name:
+        type: string
+        description: Agent that owns the private workspace.
+      path:
+        type: string
+        description: Relative directory path to list.
+    required:
+      - agent_name
+  code: |
+    return workspace_list(employee_dict, agent_name, path=path if path is not None else "")
+- name: agent.files_read
+  required_capabilities: []
+  owner_capability: agent
+  description: Read a UTF-8 text file from an agent's private workspace.
+  parameters:
+    type: object
+    properties:
+      agent_name:
+        type: string
+        description: Agent that owns the private workspace.
+      path:
+        type: string
+        description: Relative file path to read.
+      max_bytes:
+        type: integer
+        description: Maximum bytes to read before truncation.
+    required:
+      - agent_name
+      - path
+  code: |
+    return workspace_read(
+        employee_dict,
+        agent_name,
+        path,
+        max_bytes=max_bytes if max_bytes is not None else 65536,
+    )
+- name: agent.files_write
+  required_capabilities: []
+  owner_capability: agent
+  description: Write or append a UTF-8 text file in an agent's private workspace.
+  parameters:
+    type: object
+    properties:
+      agent_name:
+        type: string
+        description: Agent that owns the private workspace.
+      path:
+        type: string
+        description: Relative file path to write.
+      content:
+        type: string
+        description: Text content to write.
+      append:
+        type: boolean
+        description: Append instead of replacing the file.
+    required:
+      - agent_name
+      - path
+      - content
+  code: |
+    return workspace_write(
+        employee_dict,
+        agent_name,
+        path,
+        content,
+        append=append if append is not None else False,
+    )
+- name: agent.files_delete
+  required_capabilities: []
+  owner_capability: agent
+  description: Delete a file or empty directory from an agent's private workspace.
+  parameters:
+    type: object
+    properties:
+      agent_name:
+        type: string
+        description: Agent that owns the private workspace.
+      path:
+        type: string
+        description: Relative file or empty directory path to delete.
+    required:
+      - agent_name
+      - path
+  code: |
+    return workspace_delete(employee_dict, agent_name, path)
 - name: agent.create_alarm
   required_capabilities: []
   owner_capability: agent
