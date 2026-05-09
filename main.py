@@ -1889,7 +1889,13 @@ Only say that you created, changed, or called a tool after the runtime has retur
         self.lifecycle_state = "active"
         self.lifecycle_events = []
         self.capabilities = set()
-        self.allowed_tools = {"agent.*", "memory.search", "memory.list_digests", "memory.expand_digest"}
+        self.allowed_tools = {
+            "agent.*",
+            "builtin.web_search",
+            "memory.search",
+            "memory.list_digests",
+            "memory.expand_digest",
+        }
         self.alarms = []
         self.sandbox_metadata = SandboxMetadata.disabled(self.name)
         self.runtime_event_stream = None

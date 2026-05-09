@@ -140,8 +140,9 @@ as client-side function tools that work with any OpenAI-compatible endpoint:
 | `builtin.computer_use` | Computer-use actions (not implemented) | `computer` |
 | `builtin.image_generation` | Generate images (not implemented) | — |
 
-All `builtin.*` tools are grantable. None are in the default tool grants; operators
-grant access explicitly via `tools.grant`.
+All `builtin.*` tools are grantable. `builtin.web_search` is in the default tool
+grants so agents can satisfy ordinary public lookup requests; operators grant
+access to other built-ins explicitly via `tools.grant`.
 
 Example execution payload:
 

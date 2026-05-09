@@ -665,6 +665,7 @@ class RuntimeTests(unittest.TestCase):
 
         tool_names = {tool["name"] for tool in fake_client.responses.create.calls[0]["tools"]}
         self.assertIn("tools__propose", tool_names)
+        self.assertIn("builtin__web_search", tool_names)
         self.assertNotIn("org__create_role", tool_names)
 
     def test_disallowed_tool_call_is_rejected_at_runtime(self):
