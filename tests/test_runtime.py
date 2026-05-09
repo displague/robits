@@ -1696,9 +1696,37 @@ class RuntimeTests(unittest.TestCase):
                 ),
                 caller=employee_dict["SE"],
             )
+            windows_escape_response = system.interact(
+                json.dumps(
+                    {
+                        "exec": "agent.files_write",
+                        "args": {
+                            "agent_name": "SE",
+                            "path": "..\\escape.txt",
+                            "content": "nope",
+                        },
+                    }
+                ),
+                caller=employee_dict["SE"],
+            )
+            negative_read_response = system.interact(
+                json.dumps(
+                    {
+                        "exec": "agent.files_read",
+                        "args": {
+                            "agent_name": "SE",
+                            "path": "NOTES.md",
+                            "max_bytes": -1,
+                        },
+                    }
+                ),
+                caller=employee_dict["SE"],
+            )
 
         self.assertIn("cannot access workspace", cross_response)
         self.assertIn("Path must be relative", escape_response)
+        self.assertIn("POSIX-style separators", windows_escape_response)
+        self.assertIn("max_bytes must be between", negative_read_response)
 
     def test_alarm_creation_rejects_past_due_at(self):
         employee_dict = main.build_employee_dict()

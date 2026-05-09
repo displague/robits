@@ -804,8 +804,9 @@ def workspace_read(employee_dict, agent_name, path, max_bytes=65536):
     if error:
         return error
     try:
+        read_limit = 65536 if max_bytes is None else int(max_bytes)
         return json.dumps(
-            agent_workspace_store.read(normalized_name, path, max_bytes=int(max_bytes or 65536)),
+            agent_workspace_store.read(normalized_name, path, max_bytes=read_limit),
             sort_keys=True,
         )
     except (WorkspacePathError, ValueError) as e:
