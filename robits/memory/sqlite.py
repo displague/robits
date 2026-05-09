@@ -134,6 +134,7 @@ class SQLiteMemoryStore:
                 prompt_injection_policy TEXT NOT NULL DEFAULT 'default',
                 created_at TEXT NOT NULL,
                 metadata_json TEXT NOT NULL DEFAULT '{}',
+                CHECK (social_distance IS NULL OR (social_distance >= 0.0 AND social_distance <= 5.0)),
                 UNIQUE(channel_type, participants_json)
             );
 
@@ -461,7 +462,9 @@ class SQLiteMemoryStore:
         metadata=None,
         created_at=None,
     ):
-        participants_json = json.dumps(sorted(participants or []))
+        normalized_participants = self._normalize_participants(participants)
+        participants_json = json.dumps(normalized_participants, separators=(",", ":"))
+        self._validate_social_distance(social_distance)
         timestamp = created_at or _utc_now()
         self.connection.execute(
             """
@@ -498,14 +501,37 @@ class SQLiteMemoryStore:
             clauses.append("channel_type = ?")
             params.append(channel_type)
         if participant is not None:
-            clauses.append("participants_json LIKE ?")
-            params.append(f'%"{participant}"%')
+            if not isinstance(participant, str):
+                raise TypeError("participant must be a string")
+            clauses.append(
+                "EXISTS (SELECT 1 FROM json_each(channels.participants_json) WHERE json_each.value = ?)"
+            )
+            params.append(participant)
         where = "WHERE " + " AND ".join(clauses) if clauses else ""
         rows = self.connection.execute(
             f"SELECT * FROM channels {where} ORDER BY channel_id LIMIT ?",
             params + [limit],
         ).fetchall()
         return [dict(row) for row in rows]
+
+    @staticmethod
+    def _normalize_participants(participants):
+        values = participants or []
+        for participant in values:
+            if not isinstance(participant, str):
+                raise TypeError("participants must contain only strings")
+        return sorted(set(values))
+
+    @staticmethod
+    def _validate_social_distance(social_distance):
+        if social_distance is None:
+            return
+        if not isinstance(social_distance, (int, float)) or isinstance(social_distance, bool):
+            raise TypeError("social_distance must be a number between 0.0 and 5.0")
+        if social_distance < SOCIAL_SELF or social_distance > SOCIAL_HOSTILE:
+            raise ValueError(
+                f"social_distance must be between {SOCIAL_SELF:.1f} and {SOCIAL_HOSTILE:.1f}"
+            )
 
     def _channel_type(self, channel_id):
         if channel_id is None:

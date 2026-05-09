@@ -786,6 +786,33 @@ class ChannelTests(unittest.TestCase):
         dm_id = store.get_or_create_channel(CHANNEL_AGENT_DM, participants=["CEO", "SE"])
         self.assertNotEqual(org_id, dm_id)
 
+    def test_get_or_create_channel_normalizes_duplicate_participants(self):
+        store = self.build_store()
+        from robits.memory.sqlite import CHANNEL_AGENT_DM
+
+        id1 = store.get_or_create_channel(CHANNEL_AGENT_DM, participants=["SE", "CEO", "SE"])
+        id2 = store.get_or_create_channel(CHANNEL_AGENT_DM, participants=["CEO", "SE"])
+        row = store.connection.execute(
+            "SELECT participants_json FROM channels WHERE channel_id = ?", (id1,)
+        ).fetchone()
+
+        self.assertEqual(id1, id2)
+        self.assertEqual(row["participants_json"], '["CEO","SE"]')
+
+    def test_get_or_create_channel_rejects_non_string_participants(self):
+        store = self.build_store()
+        from robits.memory.sqlite import CHANNEL_AGENT_DM
+
+        with self.assertRaises(TypeError):
+            store.get_or_create_channel(CHANNEL_AGENT_DM, participants=["CEO", 3])
+
+    def test_get_or_create_channel_rejects_out_of_range_social_distance(self):
+        store = self.build_store()
+        from robits.memory.sqlite import CHANNEL_ORG_CHAT
+
+        with self.assertRaises(ValueError):
+            store.get_or_create_channel(CHANNEL_ORG_CHAT, social_distance=6.0)
+
     def test_list_channels_filters_by_type(self):
         store = self.build_store()
         from robits.memory.sqlite import CHANNEL_AGENT_DM, CHANNEL_ORG_CHAT
@@ -810,6 +837,18 @@ class ChannelTests(unittest.TestCase):
 
         se_channels = store.list_channels(participant="SE")
         self.assertEqual(len(se_channels), 2)
+
+    def test_list_channels_participant_filter_handles_like_metacharacters(self):
+        store = self.build_store()
+        from robits.memory.sqlite import CHANNEL_AGENT_DM
+
+        exact_id = store.get_or_create_channel(CHANNEL_AGENT_DM, participants=["agent_%"])
+        store.get_or_create_channel(CHANNEL_AGENT_DM, participants=["agent_12"])
+
+        channels = store.list_channels(participant="agent_%")
+
+        self.assertEqual(len(channels), 1)
+        self.assertEqual(channels[0]["channel_id"], exact_id)
 
     def test_channel_id_is_stored_on_messages(self):
         store = self.seed_store()

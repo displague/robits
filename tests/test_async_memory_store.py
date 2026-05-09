@@ -170,6 +170,33 @@ class AsyncSQLiteMemoryStoreTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(todos[0]["todo_id"], todo_id)
         self.assertEqual(todos[0]["title"], "Capture drop-in parity tasks.")
 
+    async def test_channel_methods_delegate_through_async_store(self):
+        from robits.memory.sqlite import CHANNEL_AGENT_DM, SOCIAL_PROFESSIONAL
+
+        store = await self.seed_store()
+        channel_id = await store.get_or_create_channel(
+            CHANNEL_AGENT_DM,
+            participants=["SE", "CEO", "SE"],
+            social_distance=SOCIAL_PROFESSIONAL,
+        )
+        same_channel_id = await store.get_or_create_channel(
+            CHANNEL_AGENT_DM,
+            participants=["CEO", "SE"],
+            social_distance=SOCIAL_PROFESSIONAL,
+        )
+        await store.get_or_create_channel(CHANNEL_AGENT_DM, participants=["agent_%"])
+
+        se_channels = await store.list_channels(
+            channel_type=CHANNEL_AGENT_DM,
+            participant="SE",
+        )
+        wildcard_channels = await store.list_channels(participant="agent_%")
+
+        self.assertEqual(channel_id, same_channel_id)
+        self.assertEqual(len(se_channels), 1)
+        self.assertEqual(se_channels[0]["channel_id"], channel_id)
+        self.assertEqual(len(wildcard_channels), 1)
+
 
 if __name__ == "__main__":
     unittest.main()
