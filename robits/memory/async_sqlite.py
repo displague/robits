@@ -774,8 +774,12 @@ class AsyncSQLiteMemoryStore:
             limit=limit,
         )
 
-    async def get_agent_phase(self, agent_id) -> "float | None":
+    async def get_agent_phase(self, agent_id) -> float | None:
         return await self._run_sync("get_agent_phase", agent_id)
 
     async def set_agent_phase(self, agent_id, phase: float) -> None:
         return await self._run_sync("set_agent_phase", agent_id, phase)
+
+    async def get_channel_social_distance(self, channel_id) -> float | None:
+        """Return the social_distance for a channel, or None if not found or unset."""
+        return await self._run_sync("get_channel_social_distance", channel_id)

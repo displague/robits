@@ -21,6 +21,7 @@ from robits.memory.sqlite import (
     CHANNEL_ORG_CHAT,
     SOCIAL_PROFESSIONAL,
     SQLiteMemoryStore,
+    compute_phase_shift,
 )
 from robits.runtime.sandbox import SandboxMetadata
 from robits.runtime.tool_proposals import ToolProposalStore
@@ -2338,14 +2339,12 @@ class Session:
                 # Phase-shift: shift receiver toward sender's phase, weighted by social distance.
                 if self._org_chat_channel_id is not None and sender_phase is not None and receiver_phase is not None:
                     try:
-                        row = memory_store.connection.execute(
-                            "SELECT social_distance FROM channels WHERE channel_id = ?",
-                            (self._org_chat_channel_id,),
-                        ).fetchone()
-                        if row is not None and row["social_distance"] is not None:
-                            from robits.memory.sqlite import compute_phase_shift
+                        social_distance = memory_store.get_channel_social_distance(
+                            self._org_chat_channel_id
+                        )
+                        if social_distance is not None:
                             shifted = compute_phase_shift(
-                                receiver_phase, sender_phase, float(row["social_distance"])
+                                receiver_phase, sender_phase, social_distance
                             )
                             memory_store.set_agent_phase(canonical_receiver, shifted)
                     except Exception:

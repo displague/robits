@@ -158,6 +158,7 @@ class SQLiteMemoryStore:
                 source TEXT,
                 created_at TEXT NOT NULL,
                 metadata_json TEXT NOT NULL DEFAULT '{}',
+                sender_phase REAL,
                 FOREIGN KEY (session_id) REFERENCES sessions(session_id),
                 FOREIGN KEY (sender_agent_id) REFERENCES agents(agent_id),
                 FOREIGN KEY (receiver_agent_id) REFERENCES agents(agent_id),
@@ -367,7 +368,7 @@ class SQLiteMemoryStore:
                 "ALTER TABLE messages ADD COLUMN sender_phase REAL"
             )
 
-    def get_agent_phase(self, agent_id) -> "float | None":
+    def get_agent_phase(self, agent_id) -> float | None:
         """Return the current circadian phase for an agent, or None if not found."""
         row = self.connection.execute(
             "SELECT COALESCE(circadian_phase, 0.5) AS circadian_phase FROM agents WHERE agent_id = ?",
@@ -385,6 +386,16 @@ class SQLiteMemoryStore:
             (clamped, agent_id),
         )
         self.connection.commit()
+
+    def get_channel_social_distance(self, channel_id) -> float | None:
+        """Return the social_distance for a channel, or None if not found or unset."""
+        row = self.connection.execute(
+            "SELECT social_distance FROM channels WHERE channel_id = ?",
+            (channel_id,),
+        ).fetchone()
+        if row is None:
+            return None
+        return row["social_distance"]
 
     def create_session(self, session_id, title=None, started_at=None, metadata=None):
         created_at = started_at or _utc_now()
