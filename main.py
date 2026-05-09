@@ -218,6 +218,7 @@ class ToolRegistry:
                 "builtin_computer_use": builtin_computer_use,
                 "builtin_image_generation": builtin_image_generation,
                 "org_chat_read": org_chat_read,
+                "work_todo_add": work_todo_add,
             },
             local_dict,
         )
@@ -694,6 +695,7 @@ def agent_runtime_context(role=None):
         or getattr(role, "name", None)
     )
     agent_name = getattr(role, "name", None)
+    # runtime_role_name is the participant key (FK-safe); fall back to role.name for headless use.
     canonical_id = getattr(role, "runtime_role_name", None) or agent_name
     primary_id, secondary_id = _get_identity_digests(canonical_id)
     context = {
@@ -938,7 +940,7 @@ def work_todo_add(employee_dict, title, content=None):
     del employee_dict
     if memory_store is None:
         return json.dumps({"error": "memory store not available"})
-    agent_id = getattr(active_tool_caller, "name", None)
+    agent_id = active_tool_caller_name or getattr(active_tool_caller, "name", None)
     if not agent_id:
         return json.dumps({"error": "could not determine caller identity"})
     try:
@@ -1833,7 +1835,8 @@ def interact(self, model, sender, message):
             {"role": "system", "content": self.template},
         ]
     messages = self.conversation_history.get(self.name, [])
-    guidance = _ON_CLOCK_GUIDANCE if clock_state == "on" else _OFF_CLOCK_GUIDANCE
+    effective_clock = getattr(self, "runtime_clock_state", clock_state)
+    guidance = _ON_CLOCK_GUIDANCE if effective_clock == "on" else _OFF_CLOCK_GUIDANCE
     system_content = self.template + guidance + format_agent_context(self)
     if messages and messages[0].get("role") == "system":
         messages[0]["content"] = system_content
@@ -2458,6 +2461,7 @@ class Session:
         role.runtime_event_stream = self.event_stream
         role.runtime_session_id = self.run_id
         role.runtime_tool_results = []
+        role.runtime_clock_state = self.clock_state
         for name, participant in self.participants.items():
             if participant is role:
                 role.runtime_role_name = name

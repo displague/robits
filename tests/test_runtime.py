@@ -2713,6 +2713,121 @@ class OrgDigestTests(unittest.TestCase):
         self.assertEqual(len(org_digests), 0)
 
 
+class OrgChatReadToolFixTests(unittest.TestCase):
+    """Tests for org_chat_read sandbox inclusion and kwargs fix."""
+
+    def test_org_chat_read_in_tool_exec_globals(self):
+        """org_chat_read must be reachable from compiled tool code (not raise NameError)."""
+        # Compile a tiny tool that calls org_chat_read and verify it doesn't NameError.
+        func = main.tool_registry.compile_tool(
+            "_test_org_read", ["limit"], [], "return org_chat_read(employee_dict, limit=1)"
+        )
+        old = main._org_workspace
+        main._org_workspace = None
+        try:
+            result = json.loads(func(employee_dict={}))
+        finally:
+            main._org_workspace = old
+        self.assertIn("note", result)
+
+    def test_org_chat_read_limit_zero_safe(self):
+        result = json.loads(main.org_chat_read({}, limit=0))
+        self.assertEqual(result["lines"], [])
+
+    def test_org_chat_read_negative_limit_safe(self):
+        result = json.loads(main.org_chat_read({}, limit=-5))
+        self.assertEqual(result["lines"], [])
+
+    def test_org_context_not_stored_in_transcript(self):
+        """Org chat context should be injected for the model but not persisted in transcript."""
+        received_model_prompts = []
+
+        class CapturingRole:
+            name = "B"
+            lifecycle_state = "active"
+            conversation_history = {}
+            template = ""
+            max_tokens = 100
+            temperature = 0.0
+            runtime_tool_results = []
+            runtime_event_stream = None
+            runtime_session_id = None
+            runtime_role_name = None
+            runtime_clock_state = "on"
+            allowed_tools = set()
+
+            def interact(self, sender=None, prompt=None):
+                received_model_prompts.append(prompt or "")
+                return "answer"
+
+            def update_group_conversations(self, m):
+                pass
+
+        a = SimpleNamespace(name="A", lifecycle_state="active",
+                            interact=lambda *a, **kw: "initial",
+                            update_group_conversations=lambda m: None)
+        b = CapturingRole()
+        old_lines = main.org_chat_context_lines
+        main.org_chat_context_lines = 5
+        try:
+            session = main.Session(participants={"A": a, "B": b}, clock_state="on")
+            session.transcript.append(main.TranscriptEntry(1, "A", "B", "raw seed", "seed resp"))
+            session.turns_completed = 1
+            session.last_receiver = a
+            session.step("next message")
+        finally:
+            main.org_chat_context_lines = old_lines
+
+        # Model prompt should contain org context
+        self.assertTrue(any("Recent org chat" in p for p in received_model_prompts))
+        # But stored transcript prompt should NOT contain org context
+        last_entry = session.transcript[-1]
+        self.assertNotIn("Recent org chat", last_entry.prompt)
+
+    def test_prepare_agent_runtime_sets_clock_state(self):
+        """prepare_agent_runtime must stamp runtime_clock_state so interact() can read it."""
+        role = SimpleNamespace(name="B", lifecycle_state="active",
+                               interact=lambda *a, **kw: "hi",
+                               update_group_conversations=lambda m: None)
+        session = main.Session(participants={"A": SimpleNamespace(
+            name="A", lifecycle_state="active",
+            interact=lambda *a, **kw: "hi",
+            update_group_conversations=lambda m: None,
+        ), "B": role}, clock_state="off")
+        session.prepare_agent_runtime(role)
+        self.assertEqual(getattr(role, "runtime_clock_state", None), "off")
+
+    def test_interact_uses_runtime_clock_state_for_guidance(self):
+        """main.interact() picks guidance from role.runtime_clock_state, not module global."""
+        captured = []
+
+        def fake_generate(role, model, sender, messages):
+            # Capture the system message content
+            if messages and messages[0].get("role") == "system":
+                captured.append(messages[0]["content"])
+            return "ok"
+
+        role = SimpleNamespace(
+            name="TestBot",
+            template="You are helpful.",
+            conversation_history={},
+            max_tokens=100,
+            temperature=0.0,
+            employee_dict={},
+            runtime_clock_state="off",
+            runtime_session_id=None,
+            runtime_role_name=None,
+            runtime_event_stream=None,
+        )
+        old_provider = main.model_provider
+        main.model_provider = SimpleNamespace(generate=fake_generate)
+        try:
+            main.interact(role, "gpt-4o-mini", "user", "hello")
+        finally:
+            main.model_provider = old_provider
+        self.assertTrue(any("off the clock" in c for c in captured))
+
+
 class ReasoningEffortTests(unittest.TestCase):
     """Tests that ResponsesProvider forwards reasoning_effort when set."""
 
