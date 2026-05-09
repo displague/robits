@@ -1,3 +1,5 @@
 openai
 PyYaml
 termcolor
+open-responses-server
+httpx
