@@ -583,6 +583,92 @@ class SQLiteMemoryStoreTests(unittest.TestCase):
                 agent_id="SE",
             )
 
+    def test_search_cascade_surfaces_parent_digest_for_inner_hits(self):
+        store = self.seed_store()
+        message_id = store.append_message(
+            "session-1",
+            "SE",
+            "HR",
+            "cascade inner content",
+            created_at="2026-05-07T10:00:00+00:00",
+        )
+        digest_id = store.append_memory_digest(
+            "Digest summarising the inner message.",
+            [{"source_table": "messages", "source_id": message_id}],
+            agent_id="SE",
+            session_id="session-1",
+        )
+
+        # Direct FTS on inner content surfaces the message…
+        direct = store.search("cascade inner content", agent_id="SE")
+        # …but cascade should surface the parent digest at the outer level.
+        cascade = store.search_cascade("cascade inner content", agent_id="SE")
+
+        direct_kinds = {r.kind for r in direct}
+        cascade_kinds = {r.kind for r in cascade}
+        cascade_record_ids = {r.record_id for r in cascade}
+
+        self.assertIn("message", direct_kinds)
+        # The outer message hit is preserved…
+        self.assertIn("message", cascade_kinds)
+        # …and the parent digest is also surfaced.
+        self.assertIn("memory_digest", cascade_kinds)
+        self.assertIn(str(digest_id), cascade_record_ids)
+
+    def test_search_cascade_deduplicates_digest_already_in_outer_hits(self):
+        store = self.seed_store()
+        message_id = store.append_message(
+            "session-1",
+            "SE",
+            "HR",
+            "unique term xyzzy",
+            created_at="2026-05-07T10:00:00+00:00",
+        )
+        digest_id = store.append_memory_digest(
+            "Digest with unique term xyzzy in content.",
+            [{"source_table": "messages", "source_id": message_id}],
+            agent_id="SE",
+            session_id="session-1",
+        )
+
+        cascade = store.search_cascade("xyzzy", agent_id="SE")
+
+        digest_hits = [r for r in cascade if r.kind == "memory_digest"]
+        self.assertEqual(len(digest_hits), 1, "Digest should appear exactly once.")
+        self.assertEqual(digest_hits[0].record_id, str(digest_id))
+
+    def test_expand_memory_digest_sources_respects_max_depth(self):
+        store = self.seed_store()
+        message_id = store.append_message("session-1", "CEO", "SE", "Leaf message.")
+        d1 = store.append_memory_digest(
+            "Depth 1 digest.",
+            [{"source_table": "messages", "source_id": message_id}],
+            agent_id="SE",
+            session_id="session-1",
+        )
+        d2 = store.append_memory_digest(
+            "Depth 2 digest.",
+            [{"source_table": "memory_digests", "source_id": d1}],
+            agent_id="SE",
+            session_id="session-1",
+        )
+
+        # max_depth=0 means don't recurse into child digests.
+        depth0 = store.expand_memory_digest_sources(d2, recursive=True, max_depth=0)
+        # max_depth=1 allows one level of recursion into d1 and its raw sources.
+        depth1 = store.expand_memory_digest_sources(d2, recursive=True, max_depth=1)
+
+        depth0_tables = [r.source_table for r in depth0]
+        depth1_tables = [r.source_table for r in depth1]
+
+        # At depth 0 we see the immediate source (d1 digest record).
+        self.assertIn("memory_digests", depth0_tables)
+        self.assertNotIn("messages", depth0_tables)
+
+        # At depth 1 we also see the message inside d1.
+        self.assertIn("memory_digests", depth1_tables)
+        self.assertIn("messages", depth1_tables)
+
     def test_runtime_events_can_be_persisted_and_filtered(self):
         store = self.seed_store()
 

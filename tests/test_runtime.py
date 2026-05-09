@@ -2,9 +2,11 @@ import json
 import os
 import sys
 import tempfile
+import types
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
 from io import StringIO
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -2170,6 +2172,202 @@ class BuiltinToolTests(unittest.TestCase):
         )
         self.assertTrue(result.startswith("Error:"))
         main.tool_registry.clear()
+
+
+class MemoryToolTests(unittest.TestCase):
+    """Tests for memory_search, memory_list_digests, memory_expand_digest in main.py."""
+
+    def setUp(self):
+        self.store_temp = tempfile.TemporaryDirectory()
+        self.workspace_temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.store_temp.cleanup)
+        self.addCleanup(self.workspace_temp.cleanup)
+
+        from robits.memory.sqlite import SQLiteMemoryStore
+
+        self.store = SQLiteMemoryStore(
+            Path(self.store_temp.name) / "mem.sqlite3"
+        )
+        self.addCleanup(self.store.close)
+
+        self.original_store = main.memory_store
+        self.original_workspace = main.agent_workspace_store
+        main.memory_store = self.store
+        main.agent_workspace_store = main.AgentWorkspaceStore(self.workspace_temp.name)
+        self.addCleanup(self._restore)
+
+        # Seed baseline records.
+        self.store.create_session("s1")
+        self.store.upsert_agent("SE", "SoftwareEngineer", "SE")
+
+        # Make main think the tool caller is SE.
+        self._prev_caller = main.active_tool_caller
+        self._prev_caller_name = main.active_tool_caller_name
+        fake_role = SimpleNamespace(name="SE", capabilities=set())
+        main.active_tool_caller = fake_role
+        main.active_tool_caller_name = "SE"
+        self.fake_role = fake_role
+
+    def _restore(self):
+        main.memory_store = self.original_store
+        main.agent_workspace_store = self.original_workspace
+        main.active_tool_caller = self._prev_caller
+        main.active_tool_caller_name = self._prev_caller_name
+
+    # ── cascade search ────────────────────────────────────────────────────────
+
+    def test_memory_search_cascade_true_surfaces_parent_digest(self):
+        msg_id = self.store.append_message("s1", "SE", "SE", "cascade content unique_kw")
+        digest_id = self.store.append_memory_digest(
+            "Digest summary.",
+            [{"source_table": "messages", "source_id": msg_id}],
+            agent_id="SE",
+            session_id="s1",
+        )
+
+        result_json = main.memory_search({}, "SE", "unique_kw", cascade=True)
+        results = json.loads(result_json)
+
+        kinds = {r["kind"] for r in results}
+        self.assertIn("memory_digest", kinds)
+
+    def test_memory_search_cascade_false_returns_only_outer(self):
+        msg_id = self.store.append_message("s1", "SE", "SE", "inner only content abc123")
+        self.store.append_memory_digest(
+            "Digest with inner content.",
+            [{"source_table": "messages", "source_id": msg_id}],
+            agent_id="SE",
+            session_id="s1",
+        )
+
+        result_json = main.memory_search({}, "SE", "abc123", cascade=False)
+        results = json.loads(result_json)
+
+        # Without cascade, only the raw message hit is returned, not the digest.
+        kinds = {r["kind"] for r in results}
+        self.assertIn("message", kinds)
+        self.assertNotIn("memory_digest", kinds)
+
+    # ── large result offloading ───────────────────────────────────────────────
+
+    def test_condense_if_large_returns_raw_when_small(self):
+        small = json.dumps({"ok": True})
+        result = main._condense_if_large("SE", "memory_search", small)
+        self.assertEqual(result, small)
+
+    def test_condense_if_large_caches_and_returns_snippet_when_big(self):
+        big = json.dumps({"data": "x" * (main.memory_cache_threshold + 1)})
+        original_threshold = main.memory_cache_threshold
+        # Lower threshold temporarily.
+        main.memory_cache_threshold = 64
+        try:
+            padded = json.dumps({"data": "y" * 200})
+            result_json = main._condense_if_large("SE", "memory_search", padded)
+        finally:
+            main.memory_cache_threshold = original_threshold
+
+        result = json.loads(result_json)
+        self.assertTrue(result.get("truncated"))
+        self.assertIn("snippet", result)
+        self.assertIn("cache_path", result)
+        self.assertIn(".memory-cache/", result["cache_path"])
+
+    def test_large_memory_search_result_is_offloaded_to_workspace(self):
+        # Insert many records so the result JSON exceeds the cache threshold.
+        for i in range(20):
+            self.store.append_message("s1", "SE", "SE", f"searchable content record number {i} verbosity padding")
+
+        original_threshold = main.memory_cache_threshold
+        main.memory_cache_threshold = 64
+        main.tool_registry.clear()
+        try:
+            result_json = main.memory_search({}, "SE", "searchable content", limit=20)
+            result = json.loads(result_json)
+        finally:
+            main.memory_cache_threshold = original_threshold
+
+        self.assertTrue(result.get("truncated"))
+        cache_path = result.get("cache_path")
+        self.assertIsNotNone(cache_path)
+
+        # The full result should be readable from the workspace.
+        full = main.agent_workspace_store.read("SE", cache_path)
+        self.assertFalse(full["truncated"])
+        self.assertIn("searchable content", full["content"])
+
+    # ── expand digest depth limit ─────────────────────────────────────────────
+
+    def test_expand_digest_respects_max_depth_param(self):
+        msg_id = self.store.append_message("s1", "SE", "SE", "leaf node content")
+        d1 = self.store.append_memory_digest(
+            "Depth-1 digest.",
+            [{"source_table": "messages", "source_id": msg_id}],
+            agent_id="SE",
+            session_id="s1",
+        )
+        d2 = self.store.append_memory_digest(
+            "Depth-2 digest.",
+            [{"source_table": "memory_digests", "source_id": d1}],
+            agent_id="SE",
+            session_id="s1",
+        )
+
+        result_json = main.memory_expand_digest({}, "SE", d2, recursive=True, max_depth=0)
+        rows = json.loads(result_json)
+
+        tables = [r["source_table"] for r in rows]
+        self.assertIn("memory_digests", tables)
+        self.assertNotIn("messages", tables)
+
+    def test_expand_digest_max_depth_capped_by_global_limit(self):
+        original = main.memory_max_depth
+        main.memory_max_depth = 1
+        try:
+            msg_id = self.store.append_message("s1", "SE", "SE", "deep leaf")
+            d1 = self.store.append_memory_digest(
+                "d1", [{"source_table": "messages", "source_id": msg_id}], agent_id="SE"
+            )
+            d2 = self.store.append_memory_digest(
+                "d2", [{"source_table": "memory_digests", "source_id": d1}], agent_id="SE"
+            )
+            d3 = self.store.append_memory_digest(
+                "d3", [{"source_table": "memory_digests", "source_id": d2}], agent_id="SE"
+            )
+
+            # Ask for max_depth=99 but global limit is 1.
+            result_json = main.memory_expand_digest({}, "SE", d3, recursive=True, max_depth=99)
+            rows = json.loads(result_json)
+        finally:
+            main.memory_max_depth = original
+
+        tables = [r["source_table"] for r in rows]
+        # At global max_depth=1 we see d2 (depth 0) and d1 (depth 1) but not messages (depth 2).
+        self.assertIn("memory_digests", tables)
+        self.assertNotIn("messages", tables)
+
+    # ── agent isolation ───────────────────────────────────────────────────────
+
+    def test_memory_search_blocked_for_different_agent(self):
+        self.store.upsert_agent("HR", "HR", "HR")
+        self.store.append_message("s1", "HR", "HR", "private HR content")
+
+        # Caller is SE, trying to inspect HR's memory.
+        result = main.memory_search({}, "HR", "private HR content")
+        self.assertTrue(result.startswith("Error:"))
+
+    def test_memory_list_digests_blocked_for_different_agent(self):
+        self.store.upsert_agent("HR", "HR", "HR")
+        result = main.memory_list_digests({}, "HR")
+        self.assertTrue(result.startswith("Error:"))
+
+    def test_memory_expand_digest_blocked_for_different_agent_digest(self):
+        self.store.upsert_agent("HR", "HR", "HR")
+        msg_id = self.store.append_message("s1", "HR", "HR", "HR private.")
+        digest_id = self.store.append_memory_digest(
+            "HR digest.", [{"source_table": "messages", "source_id": msg_id}], agent_id="HR"
+        )
+        result = main.memory_expand_digest({}, "HR", digest_id)
+        self.assertTrue(result.startswith("Error:"))
 
 
 if __name__ == "__main__":

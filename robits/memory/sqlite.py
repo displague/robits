@@ -933,11 +933,13 @@ class SQLiteMemoryStore:
         digest_id,
         recursive=False,
         include_digest_records=True,
+        max_depth=None,
     ):
         if recursive:
             return self._expand_memory_digest_sources_recursive(
                 int(digest_id),
                 include_digest_records=include_digest_records,
+                max_depth=max_depth,
             )
         expanded = []
         for source_ref in self.get_memory_digest_sources(digest_id):
@@ -1109,6 +1111,108 @@ class SQLiteMemoryStore:
         ).fetchall()
         return [MemorySearchResult(**dict(row)) for row in rows]
 
+    def search_cascade(
+        self,
+        query,
+        agent_id=None,
+        session_id=None,
+        relationship_type=None,
+        conversation_type=None,
+        source=None,
+        start_at=None,
+        end_at=None,
+        limit=20,
+    ):
+        """Search outer FTS records and surface parent digests for inner hits.
+
+        Fetch more than ``limit`` inner records so that cascade-surfaced parent
+        digests have room after the final ``outer[:limit]`` trim.
+        """
+        inner_limit = max(limit, limit * 2)
+        outer = self.search(
+            query,
+            agent_id=agent_id,
+            session_id=session_id,
+            relationship_type=relationship_type,
+            conversation_type=conversation_type,
+            source=source,
+            start_at=start_at,
+            end_at=end_at,
+            limit=inner_limit,
+        )
+
+        # Map FTS kind values to their canonical source_table names so we can
+        # look up whether each hit is a source of a parent digest.
+        _kind_to_table: dict[str, str] = {
+            "message": "messages",
+            "thought": "thoughts",
+            "tool_call": "tool_calls",
+        }
+
+        # Group non-digest outer hits by their source_table.
+        source_ids_by_table: dict[str, list[str]] = {
+            "messages": [],
+            "thoughts": [],
+            "tool_calls": [],
+            "memory_entries": [],
+        }
+        outer_digest_ids: set[str] = set()
+        for result in outer:
+            if result.kind == "memory_digest":
+                outer_digest_ids.add(result.record_id)
+                continue
+            table = _kind_to_table.get(result.kind, "memory_entries")
+            source_ids_by_table[table].append(result.record_id)
+
+        # For each non-digest outer hit, find accessible parent digests that
+        # reference it as a source.  Surface those digests at the outer level.
+        for source_table, source_ids in source_ids_by_table.items():
+            if not source_ids:
+                continue
+            placeholders = ", ".join("?" * len(source_ids))
+            params: list[Any] = [source_table] + source_ids
+            agent_clauses = []
+            if agent_id is not None:
+                agent_clauses.append("md.agent_id = ?")
+                params.append(agent_id)
+            params.append(limit)
+            agent_filter = f"AND ({' OR '.join(agent_clauses)})" if agent_clauses else ""
+            rows = self.connection.execute(
+                f"""
+                SELECT DISTINCT md.digest_id, md.agent_id, md.session_id,
+                       md.source, md.relationship_type, md.conversation_type,
+                       md.created_at, md.content
+                FROM memory_digest_sources mds
+                JOIN memory_digests md ON md.digest_id = mds.digest_id
+                WHERE mds.source_table = ?
+                  AND mds.source_id IN ({placeholders})
+                  AND md.accessibility = 'agent'
+                  AND md.system_only = 0
+                  {agent_filter}
+                LIMIT ?
+                """,
+                params,
+            ).fetchall()
+            for row in rows:
+                digest_id_str = str(row["digest_id"])
+                if digest_id_str not in outer_digest_ids:
+                    outer.append(
+                        MemorySearchResult(
+                            kind="memory_digest",
+                            record_id=digest_id_str,
+                            content=row["content"],
+                            agent_id=row["agent_id"],
+                            session_id=row["session_id"],
+                            source=row["source"],
+                            relationship_type=row["relationship_type"],
+                            conversation_type=row["conversation_type"],
+                            created_at=row["created_at"],
+                        )
+                    )
+                    outer_digest_ids.add(digest_id_str)
+
+        return outer[:limit]
+
     def _index(
         self,
         kind,
@@ -1214,11 +1318,14 @@ class SQLiteMemoryStore:
         self,
         digest_id,
         include_digest_records=True,
+        max_depth=None,
     ):
         expanded: list[ExpandedMemoryDigestSource] = []
 
         def visit(current_digest_id, depth, path, visited):
             if current_digest_id in visited:
+                return
+            if max_depth is not None and depth > max_depth:
                 return
             next_visited = visited | {current_digest_id}
             for source_ref in self.get_memory_digest_sources(current_digest_id):
