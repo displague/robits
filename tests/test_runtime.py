@@ -41,6 +41,20 @@ class FakeCreate:
         return self.responses.pop(0)
 
 
+class FakeHTTPResponse:
+    def __init__(self, payload):
+        self.payload = payload
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        return False
+
+    def read(self):
+        return json.dumps(self.payload).encode()
+
+
 class RecordingStream:
     def __init__(self):
         self.content = ""
@@ -665,6 +679,8 @@ class RuntimeTests(unittest.TestCase):
 
         tool_names = {tool["name"] for tool in fake_client.responses.create.calls[0]["tools"]}
         self.assertIn("tools__propose", tool_names)
+        self.assertIn("builtin__web_search", tool_names)
+        self.assertIn("builtin__weather_lookup", tool_names)
         self.assertNotIn("org__create_role", tool_names)
 
     def test_disallowed_tool_call_is_rejected_at_runtime(self):
@@ -2036,6 +2052,61 @@ class BuiltinToolTests(unittest.TestCase):
             main.builtin_search_url = original
         self.assertTrue(result.startswith("Error:"))
 
+    # ── builtin.weather_lookup ───────────────────────────────────────────────
+
+    def test_weather_lookup_validates_zipcode(self):
+        result = main.builtin_weather_lookup({}, "")
+        self.assertTrue(result.startswith("Error:"))
+
+    def test_weather_lookup_returns_current_forecast(self):
+        def fake_urlopen(request, timeout=15):
+            url = request.full_url
+            if url == "https://api.zippopotam.us/us/08234":
+                return FakeHTTPResponse(
+                    {
+                        "places": [
+                            {
+                                "place name": "Egg Harbor Township",
+                                "state abbreviation": "NJ",
+                                "latitude": "39.3965",
+                                "longitude": "-74.5699",
+                            }
+                        ]
+                    }
+                )
+            if url == "https://api.weather.gov/points/39.3965,-74.5699":
+                return FakeHTTPResponse({"properties": {"forecast": "https://api.weather.gov/gridpoints/PHI/48,37/forecast"}})
+            if url == "https://api.weather.gov/gridpoints/PHI/48,37/forecast":
+                return FakeHTTPResponse(
+                    {
+                        "properties": {
+                            "periods": [
+                                {
+                                    "name": "Tonight",
+                                    "startTime": "2026-05-09T18:00:00-04:00",
+                                    "temperature": 55,
+                                    "temperatureUnit": "F",
+                                    "windSpeed": "5 mph",
+                                    "windDirection": "E",
+                                    "shortForecast": "Mostly Clear",
+                                    "detailedForecast": "Mostly clear, with a low around 55.",
+                                }
+                            ]
+                        }
+                    }
+                )
+            raise AssertionError(f"Unexpected URL: {url}")
+
+        with patch("urllib.request.urlopen", side_effect=fake_urlopen):
+            result_json = main.builtin_weather_lookup({}, "08234")
+
+        result = json.loads(result_json)
+        self.assertEqual(result["zipcode"], "08234")
+        self.assertEqual(result["location"], "Egg Harbor Township, NJ")
+        self.assertEqual(result["source"], "weather.gov")
+        self.assertEqual(result["temperature"], 55)
+        self.assertEqual(result["short_forecast"], "Mostly Clear")
+
     # ── builtin.file_search ──────────────────────────────────────────────────
 
     def test_file_search_finds_text_in_workspace_file(self):
@@ -2141,6 +2212,7 @@ class BuiltinToolTests(unittest.TestCase):
             sorted(builtin_names),
             sorted([
                 "builtin.web_search",
+                "builtin.weather_lookup",
                 "builtin.file_search",
                 "builtin.shell_run",
                 "builtin.tool_search",

@@ -220,6 +220,7 @@ class ToolRegistry:
                 "workspace_delete": workspace_delete,
                 "current_agent_context": current_agent_context,
                 "builtin_web_search": builtin_web_search,
+                "builtin_weather_lookup": builtin_weather_lookup,
                 "builtin_file_search": builtin_file_search,
                 "builtin_shell_run": builtin_shell_run,
                 "builtin_tool_search": builtin_tool_search,
@@ -1693,6 +1694,73 @@ def builtin_web_search(employee_dict, query, num_results=5):
     return json.dumps(results[:n], sort_keys=True)
 
 
+def _fetch_json_url(url, headers=None, timeout=15):
+    import urllib.request
+    req = urllib.request.Request(url, headers=headers or {"User-Agent": "robits/1.0"})
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        return json.loads(resp.read().decode())
+
+
+def builtin_weather_lookup(employee_dict, zipcode, country="US", date=None):
+    del employee_dict, date
+    zipcode = str(zipcode or "").strip()
+    country = str(country or "US").strip().lower()
+    if not zipcode:
+        return "Error: ZIP/postal code must be provided."
+    if country not in {"us", "usa"}:
+        return "Error: builtin.weather_lookup currently supports US ZIP codes only."
+    try:
+        import urllib.parse
+        zip_url = f"https://api.zippopotam.us/us/{urllib.parse.quote(zipcode)}"
+        zip_data = _fetch_json_url(zip_url)
+        places = zip_data.get("places") or []
+        if not places:
+            return f"Error: No location found for ZIP code {zipcode}."
+        place = places[0]
+        latitude = float(place["latitude"])
+        longitude = float(place["longitude"])
+        location = ", ".join(
+            part
+            for part in [
+                place.get("place name"),
+                place.get("state abbreviation") or place.get("state"),
+            ]
+            if part
+        )
+        nws_headers = {
+            "Accept": "application/geo+json",
+            "User-Agent": "robits/1.0 (weather lookup; contact unavailable)",
+        }
+        points = _fetch_json_url(
+            f"https://api.weather.gov/points/{latitude:.4f},{longitude:.4f}",
+            headers=nws_headers,
+        )
+        forecast_url = (points.get("properties") or {}).get("forecast")
+        if not forecast_url:
+            return f"Error: Weather.gov did not provide a forecast URL for ZIP code {zipcode}."
+        forecast = _fetch_json_url(forecast_url, headers=nws_headers)
+        periods = (forecast.get("properties") or {}).get("periods") or []
+        if not periods:
+            return f"Error: Weather.gov returned no forecast periods for ZIP code {zipcode}."
+        period = periods[0]
+        result = {
+            "zipcode": zipcode,
+            "location": location,
+            "source": "weather.gov",
+            "period": period.get("name"),
+            "start_time": period.get("startTime"),
+            "temperature": period.get("temperature"),
+            "temperature_unit": period.get("temperatureUnit"),
+            "wind_speed": period.get("windSpeed"),
+            "wind_direction": period.get("windDirection"),
+            "short_forecast": period.get("shortForecast"),
+            "detailed_forecast": period.get("detailedForecast"),
+        }
+        return json.dumps(result, sort_keys=True)
+    except Exception as exc:
+        return f"Error: Weather lookup failed: {exc}"
+
+
 def builtin_file_search(employee_dict, agent_name, query, path="", max_results=10):
     del employee_dict
     if not isinstance(query, str) or not query.strip():
@@ -1889,7 +1957,14 @@ Only say that you created, changed, or called a tool after the runtime has retur
         self.lifecycle_state = "active"
         self.lifecycle_events = []
         self.capabilities = set()
-        self.allowed_tools = {"agent.*", "memory.search", "memory.list_digests", "memory.expand_digest"}
+        self.allowed_tools = {
+            "agent.*",
+            "builtin.web_search",
+            "builtin.weather_lookup",
+            "memory.search",
+            "memory.list_digests",
+            "memory.expand_digest",
+        }
         self.alarms = []
         self.sandbox_metadata = SandboxMetadata.disabled(self.name)
         self.runtime_event_stream = None
