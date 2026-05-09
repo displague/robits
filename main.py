@@ -448,7 +448,7 @@ def _emit_role_tool_event(role, event_type, payload):
     if event_stream is not None and session_id is not None:
         event_stream.emit(event_type, session_id, payload)
     if memory_store is not None and event_type in {"tool_call.executed", "tool_call.failed"}:
-        agent_id = getattr(role, "name", None) or getattr(role, "runtime_role_name", None)
+        agent_id = getattr(role, "runtime_role_name", None) or getattr(role, "name", None)
         if agent_id:
             try:
                 memory_store.append_tool_call(
@@ -2057,6 +2057,8 @@ class Session:
         self.transcript = []
         self.turns_completed = 0
         self.last_receiver = self.participants.get("CEO") or next(iter(self.participants.values()))
+        # Map role.name → participant dict key for FK-safe persistence.
+        self._name_to_key = {getattr(p, "name", k): k for k, p in self.participants.items()}
         self.event_stream.emit(
             "session.created",
             self.run_id,
@@ -2178,20 +2180,22 @@ class Session:
             },
         )
         if memory_store is not None:
+            canonical_sender = self._canonical_agent_id(sender)
+            canonical_receiver = self._canonical_agent_id(receiver)
             try:
                 if prompt:
                     memory_store.append_message(
                         session_id=self.run_id,
-                        sender_agent_id=sender,
-                        receiver_agent_id=receiver,
+                        sender_agent_id=canonical_sender,
+                        receiver_agent_id=canonical_receiver,
                         content=prompt,
                         kind="message",
                     )
                 if response:
                     memory_store.append_message(
                         session_id=self.run_id,
-                        sender_agent_id=receiver,
-                        receiver_agent_id=sender,
+                        sender_agent_id=canonical_receiver,
+                        receiver_agent_id=canonical_sender,
                         content=response,
                         kind="message",
                     )
@@ -2218,17 +2222,12 @@ class Session:
             return
         source_refs = []
         try:
-            recent_msg_rows = memory_store.connection.execute(
-                """
-                SELECT message_id FROM messages
-                WHERE session_id = ?
-                ORDER BY message_id DESC LIMIT ?
-                """,
-                (self.run_id, memory_digest_interval * 2),
-            ).fetchall()
+            msg_ids = memory_store.list_recent_message_ids(
+                self.run_id, memory_digest_interval * 2
+            )
             source_refs = [
-                {"source_table": "messages", "source_id": row["message_id"]}
-                for row in recent_msg_rows
+                {"source_table": "messages", "source_id": mid}
+                for mid in msg_ids
             ]
         except Exception:
             pass
@@ -2252,7 +2251,7 @@ class Session:
         if memory_store is not None:
             try:
                 memory_store.append_thought(
-                    agent_id=agent_name,
+                    agent_id=self._canonical_agent_id(agent_name),
                     content=content,
                     session_id=self.run_id,
                     visibility=visibility,
@@ -2268,6 +2267,10 @@ class Session:
             },
             visibility=visibility,
         )
+
+    def _canonical_agent_id(self, name):
+        """Return the participant dict key for a role, resolving role.name → key mismatches."""
+        return self._name_to_key.get(name, name)
 
     def sync_scheduler_participants(self):
         for name, participant in self.participants.items():

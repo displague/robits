@@ -2390,6 +2390,7 @@ class SessionMemoryCaptureTests(unittest.TestCase):
         main.memory_digest_interval = self.original_digest_interval
 
     def _make_session(self):
+        # "SE" key with name="SoftwareEngineer" exercises key≠name FK resolution.
         participants = {
             "A": SimpleNamespace(
                 name="A",
@@ -2398,8 +2399,8 @@ class SessionMemoryCaptureTests(unittest.TestCase):
                 update_group_conversations=lambda m: None,
                 runtime_tool_results=[],
             ),
-            "B": SimpleNamespace(
-                name="B",
+            "SE": SimpleNamespace(
+                name="SoftwareEngineer",
                 lifecycle_state="active",
                 interact=lambda *a, **kw: "world",
                 update_group_conversations=lambda m: None,
@@ -2424,13 +2425,13 @@ class SessionMemoryCaptureTests(unittest.TestCase):
     def test_agents_are_upserted_on_session_init(self):
         session = self._make_session()
         agents = self.store.connection.execute(
-            "SELECT agent_id FROM agents WHERE agent_id IN ('A', 'B')"
+            "SELECT agent_id FROM agents WHERE agent_id IN ('A', 'SE')"
         ).fetchall()
-        self.assertEqual({r["agent_id"] for r in agents}, {"A", "B"})
+        self.assertEqual({r["agent_id"] for r in agents}, {"A", "SE"})
 
     def test_turn_messages_are_persisted(self):
         session = self._make_session()
-        session.record_turn("A", "B", "hello prompt", "world response")
+        session.record_turn("A", "SE", "hello prompt", "world response")
         rows = self.store.connection.execute(
             "SELECT content FROM messages WHERE session_id = ?", (session.run_id,)
         ).fetchall()
@@ -2440,7 +2441,7 @@ class SessionMemoryCaptureTests(unittest.TestCase):
 
     def test_empty_prompt_and_response_not_persisted(self):
         session = self._make_session()
-        session.record_turn("A", "B", "", "")
+        session.record_turn("A", "SE", "", "")
         rows = self.store.connection.execute(
             "SELECT COUNT(*) AS n FROM messages WHERE session_id = ?", (session.run_id,)
         ).fetchone()
@@ -2468,8 +2469,8 @@ class SessionMemoryCaptureTests(unittest.TestCase):
     def test_auto_digest_fires_at_interval(self):
         main.memory_digest_interval = 2
         session = self._make_session()
-        session.record_turn("A", "B", "turn one prompt", "turn one response")
-        session.record_turn("A", "B", "turn two prompt", "turn two response")
+        session.record_turn("A", "SE", "turn one prompt", "turn one response")
+        session.record_turn("A", "SE", "turn two prompt", "turn two response")
         rows = self.store.connection.execute(
             "SELECT digest_id FROM memory_digests WHERE session_id = ?", (session.run_id,)
         ).fetchall()
@@ -2478,11 +2479,34 @@ class SessionMemoryCaptureTests(unittest.TestCase):
     def test_auto_digest_not_fired_before_interval(self):
         main.memory_digest_interval = 5
         session = self._make_session()
-        session.record_turn("A", "B", "only one turn", "response")
+        session.record_turn("A", "SE", "only one turn", "response")
         rows = self.store.connection.execute(
             "SELECT digest_id FROM memory_digests WHERE session_id = ?", (session.run_id,)
         ).fetchall()
         self.assertEqual(len(rows), 0)
+
+    def test_mismatched_key_name_uses_participant_key_for_messages(self):
+        """SE key with role.name='SoftwareEngineer' must persist under key 'SE'."""
+        session = self._make_session()
+        # record_turn with role.name values — should be resolved to participant keys.
+        session.record_turn("SoftwareEngineer", "A", "hi from SE", "hi back")
+        rows = self.store.connection.execute(
+            "SELECT sender_agent_id, receiver_agent_id FROM messages WHERE session_id = ?",
+            (session.run_id,),
+        ).fetchall()
+        agent_ids = {r["sender_agent_id"] for r in rows} | {r["receiver_agent_id"] for r in rows}
+        self.assertIn("SE", agent_ids)
+        self.assertNotIn("SoftwareEngineer", agent_ids)
+
+    def test_mismatched_key_name_uses_participant_key_for_thoughts(self):
+        """Thought recorded under role.name='SoftwareEngineer' must land on key 'SE'."""
+        session = self._make_session()
+        session.record_thought("SoftwareEngineer", "thinking hard")
+        rows = self.store.connection.execute(
+            "SELECT agent_id FROM thoughts WHERE session_id = ?", (session.run_id,)
+        ).fetchall()
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["agent_id"], "SE")
 
     def test_lifecycle_event_persisted_as_memory_entry(self):
         role = SimpleNamespace(
