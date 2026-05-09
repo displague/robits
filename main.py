@@ -215,6 +215,7 @@ class ToolRegistry:
                 "builtin_mcp_call": builtin_mcp_call,
                 "builtin_computer_use": builtin_computer_use,
                 "builtin_image_generation": builtin_image_generation,
+                "org_chat_read": org_chat_read,
             },
             local_dict,
         )
@@ -681,6 +682,7 @@ def agent_runtime_context(role=None):
         or getattr(role, "name", None)
     )
     agent_name = getattr(role, "name", None)
+    canonical_id = getattr(role, "runtime_role_name", None) or agent_name
     context = {
         "agent_name": agent_name,
         "role_name": role_name,
@@ -690,7 +692,7 @@ def agent_runtime_context(role=None):
         "current_date_local": now_local.date().isoformat(),
         "timezone": _runtime_timezone_name(local_tz),
         "location": default_location or None,
-        "identity_digest": _latest_identity_digest_content(agent_name) if agent_name else None,
+        "identity_digest": _latest_identity_digest_content(canonical_id) if canonical_id else None,
     }
     return {key: value for key, value in context.items() if value is not None}
 
@@ -903,8 +905,11 @@ def org_chat_read(employee_dict, limit=20):
         result = _org_workspace.read("org", "org_chat.jsonl")
     except Exception:
         return json.dumps({"lines": [], "note": "no org chat history yet"})
+    effective_limit = max(0, min(int(limit or 20), 100))
+    if effective_limit == 0:
+        return json.dumps({"lines": [], "total": 0})
     all_lines = [ln for ln in result["content"].splitlines() if ln.strip()]
-    tail = all_lines[-int(limit):]
+    tail = all_lines[-effective_limit:]
     parsed = []
     for ln in tail:
         try:
@@ -2428,15 +2433,15 @@ class Session:
         reminders = due_alarm_reminders(routed.receiver)
         if reminders:
             prompt = "\n".join(reminders + [prompt])
-        prompt = prepend_verified_tool_results(
+        raw_prompt = prepend_verified_tool_results(
             prompt,
             self.recent_system_events() + system_events,
         )
+        # Inject org chat context for the model only — not stored in transcript to avoid bloat.
         org_context = format_org_chat_context(self.transcript, org_chat_context_lines)
-        if org_context:
-            prompt = org_context + prompt
+        model_prompt = org_context + raw_prompt if org_context else raw_prompt
         self.prepare_agent_runtime(routed.receiver)
-        response = routed.receiver.interact(sender.name, prompt)
+        response = routed.receiver.interact(sender.name, model_prompt)
         response = "" if response is None else response
         native_tool_events = list(getattr(routed.receiver, "runtime_tool_results", []))
         if native_tool_events:
@@ -2452,7 +2457,7 @@ class Session:
         self.record_turn(
             sender=sender.name,
             receiver=routed.receiver.name,
-            prompt=prompt,
+            prompt=raw_prompt,
             response=response,
             directed=routed.directed,
             system_events=system_events,

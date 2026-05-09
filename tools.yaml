@@ -267,8 +267,8 @@
   system_tool: false
   grantable: true
   description: >
-    Read recent org chat history. Returns the last `limit` turns of inter-agent
-    conversation as a JSON array. Use this to catch up on what other agents discussed.
+    Read recent org chat history. Returns a JSON object with `lines` (array of turn objects) and `total` (total turns available) fields.
+    Use this to catch up on what other agents discussed.
   parameters:
     type: object
     properties:
@@ -278,7 +278,7 @@
         default: 20
     required: []
   code: |
-    return org_chat_read(employee_dict, limit=min(int(kwargs.get("limit", 20)), 100))
+    return org_chat_read(employee_dict, limit=min(int(limit if limit is not None else 20), 100))
 - name: agent.create_alarm
   required_capabilities: []
   owner_capability: agent
