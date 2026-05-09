@@ -2381,13 +2381,25 @@ class SessionMemoryCaptureTests(unittest.TestCase):
 
         self.original_store = main.memory_store
         self.original_digest_interval = main.memory_digest_interval
+        self.original_digest_context_chars = main.memory_digest_context_chars
+        self.original_digest_elapsed_seconds = main.memory_digest_elapsed_seconds
+        self.original_identity_digest_interval = main.memory_identity_digest_interval
+        self.original_goal_digest_interval = main.memory_goal_digest_interval
         main.memory_store = self.store
         main.memory_digest_interval = 0
+        main.memory_digest_context_chars = 0
+        main.memory_digest_elapsed_seconds = 0
+        main.memory_identity_digest_interval = 0
+        main.memory_goal_digest_interval = 0
         self.addCleanup(self._restore)
 
     def _restore(self):
         main.memory_store = self.original_store
         main.memory_digest_interval = self.original_digest_interval
+        main.memory_digest_context_chars = self.original_digest_context_chars
+        main.memory_digest_elapsed_seconds = self.original_digest_elapsed_seconds
+        main.memory_identity_digest_interval = self.original_identity_digest_interval
+        main.memory_goal_digest_interval = self.original_goal_digest_interval
 
     def _make_session(self):
         # "SE" key with name="SoftwareEngineer" exercises key≠name FK resolution.
@@ -2447,6 +2459,15 @@ class SessionMemoryCaptureTests(unittest.TestCase):
         ).fetchone()
         self.assertEqual(rows["n"], 0)
 
+    def test_passive_turn_prompt_not_persisted_as_memory_message(self):
+        session = self._make_session()
+        session.record_turn("A", "SE", "already expressed prompt", "")
+        rows = self.store.connection.execute(
+            "SELECT COUNT(*) AS n FROM messages WHERE session_id = ?", (session.run_id,)
+        ).fetchone()
+        self.assertEqual(rows["n"], 0)
+        self.assertFalse(session.transcript[-1].memory_recorded)
+
     def test_thought_is_persisted(self):
         session = self._make_session()
         session.record_thought("A", "my private thought")
@@ -2484,6 +2505,68 @@ class SessionMemoryCaptureTests(unittest.TestCase):
             "SELECT digest_id FROM memory_digests WHERE session_id = ?", (session.run_id,)
         ).fetchall()
         self.assertEqual(len(rows), 0)
+
+    def test_auto_digest_fires_on_context_char_threshold(self):
+        main.memory_digest_context_chars = 20
+        session = self._make_session()
+        session.record_turn("A", "SE", "short", "this response is long enough")
+        rows = self.store.connection.execute(
+            "SELECT metadata_json FROM memory_digests WHERE session_id = ?", (session.run_id,)
+        ).fetchall()
+        self.assertGreater(len(rows), 0)
+        self.assertIn("context_chars", rows[0]["metadata_json"])
+
+    def test_auto_digest_fires_on_elapsed_activity_threshold(self):
+        main.memory_digest_elapsed_seconds = 1
+        session = self._make_session()
+        session._last_digest_at -= 2
+        session.record_turn("A", "SE", "elapsed prompt", "elapsed response")
+        rows = self.store.connection.execute(
+            "SELECT metadata_json FROM memory_digests WHERE session_id = ?", (session.run_id,)
+        ).fetchall()
+        self.assertGreater(len(rows), 0)
+        self.assertIn("elapsed_seconds", rows[0]["metadata_json"])
+
+    def test_passive_turn_does_not_trigger_auto_digest(self):
+        main.memory_digest_context_chars = 1
+        session = self._make_session()
+        session.record_turn("A", "SE", "large but passive prompt", "")
+        rows = self.store.connection.execute(
+            "SELECT digest_id FROM memory_digests WHERE session_id = ?", (session.run_id,)
+        ).fetchall()
+        self.assertEqual(len(rows), 0)
+
+    def test_identity_and_goal_interval_digests_fire(self):
+        main.memory_identity_digest_interval = 1
+        main.memory_goal_digest_interval = 1
+        session = self._make_session()
+        session.record_turn("A", "SE", "identity prompt", "goal response")
+        rows = self.store.connection.execute(
+            "SELECT digest_type FROM memory_digests WHERE session_id = ?", (session.run_id,)
+        ).fetchall()
+        digest_types = {row["digest_type"] for row in rows}
+        self.assertIn("identity", digest_types)
+        self.assertIn("goal_short_term", digest_types)
+
+    def test_passive_turn_does_not_advance_identity_or_goal_checkpoint_intervals(self):
+        main.memory_identity_digest_interval = 2
+        main.memory_goal_digest_interval = 2
+        session = self._make_session()
+        session.record_turn("A", "SE", "first meaningful prompt", "first response")
+        session.record_turn("A", "SE", "passive prompt", "")
+        rows = self.store.connection.execute(
+            "SELECT digest_type FROM memory_digests WHERE session_id = ?", (session.run_id,)
+        ).fetchall()
+        self.assertNotIn("identity", {row["digest_type"] for row in rows})
+        self.assertNotIn("goal_short_term", {row["digest_type"] for row in rows})
+
+        session.record_turn("A", "SE", "second meaningful prompt", "second response")
+        rows = self.store.connection.execute(
+            "SELECT digest_type FROM memory_digests WHERE session_id = ?", (session.run_id,)
+        ).fetchall()
+        digest_types = {row["digest_type"] for row in rows}
+        self.assertIn("identity", digest_types)
+        self.assertIn("goal_short_term", digest_types)
 
     def test_mismatched_key_name_uses_participant_key_for_messages(self):
         """SE key with role.name='SoftwareEngineer' must persist under key 'SE'."""

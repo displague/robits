@@ -4,7 +4,12 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from robits.memory import AsyncSQLiteMemoryStore, SQLiteMemoryStore
+from robits.memory import (
+    AsyncMemoryStoreProtocol,
+    AsyncSQLiteMemoryStore,
+    MemoryStoreProtocol,
+    SQLiteMemoryStore,
+)
 
 
 class AsyncSQLiteMemoryStoreTests(unittest.IsolatedAsyncioTestCase):
@@ -154,6 +159,81 @@ class AsyncSQLiteMemoryStoreTests(unittest.IsolatedAsyncioTestCase):
             if not name.startswith("_")
         }
         self.assertTrue(sync_public.issubset(async_public))
+
+    async def test_async_store_public_api_accepts_sync_store_parameters(self):
+        for name, sync_member in inspect.getmembers(SQLiteMemoryStore, inspect.isfunction):
+            if name.startswith("_"):
+                continue
+            async_member = getattr(AsyncSQLiteMemoryStore, name)
+            sync_params = inspect.signature(sync_member).parameters
+            async_params = inspect.signature(async_member).parameters
+            has_var_kwargs = any(
+                param.kind == inspect.Parameter.VAR_KEYWORD
+                for param in async_params.values()
+            )
+            missing = [
+                param_name for param_name in sync_params
+                if param_name != "self" and param_name not in async_params
+            ]
+            self.assertFalse(
+                missing and not has_var_kwargs,
+                f"{name} missing parameters: {missing}",
+            )
+            required_extra = [
+                param_name for param_name, param in async_params.items()
+                if (
+                    param_name not in sync_params
+                    and param_name != "self"
+                    and param.default is inspect.Parameter.empty
+                    and param.kind
+                    in {
+                        inspect.Parameter.POSITIONAL_ONLY,
+                        inspect.Parameter.POSITIONAL_OR_KEYWORD,
+                        inspect.Parameter.KEYWORD_ONLY,
+                    }
+                )
+            ]
+            self.assertFalse(
+                required_extra,
+                f"{name} has required extra parameters: {required_extra}",
+            )
+
+    async def test_memory_store_protocols_match_concrete_stores(self):
+        store = await self.seed_store()
+        sync_store = SQLiteMemoryStore(store.path)
+        self.addCleanup(sync_store.close)
+
+        self.assertIsInstance(sync_store, MemoryStoreProtocol)
+        self.assertIsInstance(store, AsyncMemoryStoreProtocol)
+
+    async def test_protocols_spell_out_key_memory_method_signatures(self):
+        key_methods = {
+            "append_message",
+            "append_thought",
+            "append_todo",
+            "append_tool_call",
+            "append_memory_entry",
+            "append_memory_digest",
+            "append_runtime_event",
+            "seed_memory_digest",
+            "seed_identity_and_goal_digests",
+            "list_memory_digests",
+            "search",
+            "search_cascade",
+        }
+        for protocol in (MemoryStoreProtocol, AsyncMemoryStoreProtocol):
+            for name in key_methods:
+                params = inspect.signature(getattr(protocol, name)).parameters.values()
+                wildcard_params = {
+                    param.kind
+                    for param in params
+                    if param.kind
+                    in {
+                        inspect.Parameter.VAR_POSITIONAL,
+                        inspect.Parameter.VAR_KEYWORD,
+                    }
+                }
+                self.assertFalse(wildcard_params, f"{protocol.__name__}.{name} uses wildcards")
 
     async def test_async_channel_create_and_list(self):
         from robits.memory.sqlite import CHANNEL_AGENT_DM, SOCIAL_FRIENDLY

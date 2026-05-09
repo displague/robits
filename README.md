@@ -107,7 +107,13 @@ Relevant environment variables:
 - `ROBITS_MAX_PARALLELISM`: maximum concurrent model calls, default `1`.
 - `ROBITS_MAX_API_RETRIES`: maximum retry attempts for transient API failures, default `3`.
 - `ROBITS_SEARCH_URL`: optional custom web search endpoint for `builtin.web_search`; falls back to the DuckDuckGo Instant Answers API.
-- `ROBITS_DIGEST_INTERVAL`: turns between automatic episodic digest creation; default `0` (disabled). When enabled, a raw transcript digest is created for every agent after each interval, making conversation history searchable via `memory.search`.
+- `ROBITS_DIGEST_INTERVAL`: turns between automatic episodic digest creation; default `0` (disabled).
+- `ROBITS_DIGEST_CONTEXT_CHARS`: accumulated meaningful prompt/response characters that trigger automatic episodic digestion; default `0` (disabled).
+- `ROBITS_DIGEST_ELAPSED_SECONDS`: elapsed seconds with meaningful activity that trigger automatic episodic digestion; default `0` (disabled).
+- `ROBITS_IDENTITY_DIGEST_INTERVAL`: turns between automatic identity checkpoint digests; default `0` (disabled).
+- `ROBITS_GOAL_DIGEST_INTERVAL`: turns between automatic short-term goal checkpoint digests; default `0` (disabled).
+
+Automatic digest triggers skip silent/passive turns and tool-only runtime artifacts, so model-facing prompt context and operational noise do not bloat stored transcript memory. When enabled, digests are created for every agent and are searchable via `memory.search`.
 
 ## Tools
 

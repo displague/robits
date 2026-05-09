@@ -1,6 +1,7 @@
 """SQLite-backed memory storage for Robits."""
 
 from .async_sqlite import AsyncSQLiteMemoryStore
+from .protocols import AsyncMemoryStoreProtocol, MemoryStoreProtocol
 from .sqlite import (
     CHANNEL_AGENT_DM,
     CHANNEL_AGENT_THOUGHT,
@@ -24,6 +25,7 @@ from .sqlite import (
 
 __all__ = [
     "AsyncSQLiteMemoryStore",
+    "AsyncMemoryStoreProtocol",
     "CHANNEL_AGENT_DM",
     "CHANNEL_AGENT_THOUGHT",
     "CHANNEL_FAMILY_GROUP",
@@ -40,6 +42,7 @@ __all__ = [
     "SOCIAL_UNKNOWN",
     "MemoryDigestSource",
     "MemorySearchResult",
+    "MemoryStoreProtocol",
     "SQLiteMemoryStore",
     "compute_phase_shift",
 ]

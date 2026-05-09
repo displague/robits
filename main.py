@@ -74,6 +74,10 @@ memory_max_depth = max(0, int(os.environ.get("ROBITS_MEMORY_MAX_DEPTH", "3")))
 memory_max_rows = max(1, int(os.environ.get("ROBITS_MEMORY_MAX_ROWS", "100")))
 memory_cache_threshold = max(512, int(os.environ.get("ROBITS_MEMORY_CACHE_THRESHOLD", "8192")))
 memory_digest_interval = max(0, int(os.environ.get("ROBITS_DIGEST_INTERVAL", "0")))
+memory_digest_context_chars = max(0, int(os.environ.get("ROBITS_DIGEST_CONTEXT_CHARS", "0")))
+memory_digest_elapsed_seconds = max(0, int(os.environ.get("ROBITS_DIGEST_ELAPSED_SECONDS", "0")))
+memory_identity_digest_interval = max(0, int(os.environ.get("ROBITS_IDENTITY_DIGEST_INTERVAL", "0")))
+memory_goal_digest_interval = max(0, int(os.environ.get("ROBITS_GOAL_DIGEST_INTERVAL", "0")))
 org_chat_context_lines = max(0, int(os.environ.get("ROBITS_ORG_CHAT_CONTEXT_LINES", "20")))
 org_digest_interval = max(0, int(os.environ.get("ROBITS_ORG_DIGEST_INTERVAL", "0")))
 _reasoning_effort_env = os.environ.get("ROBITS_REASONING_EFFORT", "").strip().lower() or None
@@ -2069,6 +2073,7 @@ class TranscriptEntry:
     response: str
     directed: bool = False
     system_events: list[str] = field(default_factory=list)
+    memory_recorded: bool = False
 
 
 @dataclass
@@ -2178,6 +2183,11 @@ class Session:
         self.event_stream = event_stream if event_stream is not None else RuntimeEventStream()
         self.transcript = []
         self.turns_completed = 0
+        self._last_digest_turn = 0
+        self._last_digest_at = time.monotonic()
+        self._meaningful_turns_completed = 0
+        self._last_identity_digest_meaningful_turn = 0
+        self._last_goal_digest_meaningful_turn = 0
         self.last_receiver = self.participants.get("CEO") or next(iter(self.participants.values()))
         # Map role.name → participant dict key for FK-safe persistence.
         self._name_to_key = {getattr(p, "name", k): k for k, p in self.participants.items()}
@@ -2288,6 +2298,8 @@ class Session:
         return message, []
 
     def record_turn(self, sender, receiver, prompt, response, directed=False, system_events=None):
+        meaningful_response = bool(str(response or "").strip())
+        system_events = system_events or []
         entry = TranscriptEntry(
             turn=self.turns_completed + 1,
             sender=sender,
@@ -2295,10 +2307,13 @@ class Session:
             prompt=prompt,
             response=response,
             directed=directed,
-            system_events=system_events or [],
+            system_events=system_events,
+            memory_recorded=meaningful_response,
         )
         self.transcript.append(entry)
         self.turns_completed += 1
+        if meaningful_response:
+            self._meaningful_turns_completed += 1
         self.event_stream.emit(
             "message.recorded",
             self.run_id,
@@ -2316,7 +2331,7 @@ class Session:
             try:
                 sender_phase = memory_store.get_agent_phase(canonical_sender)
                 receiver_phase = memory_store.get_agent_phase(canonical_receiver)
-                if prompt:
+                if meaningful_response and prompt:
                     memory_store.append_message(
                         session_id=self.run_id,
                         sender_agent_id=canonical_sender,
@@ -2326,7 +2341,7 @@ class Session:
                         channel_id=self._org_chat_channel_id,
                         sender_phase=sender_phase,
                     )
-                if response:
+                if meaningful_response and response:
                     memory_store.append_message(
                         session_id=self.run_id,
                         sender_agent_id=canonical_receiver,
@@ -2351,22 +2366,65 @@ class Session:
                         pass
             except Exception:
                 pass
-            if (
-                memory_digest_interval > 0
-                and self.turns_completed % memory_digest_interval == 0
-            ):
-                self._auto_digest()
+            digest_reasons = self._auto_digest_reasons()
+            if digest_reasons:
+                self._auto_digest(digest_reasons)
             if (
                 org_digest_interval > 0
                 and self.turns_completed % org_digest_interval == 0
             ):
                 self._auto_org_digest()
+            if (
+                memory_identity_digest_interval > 0
+                and meaningful_response
+                and self._meaningful_turns_completed - self._last_identity_digest_meaningful_turn
+                >= memory_identity_digest_interval
+            ):
+                self._auto_state_digest("identity")
+                self._last_identity_digest_meaningful_turn = self._meaningful_turns_completed
+            if (
+                memory_goal_digest_interval > 0
+                and meaningful_response
+                and self._meaningful_turns_completed - self._last_goal_digest_meaningful_turn
+                >= memory_goal_digest_interval
+            ):
+                self._auto_state_digest("goal_short_term")
+                self._last_goal_digest_meaningful_turn = self._meaningful_turns_completed
         self._write_org_chat_jsonl(entry)
         return entry
 
-    def _auto_digest(self):
-        """Create a raw transcript digest covering the last memory_digest_interval turns."""
-        window = self.transcript[-memory_digest_interval:]
+    def _auto_digest_reasons(self):
+        reasons = []
+        meaningful_window = [
+            e for e in self.transcript[self._last_digest_turn:]
+            if e.memory_recorded
+        ]
+        if not meaningful_window:
+            return reasons
+        if (
+            memory_digest_interval > 0
+            and self.turns_completed - self._last_digest_turn >= memory_digest_interval
+        ):
+            reasons.append("turn_interval")
+        if memory_digest_context_chars > 0:
+            chars = sum(len(e.prompt or "") + len(e.response or "") for e in meaningful_window)
+            if chars >= memory_digest_context_chars:
+                reasons.append("context_chars")
+        if memory_digest_elapsed_seconds > 0:
+            elapsed = time.monotonic() - self._last_digest_at
+            if elapsed >= memory_digest_elapsed_seconds:
+                reasons.append("elapsed_seconds")
+        return reasons
+
+    def _auto_digest(self, reasons=None):
+        """Create a raw transcript digest covering meaningful turns since the last digest."""
+        if memory_digest_interval > 0 and not reasons:
+            window = [e for e in self.transcript[-memory_digest_interval:] if e.memory_recorded]
+        else:
+            window = [
+                e for e in self.transcript[self._last_digest_turn:]
+                if e.memory_recorded
+            ]
         lines = []
         for e in window:
             if e.prompt:
@@ -2379,7 +2437,7 @@ class Session:
         source_refs = []
         try:
             msg_ids = memory_store.list_recent_message_ids(
-                self.run_id, memory_digest_interval * 2
+                self.run_id, max(2, len(window) * 2)
             )
             source_refs = [
                 {"source_table": "messages", "source_id": mid}
@@ -2399,9 +2457,50 @@ class Session:
                     digest_type="episodic",
                     accessibility="agent",
                     system_only=False,
+                    metadata={"trigger_reasons": list(reasons or ["turn_interval"])},
                 )
+            self._last_digest_turn = self.turns_completed
+            self._last_digest_at = time.monotonic()
         except Exception:
             pass
+
+    def _auto_state_digest(self, digest_type):
+        if memory_store is None:
+            return
+        source_refs = []
+        try:
+            msg_ids = memory_store.list_recent_message_ids(
+                self.run_id,
+                max(2, memory_digest_interval * 2 or 10),
+            )
+            source_refs = [{"source_table": "messages", "source_id": mid} for mid in msg_ids]
+        except Exception:
+            return
+        if not source_refs:
+            return
+        label = "identity" if digest_type == "identity" else "short-term goal"
+        window = [e for e in self.transcript if e.memory_recorded][-10:]
+        content_lines = [
+            f"[turn {e.turn}] {e.sender}->{e.receiver}: {e.response[:300]}"
+            for e in window
+            if e.response
+        ]
+        if not content_lines:
+            return
+        for agent_id in list(self.participants):
+            try:
+                memory_store.append_memory_digest(
+                    content=f"Automatic {label} checkpoint:\n" + "\n".join(content_lines),
+                    source_refs=source_refs,
+                    agent_id=agent_id,
+                    session_id=self.run_id,
+                    digest_type=digest_type,
+                    accessibility="agent",
+                    system_only=False,
+                    metadata={"trigger_reasons": [f"{digest_type}_interval"]},
+                )
+            except Exception:
+                pass
 
     def _write_org_chat_jsonl(self, entry):
         if self._org_workspace is None:
@@ -2425,7 +2524,10 @@ class Session:
         lines = [
             f"[turn {e.turn}] {e.sender}->{e.receiver}: {e.prompt[:300]} | {e.response[:300]}"
             for e in window
+            if e.memory_recorded
         ]
+        if not lines:
+            return
         content = "Org chat digest:\n" + "\n".join(lines)
         source_refs = []
         try:
