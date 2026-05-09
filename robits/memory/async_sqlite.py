@@ -23,10 +23,10 @@ def _json_dumps(value):
 class AsyncSQLiteMemoryStore:
     """Async SQLite access layer for concurrent Robits runtimes and observers.
 
-    This class intentionally starts as a small async boundary around the hot
-    event/message paths that the runtime and TUI need first. The synchronous
-    ``SQLiteMemoryStore`` remains the canonical schema owner while this async
-    layer grows method coverage.
+    The synchronous ``SQLiteMemoryStore`` remains the schema owner, and this
+    class mirrors its repository API for async callers. Hot-path methods are
+    implemented natively with ``aiosqlite`` while remaining methods delegate to
+    the synchronous store through ``asyncio.to_thread``.
     """
 
     def __init__(self, path, connection):
@@ -74,6 +74,16 @@ class AsyncSQLiteMemoryStore:
                 return [dict(row) for row in rows]
             finally:
                 await cursor.close()
+
+    async def _run_sync(self, method_name, *args, **kwargs):
+        def runner():
+            store = SQLiteMemoryStore(self.path)
+            try:
+                return getattr(store, method_name)(*args, **kwargs)
+            finally:
+                store.close()
+
+        return await asyncio.to_thread(runner)
 
     async def _index(
         self,
@@ -386,4 +396,330 @@ class AsyncSQLiteMemoryStore:
             LIMIT ?
             """,
             params + [limit],
+        )
+
+    async def ensure_schema(self):
+        return await self._run_sync("ensure_schema")
+
+    async def list_recent_message_ids(self, session_id, limit):
+        return await self._run_sync("list_recent_message_ids", session_id, limit)
+
+    async def list_recent_message_ids_by_type(self, session_id, limit, conversation_type):
+        return await self._run_sync(
+            "list_recent_message_ids_by_type",
+            session_id,
+            limit,
+            conversation_type,
+        )
+
+    async def end_session(self, session_id, ended_at=None):
+        return await self._run_sync("end_session", session_id, ended_at=ended_at)
+
+    async def add_contact(
+        self,
+        owner_agent_id,
+        contact_agent_id,
+        relationship_type,
+        notes=None,
+        created_at=None,
+        metadata=None,
+    ):
+        return await self._run_sync(
+            "add_contact",
+            owner_agent_id,
+            contact_agent_id,
+            relationship_type,
+            notes=notes,
+            created_at=created_at,
+            metadata=metadata,
+        )
+
+    async def append_todo(
+        self,
+        agent_id,
+        title,
+        session_id=None,
+        status="open",
+        content=None,
+        due_at=None,
+        created_at=None,
+        metadata=None,
+    ):
+        return await self._run_sync(
+            "append_todo",
+            agent_id,
+            title,
+            session_id=session_id,
+            status=status,
+            content=content,
+            due_at=due_at,
+            created_at=created_at,
+            metadata=metadata,
+        )
+
+    async def append_tool_call(
+        self,
+        tool_call_id,
+        agent_id,
+        tool_name,
+        arguments=None,
+        result_content=None,
+        status="requested",
+        session_id=None,
+        relationship_type=None,
+        conversation_type=None,
+        source=None,
+        created_at=None,
+        metadata=None,
+    ):
+        return await self._run_sync(
+            "append_tool_call",
+            tool_call_id,
+            agent_id,
+            tool_name,
+            arguments=arguments,
+            result_content=result_content,
+            status=status,
+            session_id=session_id,
+            relationship_type=relationship_type,
+            conversation_type=conversation_type,
+            source=source,
+            created_at=created_at,
+            metadata=metadata,
+        )
+
+    async def list_todos(self, agent_id=None, session_id=None, status=None, limit=100):
+        return await self._run_sync(
+            "list_todos",
+            agent_id=agent_id,
+            session_id=session_id,
+            status=status,
+            limit=limit,
+        )
+
+    async def append_memory_entry(
+        self,
+        kind,
+        content,
+        agent_id=None,
+        session_id=None,
+        source_table=None,
+        source_id=None,
+        relationship_type=None,
+        conversation_type=None,
+        source=None,
+        created_at=None,
+        metadata=None,
+    ):
+        return await self._run_sync(
+            "append_memory_entry",
+            kind,
+            content,
+            agent_id=agent_id,
+            session_id=session_id,
+            source_table=source_table,
+            source_id=source_id,
+            relationship_type=relationship_type,
+            conversation_type=conversation_type,
+            source=source,
+            created_at=created_at,
+            metadata=metadata,
+        )
+
+    async def append_memory_digest(
+        self,
+        content,
+        source_refs,
+        agent_id=None,
+        session_id=None,
+        digest_type="episodic",
+        generation=None,
+        version=1,
+        supersedes_digest_ids=None,
+        system_only=False,
+        accessibility=None,
+        prompt_version="memory-digest-v1",
+        source_start_at=None,
+        source_end_at=None,
+        relationship_type=None,
+        conversation_type=None,
+        source="digest",
+        created_at=None,
+        metadata=None,
+    ):
+        return await self._run_sync(
+            "append_memory_digest",
+            content,
+            source_refs,
+            agent_id=agent_id,
+            session_id=session_id,
+            digest_type=digest_type,
+            generation=generation,
+            version=version,
+            supersedes_digest_ids=supersedes_digest_ids,
+            system_only=system_only,
+            accessibility=accessibility,
+            prompt_version=prompt_version,
+            source_start_at=source_start_at,
+            source_end_at=source_end_at,
+            relationship_type=relationship_type,
+            conversation_type=conversation_type,
+            source=source,
+            created_at=created_at,
+            metadata=metadata,
+        )
+
+    async def seed_memory_digest(
+        self,
+        digest_type,
+        content,
+        agent_id=None,
+        session_id=None,
+        prompt_version="memory-digest-seed-v1",
+        source="system_seed",
+        created_at=None,
+        metadata=None,
+        system_only=False,
+        accessibility=None,
+        relationship_type=None,
+    ):
+        return await self._run_sync(
+            "seed_memory_digest",
+            digest_type,
+            content,
+            agent_id=agent_id,
+            session_id=session_id,
+            prompt_version=prompt_version,
+            source=source,
+            created_at=created_at,
+            metadata=metadata,
+            system_only=system_only,
+            accessibility=accessibility,
+            relationship_type=relationship_type,
+        )
+
+    async def seed_identity_and_goal_digests(
+        self,
+        agent_id,
+        identity_content,
+        long_term_goal_content,
+        short_term_goal_content=None,
+        session_id=None,
+        created_at=None,
+        metadata=None,
+        identity_relationship_type=None,
+    ):
+        return await self._run_sync(
+            "seed_identity_and_goal_digests",
+            agent_id,
+            identity_content,
+            long_term_goal_content,
+            short_term_goal_content=short_term_goal_content,
+            session_id=session_id,
+            created_at=created_at,
+            metadata=metadata,
+            identity_relationship_type=identity_relationship_type,
+        )
+
+    async def append_runtime_event_object(self, event):
+        return await self._run_sync("append_runtime_event_object", event)
+
+    async def get_memory_digest(self, digest_id):
+        return await self._run_sync("get_memory_digest", digest_id)
+
+    async def get_memory_digest_sources(self, digest_id):
+        return await self._run_sync("get_memory_digest_sources", digest_id)
+
+    async def expand_memory_digest_sources(
+        self,
+        digest_id,
+        recursive=False,
+        include_digest_records=True,
+        max_depth=None,
+    ):
+        return await self._run_sync(
+            "expand_memory_digest_sources",
+            digest_id,
+            recursive=recursive,
+            include_digest_records=include_digest_records,
+            max_depth=max_depth,
+        )
+
+    async def expand_memory_digest_source_tree(self, digest_id):
+        return await self._run_sync("expand_memory_digest_source_tree", digest_id)
+
+    async def list_memory_digests(
+        self,
+        agent_id=None,
+        session_id=None,
+        digest_type=None,
+        current_only=False,
+        accessible_only=False,
+        include_system_only=True,
+        limit=100,
+        relationship_type=None,
+    ):
+        return await self._run_sync(
+            "list_memory_digests",
+            agent_id=agent_id,
+            session_id=session_id,
+            digest_type=digest_type,
+            current_only=current_only,
+            accessible_only=accessible_only,
+            include_system_only=include_system_only,
+            limit=limit,
+            relationship_type=relationship_type,
+        )
+
+    async def list_agent_records(self, agent_id, limit=100):
+        return await self._run_sync("list_agent_records", agent_id, limit=limit)
+
+    async def search(
+        self,
+        query,
+        agent_id=None,
+        session_id=None,
+        relationship_type=None,
+        conversation_type=None,
+        source=None,
+        start_at=None,
+        end_at=None,
+        limit=20,
+    ):
+        return await self._run_sync(
+            "search",
+            query,
+            agent_id=agent_id,
+            session_id=session_id,
+            relationship_type=relationship_type,
+            conversation_type=conversation_type,
+            source=source,
+            start_at=start_at,
+            end_at=end_at,
+            limit=limit,
+        )
+
+    async def search_cascade(
+        self,
+        query,
+        agent_id=None,
+        session_id=None,
+        relationship_type=None,
+        conversation_type=None,
+        source=None,
+        start_at=None,
+        end_at=None,
+        limit=20,
+    ):
+        return await self._run_sync(
+            "search_cascade",
+            query,
+            agent_id=agent_id,
+            session_id=session_id,
+            relationship_type=relationship_type,
+            conversation_type=conversation_type,
+            source=source,
+            start_at=start_at,
+            end_at=end_at,
+            limit=limit,
         )

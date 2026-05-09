@@ -1,4 +1,5 @@
 import asyncio
+import inspect
 import tempfile
 import unittest
 from pathlib import Path
@@ -139,6 +140,34 @@ class AsyncSQLiteMemoryStoreTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertIn("message", kinds)
         self.assertIn("thought", kinds)
+
+    async def test_async_store_exposes_sync_store_public_api_methods(self):
+        sync_public = {
+            name
+            for name, member in inspect.getmembers(SQLiteMemoryStore, inspect.isfunction)
+            if not name.startswith("_")
+        }
+        async_public = {
+            name
+            for name, member in inspect.getmembers(AsyncSQLiteMemoryStore, inspect.iscoroutinefunction)
+            if not name.startswith("_")
+        }
+        self.assertTrue(sync_public.issubset(async_public))
+
+    async def test_sync_parity_methods_delegate_through_async_store(self):
+        store = await self.seed_store()
+        await store.add_contact("SE", "HR", "coworker")
+
+        todo_id = await store.append_todo(
+            "SE",
+            "Capture drop-in parity tasks.",
+            session_id="session-1",
+        )
+
+        todos = await store.list_todos(agent_id="SE", session_id="session-1")
+        self.assertEqual(len(todos), 1)
+        self.assertEqual(todos[0]["todo_id"], todo_id)
+        self.assertEqual(todos[0]["title"], "Capture drop-in parity tasks.")
 
 
 if __name__ == "__main__":
