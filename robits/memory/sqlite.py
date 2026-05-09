@@ -26,17 +26,10 @@ SOCIAL_UNKNOWN = 4.0
 SOCIAL_HOSTILE = 5.0
 
 
-SOCIAL_SELF = 0
-SOCIAL_FAMILIAL = 1
-SOCIAL_FRIENDLY = 2
-SOCIAL_PROFESSIONAL = 3
-SOCIAL_UNKNOWN = 4
-SOCIAL_HOSTILE = 5
-
-
 def compute_phase_shift(current_phase: float, event_phase: float, social_distance: float) -> float:
     """Shift current_phase toward event_phase, weighted by closeness (inverse of social_distance+1)."""
-    weight = 1.0 / (social_distance + 1.0)
+    effective_distance = max(0.0, social_distance)
+    weight = 1.0 / (effective_distance + 1.0)
     shifted = current_phase + weight * (event_phase - current_phase)
     return max(0.0, min(1.0, shifted))
 
@@ -377,7 +370,7 @@ class SQLiteMemoryStore:
     def get_agent_phase(self, agent_id) -> "float | None":
         """Return the current circadian phase for an agent, or None if not found."""
         row = self.connection.execute(
-            "SELECT circadian_phase FROM agents WHERE agent_id = ?",
+            "SELECT COALESCE(circadian_phase, 0.5) AS circadian_phase FROM agents WHERE agent_id = ?",
             (agent_id,),
         ).fetchone()
         if row is None:

@@ -104,6 +104,11 @@ class ComputePhaseShiftTests(unittest.TestCase):
         result = compute_phase_shift(0.0, 1.0, 1.0)
         self.assertAlmostEqual(result, 0.5)
 
+    def test_compute_phase_shift_negative_social_distance_treated_as_zero(self):
+        # negative distance is clamped to 0 => weight = 1.0, so result == event_phase
+        result = compute_phase_shift(0.2, 0.8, -1.0)
+        self.assertAlmostEqual(result, 0.8)
+
 
 class PhaseMigrationTests(unittest.TestCase):
     def test_phase_migration_on_legacy_db(self):
