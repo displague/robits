@@ -10,6 +10,7 @@ import re
 import yaml
 import threading
 from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from termcolor import colored
 import argparse
 import sys
@@ -60,6 +61,8 @@ api_retry_max_seconds = max(api_retry_base_seconds, float(os.environ.get("ROBITS
 model_call_gate = threading.BoundedSemaphore(max_parallelism)
 memory_db_path = os.environ.get("ROBITS_MEMORY_DB")
 memory_store = SQLiteMemoryStore(memory_db_path) if memory_db_path else None
+default_location = os.environ.get("ROBITS_LOCATION", "").strip()
+default_timezone = os.environ.get("ROBITS_TIMEZONE", "").strip()
 SAFE_TOOL_BUILTINS = {
     "bool": bool,
     "dict": dict,
@@ -183,6 +186,7 @@ class ToolRegistry:
                 "revoke_tool_access": revoke_tool_access,
                 "list_registered_tools": list_registered_tools,
                 "propose_tool_change": propose_tool_change,
+                "current_agent_context": current_agent_context,
             },
             local_dict,
         )
@@ -414,6 +418,19 @@ def _is_retryable_api_error(error):
     return any(token in name for token in ("ratelimit", "timeout", "connection"))
 
 
+def _emit_role_tool_event(role, event_type, payload):
+    event_stream = getattr(role, "runtime_event_stream", None)
+    session_id = getattr(role, "runtime_session_id", None)
+    if event_stream is not None and session_id is not None:
+        event_stream.emit(event_type, session_id, payload)
+
+
+def _record_role_tool_result(role, result):
+    if not hasattr(role, "runtime_tool_results"):
+        role.runtime_tool_results = []
+    role.runtime_tool_results.append(result)
+
+
 def _with_model_retries(operation):
     attempt = 0
     while True:
@@ -486,21 +503,42 @@ class ResponsesProvider(ModelProvider):
                 return "Error: Tool call requested but no employee dictionary is available."
             outputs = []
             for call in function_calls:
+                call_id = getattr(call, "call_id", getattr(call, "id", ""))
+                tool_name = getattr(call, "name", "")
+                payload = {
+                    "agent": getattr(role, "name", None),
+                    "role_name": getattr(role, "runtime_role_name", None),
+                    "provider_response_id": getattr(response, "id", None),
+                    "call_id": call_id,
+                    "tool_name": tool_name,
+                }
                 try:
                     args = json.loads(getattr(call, "arguments", "") or "{}")
                 except json.JSONDecodeError as error:
+                    payload["arguments"] = getattr(call, "arguments", "")
+                    payload["error"] = f"Invalid tool arguments JSON: {error}"
+                    _emit_role_tool_event(role, "tool_call.requested", payload)
                     result = f"Error: Invalid tool arguments JSON: {error}"
                 else:
+                    payload["arguments"] = args
+                    _emit_role_tool_event(role, "tool_call.requested", payload)
                     result = self.registry.execute(
-                        getattr(call, "name", ""),
+                        tool_name,
                         args,
                         employee_dict,
                         caller=role,
                     )
+                status_payload = {**payload, "result": result}
+                event_type = "tool_call.failed" if str(result).startswith("Error:") else "tool_call.executed"
+                _emit_role_tool_event(role, event_type, status_payload)
+                _record_role_tool_result(
+                    role,
+                    f"{event_type}: {tool_name}({json.dumps(payload.get('arguments'), sort_keys=True)}) -> {result}",
+                )
                 outputs.append(
                     {
                         "type": "function_call_output",
-                        "call_id": getattr(call, "call_id", getattr(call, "id", "")),
+                        "call_id": call_id,
                         "output": result,
                     }
                 )
@@ -556,6 +594,60 @@ class Alarm:
     created_at: str = field(
         default_factory=lambda: datetime.now(timezone.utc).isoformat(timespec="seconds")
     )
+
+
+def _runtime_timezone():
+    if default_timezone:
+        try:
+            return ZoneInfo(default_timezone)
+        except ZoneInfoNotFoundError:
+            pass
+    return datetime.now().astimezone().tzinfo or timezone.utc
+
+
+def _runtime_timezone_name(tzinfo):
+    if default_timezone:
+        return default_timezone
+    if tzinfo is None:
+        return "UTC"
+    return getattr(tzinfo, "key", None) or str(tzinfo)
+
+
+def agent_runtime_context(role=None):
+    now_utc = datetime.now(timezone.utc)
+    local_tz = _runtime_timezone()
+    now_local = now_utc.astimezone(local_tz)
+    role_name = (
+        (active_tool_caller_name if role is active_tool_caller else None)
+        or getattr(role, "runtime_role_name", None)
+        or getattr(role, "name", None)
+    )
+    context = {
+        "agent_name": getattr(role, "name", None),
+        "role_name": role_name,
+        "session_id": getattr(role, "runtime_session_id", None),
+        "current_datetime_utc": now_utc.isoformat(timespec="seconds"),
+        "current_datetime_local": now_local.isoformat(timespec="seconds"),
+        "current_date_local": now_local.date().isoformat(),
+        "timezone": _runtime_timezone_name(local_tz),
+        "location": default_location or None,
+    }
+    return {key: value for key, value in context.items() if value is not None}
+
+
+def format_agent_context(role=None):
+    context = agent_runtime_context(role)
+    return (
+        "\nRuntime context available to your tools and decisions:\n"
+        f"{json.dumps(context, sort_keys=True)}\n"
+        "Use this context for dates, times, location, identity, and session references. "
+        "Do not invent missing context; call agent.context if you need to refresh it.\n"
+    )
+
+
+def current_agent_context(employee_dict):
+    del employee_dict
+    return json.dumps(agent_runtime_context(active_tool_caller), sort_keys=True)
 
 
 def _parse_datetime(value):
@@ -969,6 +1061,14 @@ def create_alarm(employee_dict, agent_name, reminder, due_at, recurrence="once")
     recurrence = (recurrence or "once").strip().lower()
     if recurrence not in ALARM_RECURRENCES:
         return f"Error: Invalid recurrence '{recurrence}'."
+    now = datetime.now(timezone.utc)
+    comparable_due = due.astimezone(timezone.utc) if due.tzinfo else due.replace(tzinfo=timezone.utc)
+    if comparable_due <= now:
+        context = agent_runtime_context(employee_dict[normalized_name])
+        return (
+            f"Error: Alarm due_at '{_format_datetime(due)}' is not in the future. "
+            f"Current local time is {context.get('current_datetime_local')}."
+        )
     role = employee_dict[normalized_name]
     if len(_active_alarms(role)) >= 5:
         return f"Error: Role '{normalized_name}' already has the maximum of 5 active alarms."
@@ -1128,6 +1228,11 @@ def interact(self, model, sender, message):
             {"role": "system", "content": self.template},
         ]
     messages = self.conversation_history.get(self.name, [])
+    system_content = self.template + format_agent_context(self)
+    if messages and messages[0].get("role") == "system":
+        messages[0]["content"] = system_content
+    elif self.template:
+        messages.insert(0, {"role": "system", "content": system_content})
     if message is not None and message != "":
         messages.append({"role": "user", "content": message, "name": sender})
     print(colored(f"\n---\n// {self.name}\n{json.dumps(messages)}\n---\n", "grey"))
@@ -1169,6 +1274,10 @@ Only say that you created, changed, or called a tool if you actually returned a 
         self.allowed_tools = {"agent.*", "memory.search", "memory.list_digests", "memory.expand_digest"}
         self.alarms = []
         self.sandbox_metadata = SandboxMetadata.disabled(self.name)
+        self.runtime_event_stream = None
+        self.runtime_session_id = None
+        self.runtime_role_name = self.name
+        self.runtime_tool_results = []
 
     def interact(self, sender, prompt):
         return interact_cheap(self, sender, prompt)
@@ -1285,6 +1394,10 @@ class Human(Role):
         self.allowed_tools = {"*"}
         self.alarms = []
         self.sandbox_metadata = SandboxMetadata.disabled(self.name)
+        self.runtime_event_stream = None
+        self.runtime_session_id = None
+        self.runtime_role_name = self.name
+        self.runtime_tool_results = []
 
     def interact(self, *_):
         return input(f"{self.name}: ")
@@ -1583,6 +1696,16 @@ class Session:
             else:
                 self.scheduler.remove_participant(name)
 
+    def prepare_agent_runtime(self, role):
+        role.runtime_event_stream = self.event_stream
+        role.runtime_session_id = self.run_id
+        role.runtime_tool_results = []
+        for name, participant in self.participants.items():
+            if participant is role:
+                role.runtime_role_name = name
+                return
+        role.runtime_role_name = getattr(role, "name", None)
+
     def step(self, message):
         sender = self.last_receiver
         self.sync_scheduler_participants()
@@ -1593,8 +1716,12 @@ class Session:
         reminders = due_alarm_reminders(routed.receiver)
         if reminders:
             prompt = "\n".join(reminders + [prompt])
+        self.prepare_agent_runtime(routed.receiver)
         response = routed.receiver.interact(sender.name, prompt)
         response = "" if response is None else response
+        native_tool_events = list(getattr(routed.receiver, "runtime_tool_results", []))
+        if native_tool_events:
+            system_events.extend(native_tool_events)
         response, response_events = self.process_agent_action(response, sender=routed.receiver)
         if response_events:
             system_events.extend(response_events)
