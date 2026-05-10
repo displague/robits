@@ -280,20 +280,29 @@ class ToolProposalPipelineTests(unittest.TestCase):
         func = main.tool_registry.compile_tool(
             "test.identity", [], [], "return get_caller_name()"
         )
+        saved_caller = main.active_tool_caller
+        saved_name = main.active_tool_caller_name
         main.active_tool_caller_name = "TestAgent"
         try:
             result = func(employee_dict={})
         finally:
-            main.active_tool_caller_name = None
+            main.active_tool_caller = saved_caller
+            main.active_tool_caller_name = saved_name
         self.assertEqual(result, "TestAgent")
 
     def test_get_caller_name_returns_unknown_when_no_caller(self):
         func = main.tool_registry.compile_tool(
             "test.identity", [], [], "return get_caller_name()"
         )
+        saved_caller = main.active_tool_caller
+        saved_name = main.active_tool_caller_name
         main.active_tool_caller = None
         main.active_tool_caller_name = None
-        result = func(employee_dict={})
+        try:
+            result = func(employee_dict={})
+        finally:
+            main.active_tool_caller = saved_caller
+            main.active_tool_caller_name = saved_name
         self.assertEqual(result, "unknown")
 
     # --- agent.think: silent, no side effects ---
@@ -310,7 +319,8 @@ class ToolProposalPipelineTests(unittest.TestCase):
         result = main.tool_registry.execute(
             "agent.think", {"content": "Planning next step."}, employee_dict, caller=employee_dict["SE"]
         )
-        self.assertIn("", result)  # result contains empty (silent) return
+        self.assertIn("Result: ", result)
+        self.assertTrue(result.endswith("Result: "), f"Expected empty inner result, got: {result!r}")
 
     # --- agent.wait: sets waiting_until on the caller role ---
 
@@ -318,12 +328,17 @@ class ToolProposalPipelineTests(unittest.TestCase):
         from datetime import datetime, timezone, timedelta
         employee_dict = _make_employee_dict()
         se_role = employee_dict["SE"]
+        saved_caller = main.active_tool_caller
+        saved_transcript_len = main.active_session_transcript_length
         main.active_tool_caller = se_role
         main.active_session_transcript_length = 0
         before = datetime.now(timezone.utc)
-        result = main.agent_wait(employee_dict={}, minutes=10)
+        try:
+            result = main.agent_wait(employee_dict={}, minutes=10)
+        finally:
+            main.active_tool_caller = saved_caller
+            main.active_session_transcript_length = saved_transcript_len
         after = datetime.now(timezone.utc)
-        main.active_tool_caller = None
         self.assertEqual(result, "")
         self.assertIsNotNone(se_role.waiting_until)
         expected_min = before + timedelta(minutes=10)
@@ -335,11 +350,12 @@ class ToolProposalPipelineTests(unittest.TestCase):
     def test_agent_wait_rejects_nonpositive_minutes(self):
         employee_dict = _make_employee_dict()
         se_role = employee_dict["SE"]
+        saved_caller = main.active_tool_caller
         main.active_tool_caller = se_role
         try:
             result = main.agent_wait(employee_dict={}, minutes=0)
         finally:
-            main.active_tool_caller = None
+            main.active_tool_caller = saved_caller
         self.assertIn("Error:", result)
 
     def test_agent_wait_rejects_no_caller(self):
@@ -407,7 +423,7 @@ class ToolProposalPipelineTests(unittest.TestCase):
         se_role.waiting_until = datetime.now(timezone.utc) + timedelta(minutes=60)
         se_role.wait_started_turn = 0
         se_role.wait_clock_state = "on"
-        se_role.runtime_clock_state = "off"  # simulate clock state change
+        session.clock_state = "off"  # simulate circadian phase transition at session level
 
         interrupted = session._interrupt_wait_for_phase(se_role)
         self.assertTrue(interrupted)

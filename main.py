@@ -89,8 +89,10 @@ _org_workspace = agent_workspace_store if memory_store is not None else None
 default_location = os.environ.get("ROBITS_LOCATION", "").strip()
 default_timezone = os.environ.get("ROBITS_TIMEZONE", "").strip()
 SAFE_TOOL_BUILTINS = {
+    "abs": abs,
     "bool": bool,
     "dict": dict,
+    "enumerate": enumerate,
     "float": float,
     "int": int,
     "len": len,
@@ -98,9 +100,13 @@ SAFE_TOOL_BUILTINS = {
     "max": max,
     "min": min,
     "range": range,
+    "round": round,
+    "set": set,
+    "sorted": sorted,
     "str": str,
     "sum": sum,
     "tuple": tuple,
+    "zip": zip,
 }
 
 
@@ -390,7 +396,18 @@ class ToolRegistry:
             system_tool=system_tool,
             grantable=grantable,
         )
+        # Remove stale aliases from the old definition before installing the new one.
+        old_tool = self._tools.get(name)
+        if old_tool is not None:
+            stale = [k for k, v in self._aliases.items() if v == name]
+            for k in stale:
+                del self._aliases[k]
         self._tools[name] = tool
+        for alias in aliases:
+            self._aliases[alias] = name
+        openai_name = tool.openai_name
+        if openai_name != name:
+            self._aliases[openai_name] = name
         return tool
 
     def list_tools(self, include_system=True, role=None, include_denied=True):
@@ -532,6 +549,25 @@ def _record_role_tool_result(role, result):
     role.runtime_tool_results.append(result)
 
 
+_EXECUTE_RESULT_MARKER = ". Result: "
+
+
+def _tool_result_is_error(raw_result):
+    """Return True if the raw execute() output represents an error.
+
+    execute() returns "Error: ..." for validation failures, or
+    "Executed tool '...' ... Result: <inner>" for successful dispatch.
+    The inner result may itself be an error string returned by the tool.
+    """
+    s = str(raw_result)
+    if s.startswith("Error:"):
+        return True
+    idx = s.find(_EXECUTE_RESULT_MARKER)
+    if idx != -1:
+        return s[idx + len(_EXECUTE_RESULT_MARKER):].startswith("Error:")
+    return False
+
+
 def _with_model_retries(operation):
     attempt = 0
     while True:
@@ -580,7 +616,7 @@ class ChatCompletionsProvider(ModelProvider):
                 return message.content or ""
             if employee_dict is None:
                 return "Error: Tool call requested but no employee dictionary is available."
-            kwargs["messages"] = list(kwargs["messages"]) + [message]
+            kwargs["messages"] = list(kwargs["messages"]) + [message.model_dump()]
             tool_results = []
             for call in tool_calls:
                 tool_name = call.function.name
@@ -603,12 +639,14 @@ class ChatCompletionsProvider(ModelProvider):
                     _emit_role_tool_event(role, "tool_call.requested", payload)
                     result = self.registry.execute(tool_name, args, employee_dict, caller=role)
                 status_payload = {**payload, "result": result}
-                event_type = "tool_call.failed" if str(result).startswith("Error:") else "tool_call.executed"
+                event_type = "tool_call.failed" if _tool_result_is_error(result) else "tool_call.executed"
                 _emit_role_tool_event(role, event_type, status_payload)
-                _record_role_tool_result(
-                    role,
-                    f"{event_type}: {tool_name}({json.dumps(payload.get('arguments'), sort_keys=True)}) -> {result}",
-                )
+                resolved_name = self.registry.resolve_name(tool_name)
+                if resolved_name != "agent.think":
+                    _record_role_tool_result(
+                        role,
+                        f"{event_type}: {tool_name}({json.dumps(payload.get('arguments'), sort_keys=True)}) -> {result}",
+                    )
                 tool_results.append({
                     "role": "tool",
                     "tool_call_id": call_id,
@@ -675,12 +713,14 @@ class ResponsesProvider(ModelProvider):
                         caller=role,
                     )
                 status_payload = {**payload, "result": result}
-                event_type = "tool_call.failed" if str(result).startswith("Error:") else "tool_call.executed"
+                event_type = "tool_call.failed" if _tool_result_is_error(result) else "tool_call.executed"
                 _emit_role_tool_event(role, event_type, status_payload)
-                _record_role_tool_result(
-                    role,
-                    f"{event_type}: {tool_name}({json.dumps(payload.get('arguments'), sort_keys=True)}) -> {result}",
-                )
+                resolved_name = self.registry.resolve_name(tool_name)
+                if resolved_name != "agent.think":
+                    _record_role_tool_result(
+                        role,
+                        f"{event_type}: {tool_name}({json.dumps(payload.get('arguments'), sort_keys=True)}) -> {result}",
+                    )
                 outputs.append(
                     {
                         "type": "function_call_output",
@@ -1150,6 +1190,41 @@ def _coerce_string_list(value):
     return value
 
 
+class _ToolCodeValidator(ast.NodeVisitor):
+    """Detect prohibited constructs in agent-proposed tool code."""
+
+    def __init__(self):
+        self.errors = []
+
+    def visit_Import(self, node):
+        self.errors.append("import statements are not allowed in tool code; use the provided sandbox functions")
+
+    def visit_ImportFrom(self, node):
+        self.errors.append("import statements are not allowed in tool code; use the provided sandbox functions")
+
+    def visit_FunctionDef(self, node):
+        self.errors.append(
+            f"Tool code must not define functions ('{node.name}'). "
+            "Write a direct return statement instead. "
+            f"Example: return f\"{{get_caller_name()}}: {{status}}\""
+        )
+
+    def visit_AsyncFunctionDef(self, node):
+        self.errors.append(
+            f"Tool code must not define async functions ('{node.name}'). "
+            "Write a direct return statement instead."
+        )
+
+    def visit_ClassDef(self, node):
+        self.errors.append(f"Tool code must not define classes ('{node.name}').")
+
+
+def _validate_tool_code_ast(tree):
+    validator = _ToolCodeValidator()
+    validator.visit(tree)
+    return validator.errors
+
+
 def get_tool_proposal_store():
     global tool_proposal_store
     if tool_proposal_store is None:
@@ -1196,19 +1271,13 @@ def propose_tool_change(
             tree = ast.parse(normalized_code)
         except SyntaxError as e:
             return f"Error: Tool code has a syntax error: {e}"
-        top_level_defs = [
-            node for node in tree.body
-            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
-        ]
-        if top_level_defs:
-            names = ", ".join(n.name for n in top_level_defs)
-            return (
-                f"Error: Tool code must not define functions or classes ({names}). "
-                "Write a direct return statement instead. "
-                f"Example: return f\"{'{'}get_caller_name(){'}'}: {'{'}status{'}'}\""
-            )
+        validation_errors = _validate_tool_code_ast(tree)
+        if validation_errors:
+            return f"Error: {validation_errors[0]}"
         arg_names = list(normalized_parameters.get("properties", {}).keys())
         required_arg_names = normalized_parameters.get("required", [])
+        if not isinstance(required_arg_names, list):
+            required_arg_names = []
         try:
             tool_registry.compile_tool(tool_name, arg_names, required_arg_names, normalized_code)
         except (SyntaxError, ValueError) as e:
@@ -1299,16 +1368,19 @@ def rollout_tool_proposal(employee_dict, proposal_id, role_name, granted_by=None
         existing = tool_registry.get(tool_name)
         if existing and existing.system_tool:
             return f"Error: Cannot replace system tool '{tool_name}' via proposal."
-        tool_registry.replace_definition({
-            "name": tool_name,
-            "description": proposal["description"],
-            "parameters": proposal.get("parameters", {}),
-            "code": code,
-            "grantable": existing.grantable if existing else True,
-            "system_tool": False,
-            "required_capabilities": proposal.get("required_capabilities", []),
-            "owner_capability": proposal.get("owner_capability"),
-        })
+        try:
+            tool_registry.replace_definition({
+                "name": tool_name,
+                "description": proposal["description"],
+                "parameters": proposal.get("parameters", {}),
+                "code": code,
+                "grantable": existing.grantable if existing else True,
+                "system_tool": False,
+                "required_capabilities": proposal.get("required_capabilities", []),
+                "owner_capability": proposal.get("owner_capability"),
+            })
+        except (SyntaxError, ValueError) as e:
+            return f"Error: Failed to replace tool '{tool_name}': {e}"
     grant_result = grant_tool_access(
         employee_dict,
         role_name,
@@ -2475,7 +2547,7 @@ class Session:
     def _interrupt_wait_for_phase(self, role):
         """Return True and clear the wait if a circadian phase transition has occurred."""
         wait_cs = getattr(role, "wait_clock_state", None)
-        current_cs = getattr(role, "runtime_clock_state", clock_state)
+        current_cs = self.clock_state
         if wait_cs is not None and wait_cs != current_cs:
             role.waiting_until = None
             role.wait_started_turn = None
