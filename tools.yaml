@@ -377,6 +377,41 @@
       - alarm_id
   code: |
     return cancel_alarm(employee_dict, agent_name, alarm_id)
+- name: agent.think
+  grantable: true
+  owner_capability: agent
+  description: >
+    Record a private thought or reasoning step before acting. Silent — returns nothing
+    visible to other agents. Use this to reason through a problem, weigh options, or
+    plan a sequence of actions before committing to one.
+  parameters:
+    type: object
+    properties:
+      content:
+        type: string
+        description: The private thought, analysis, or plan to record.
+    required:
+      - content
+  code: |
+    return agent_think(employee_dict, content)
+- name: agent.wait
+  grantable: true
+  owner_capability: agent
+  description: >
+    Suspend this agent for up to N minutes. The session skips this agent's turns until
+    the wait expires, then delivers a summary of what happened while you were waiting.
+    Circadian phase transitions (shift changes, breaks, sleep) may interrupt the wait
+    early and will be noted in the wake-up summary.
+  parameters:
+    type: object
+    properties:
+      minutes:
+        type: number
+        description: How long to wait, in minutes. Must be positive.
+    required:
+      - minutes
+  code: |
+    return agent_wait(employee_dict, minutes)
 - name: memory.search
   system_tool: true
   grantable: true

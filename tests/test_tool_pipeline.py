@@ -6,6 +6,8 @@ and the newly registered tool is immediately callable within the same session.
 import json
 import tempfile
 import unittest
+from io import StringIO
+from contextlib import redirect_stdout
 
 import main
 from robits.runtime.tool_proposals import ToolProposalStore
@@ -293,6 +295,123 @@ class ToolProposalPipelineTests(unittest.TestCase):
         main.active_tool_caller_name = None
         result = func(employee_dict={})
         self.assertEqual(result, "unknown")
+
+    # --- agent.think: silent, no side effects ---
+
+    def test_agent_think_returns_empty_string(self):
+        func = main.tool_registry.compile_tool(
+            "test.think", ["content"], ["content"], "return agent_think(employee_dict, content)"
+        )
+        result = func(employee_dict={}, content="This is a private thought.")
+        self.assertEqual(result, "")
+
+    def test_agent_think_available_after_load(self):
+        employee_dict = _make_employee_dict()
+        result = main.tool_registry.execute(
+            "agent.think", {"content": "Planning next step."}, employee_dict, caller=employee_dict["SE"]
+        )
+        self.assertIn("", result)  # result contains empty (silent) return
+
+    # --- agent.wait: sets waiting_until on the caller role ---
+
+    def test_agent_wait_sets_waiting_until(self):
+        from datetime import datetime, timezone, timedelta
+        employee_dict = _make_employee_dict()
+        se_role = employee_dict["SE"]
+        main.active_tool_caller = se_role
+        main.active_session_transcript_length = 0
+        before = datetime.now(timezone.utc)
+        result = main.agent_wait(employee_dict={}, minutes=10)
+        after = datetime.now(timezone.utc)
+        main.active_tool_caller = None
+        self.assertEqual(result, "")
+        self.assertIsNotNone(se_role.waiting_until)
+        expected_min = before + timedelta(minutes=10)
+        expected_max = after + timedelta(minutes=10)
+        self.assertGreaterEqual(se_role.waiting_until, expected_min)
+        self.assertLessEqual(se_role.waiting_until, expected_max)
+        self.assertEqual(se_role.wait_started_turn, 0)
+
+    def test_agent_wait_rejects_nonpositive_minutes(self):
+        employee_dict = _make_employee_dict()
+        se_role = employee_dict["SE"]
+        main.active_tool_caller = se_role
+        try:
+            result = main.agent_wait(employee_dict={}, minutes=0)
+        finally:
+            main.active_tool_caller = None
+        self.assertIn("Error:", result)
+
+    def test_agent_wait_rejects_no_caller(self):
+        main.active_tool_caller = None
+        result = main.agent_wait(employee_dict={}, minutes=5)
+        self.assertIn("Error:", result)
+
+    # --- Session: waiting agents are skipped in round-robin ---
+
+    def test_session_skips_waiting_agent_in_round_robin(self):
+        from datetime import datetime, timezone, timedelta
+        from types import SimpleNamespace
+        import main as m
+
+        employee_dict = _make_employee_dict()
+        system = m.System(employee_dict)
+        with redirect_stdout(StringIO()):
+            m.load_tools(system)
+
+        session = m.Session(participants=employee_dict, clock_state="on")
+
+        # Mark SE as waiting for 60 minutes
+        se_role = employee_dict["SE"]
+        se_role.waiting_until = datetime.now(timezone.utc) + timedelta(minutes=60)
+        se_role.wait_started_turn = 0
+        se_role.wait_clock_state = "on"
+
+        # Route from Ops — SE should be skipped
+        routed = session.route_message("test message", "Ops")
+        self.assertNotEqual(routed.receiver.name, "SE")
+
+    def test_session_wake_summary_injected_on_expiry(self):
+        from datetime import datetime, timezone, timedelta
+        import main as m
+
+        employee_dict = _make_employee_dict()
+        system = m.System(employee_dict)
+        with redirect_stdout(StringIO()):
+            m.load_tools(system)
+
+        session = m.Session(participants=employee_dict, clock_state="on")
+
+        # Simulate a past wait (already expired)
+        se_role = employee_dict["SE"]
+        se_role.waiting_until = datetime.now(timezone.utc) - timedelta(seconds=1)
+        se_role.wait_started_turn = 0
+        se_role.wait_clock_state = "on"
+
+        summary = session._build_wait_summary(se_role)
+        self.assertIn("wait has ended", summary.lower())
+        self.assertIsNone(se_role.waiting_until)
+
+    def test_session_wait_interrupted_by_clock_state_change(self):
+        from datetime import datetime, timezone, timedelta
+        import main as m
+
+        employee_dict = _make_employee_dict()
+        system = m.System(employee_dict)
+        with redirect_stdout(StringIO()):
+            m.load_tools(system)
+
+        session = m.Session(participants=employee_dict, clock_state="on")
+
+        se_role = employee_dict["SE"]
+        se_role.waiting_until = datetime.now(timezone.utc) + timedelta(minutes=60)
+        se_role.wait_started_turn = 0
+        se_role.wait_clock_state = "on"
+        se_role.runtime_clock_state = "off"  # simulate clock state change
+
+        interrupted = session._interrupt_wait_for_phase(se_role)
+        self.assertTrue(interrupted)
+        self.assertIsNone(se_role.waiting_until)
 
 
 if __name__ == "__main__":

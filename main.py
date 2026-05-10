@@ -231,6 +231,8 @@ class ToolRegistry:
                 "builtin_image_generation": builtin_image_generation,
                 "org_chat_read": org_chat_read,
                 "work_todo_add": work_todo_add,
+                "agent_think": agent_think,
+                "agent_wait": agent_wait,
             },
             local_dict,
         )
@@ -464,6 +466,7 @@ class ToolRegistry:
 tool_registry = ToolRegistry()
 active_tool_caller = None
 active_tool_caller_name = None
+active_session_transcript_length = 0  # updated by Session.step() before each turn
 
 
 def _response_text(response):
@@ -1986,6 +1989,33 @@ def builtin_image_generation(employee_dict, prompt, size=None, quality=None):
     return "Error: builtin.image_generation is not implemented in this runtime."
 
 
+def agent_think(employee_dict, content):
+    """Private reasoning step — silent return. Thought is preserved in the tool-call history."""
+    del employee_dict, content
+    return ""
+
+
+def agent_wait(employee_dict, minutes):
+    """Suspend the calling agent for up to N minutes. Session skips its turns until the wait
+    expires, then wakes it with a summary of what happened during the wait. Circadian phase
+    transitions (clock_state changes) interrupt the wait early."""
+    del employee_dict
+    caller = active_tool_caller
+    if caller is None:
+        return "Error: agent.wait called outside of agent context."
+    try:
+        duration = float(minutes)
+    except (TypeError, ValueError):
+        return "Error: minutes must be a number."
+    if duration <= 0:
+        return "Error: minutes must be positive."
+    now = datetime.now(timezone.utc)
+    caller.waiting_until = now + timedelta(minutes=duration)
+    caller.wait_started_turn = active_session_transcript_length
+    caller.wait_clock_state = getattr(caller, "runtime_clock_state", clock_state)
+    return ""
+
+
 def due_alarm_reminders(role, now=None):
     now = now or datetime.now(timezone.utc)
     reminders = []
@@ -2058,7 +2088,6 @@ class Role:
         self.name = name
         turn_action_template = """
 On your turn, choose one useful action. You do not need to reply to every message.
-You may reply in plain text, call a tool by returning {"exec":"namespace.tool_name","args":{}}, record a private thought by returning {"action":"think","content":"..."}, or wait silently by returning {"action":"wait"}.
 Only say that you created, changed, or called a tool after the runtime has returned a verified tool result. Without a verified result, describe the work as a request, proposal, or plan instead of a completed fact.
 """
         self.template = template + group_template_additions + turn_action_template
@@ -2078,6 +2107,9 @@ Only say that you created, changed, or called a tool after the runtime has retur
         self.runtime_session_id = None
         self.runtime_role_name = self.name
         self.runtime_tool_results = []
+        self.waiting_until = None       # datetime or None — set by agent.wait
+        self.wait_started_turn = None   # transcript length at wait start
+        self.wait_clock_state = None    # clock_state at wait start (for phase interrupts)
 
     def interact(self, sender, prompt):
         return interact_cheap(self, sender, prompt)
@@ -2143,7 +2175,7 @@ class System(Role):
 class Ops(Role):
     def __init__(self, employee_dict):
         role_description = """You are OPs for an AI powered organization."""
-        group_template_additions = """You are part of the Operations group. Members of this group oversee whether the agent environment is operating successfully. Tools are available to agents through a concise registry; to request a tool, send a JSON blob on a new line in the format: {"exec":"namespace.tool_name", "args":{"string_var":"string", "numeric_var":123}}."""
+        group_template_additions = """You are part of the Operations group. Members of this group oversee whether the agent environment is operating successfully."""
         super().__init__(
             self.__class__.__name__, role_description, employee_dict, group_template_additions
         )
@@ -2156,9 +2188,7 @@ class HR(Role):
 
     def __init__(self, employee_dict):
         role_description = "As the HR, you are responsible for managing AI resources and creating new roles within the organization. Maintaining a productive, sustainable, and respectful workforce and culture in the organization."
-        group_template_additions = """
-You are part of the Human Resources group. To create a new role, send a message in the format 'create role [role_name]', and the system will create a new role with the specified name. The role will have a default description, which can be customized later.
-"""
+        group_template_additions = "\nYou are part of the Human Resources group.\n"
         super().__init__(
             self.__class__.__name__, role_description, employee_dict, group_template_additions
         )
@@ -2210,7 +2240,7 @@ class Human(Role):
         try:
             text = input(f"{self.name}: ")
         except EOFError:
-            return '{"action":"wait"}'
+            return ""
         stripped = text.strip()
         if stripped.startswith("/"):
             cmd = stripped.split()[0].lower()
@@ -2221,9 +2251,9 @@ class Human(Role):
                 for name, desc in self._SLASH_COMMANDS.items():
                     lines.append(f"  {name}  — {desc}")
                 print("\n".join(lines))
-                return '{"action":"wait"}'
+                return ""
             print(f"Unknown command: {cmd}. Type /help for available commands.")
-            return '{"action":"wait"}'
+            return ""
         return text
 
 
@@ -2423,6 +2453,36 @@ class Session:
             except Exception:
                 pass
 
+    def _build_wait_summary(self, role):
+        """Build the wake-up message for a role whose wait just expired."""
+        started = getattr(role, "wait_started_turn", None) or 0
+        since = self.transcript[started:]
+        wu = role.waiting_until
+        role.waiting_until = None
+        role.wait_started_turn = None
+        role.wait_clock_state = None
+        if not since:
+            return "Your wait has ended. Nothing notable happened while you were waiting."
+        lines = ["Your wait has ended. Here is what happened while you were waiting:"]
+        for entry in since:
+            if entry.response and entry.response.strip():
+                snippet = entry.response.strip()[:200]
+                lines.append(f"[Turn {entry.turn}] {entry.sender} → {entry.receiver}: {snippet}")
+        if len(lines) == 1:
+            return "Your wait has ended. Nothing notable happened while you were waiting."
+        return "\n".join(lines)
+
+    def _interrupt_wait_for_phase(self, role):
+        """Return True and clear the wait if a circadian phase transition has occurred."""
+        wait_cs = getattr(role, "wait_clock_state", None)
+        current_cs = getattr(role, "runtime_clock_state", clock_state)
+        if wait_cs is not None and wait_cs != current_cs:
+            role.waiting_until = None
+            role.wait_started_turn = None
+            role.wait_clock_state = None
+            return True
+        return False
+
     def route_message(self, message, last_receiver_name=None):
         prompt_split = message.split(",", 1) if isinstance(message, str) else []
         if len(prompt_split) > 1:
@@ -2440,7 +2500,19 @@ class Session:
                 )
                 return RoutedMessage(self.participants[receiver_name], prompt_split[1].strip(), True)
 
+        now = datetime.now(timezone.utc)
+        tried: set = set()
         receiver_name = self.scheduler.next(last_receiver_name)
+        while receiver_name not in tried:
+            receiver = self.participants.get(receiver_name)
+            if receiver is None:
+                break
+            wu = getattr(receiver, "waiting_until", None)
+            if wu is None or now >= wu or self._interrupt_wait_for_phase(receiver):
+                break
+            tried.add(receiver_name)
+            receiver_name = self.scheduler.next(receiver_name)
+
         self.event_stream.emit(
             "message.routed",
             self.run_id,
@@ -2820,14 +2892,22 @@ class Session:
         return list(reversed(events))
 
     def step(self, message):
+        global active_session_transcript_length
         sender = self.last_receiver
         self.sync_scheduler_participants()
+        active_session_transcript_length = len(self.transcript)
         routed = self.route_message(message, sender.name)
         system_events = self.process_tool_instruction(message, sender=sender)
         if system_events:
             deliver_verified_tool_results(sender, system_events)
         self.sync_scheduler_participants()
         prompt = routed.prompt
+        # Inject wait-expiry summary if this agent just woke from a wait.
+        now = datetime.now(timezone.utc)
+        wu = getattr(routed.receiver, "waiting_until", None)
+        if wu is not None and now >= wu:
+            wait_summary = self._build_wait_summary(routed.receiver)
+            prompt = wait_summary + "\n\n" + prompt
         reminders = due_alarm_reminders(routed.receiver)
         if reminders:
             prompt = "\n".join(reminders + [prompt])
