@@ -711,6 +711,38 @@
         granted_by=granted_by if granted_by is not None else get_caller_name(),
         rollout_notes=rollout_notes if rollout_notes is not None else "",
     )
+- name: tools.approve_and_rollout
+  system_tool: true
+  grantable: false
+  required_capabilities:
+    - operator
+  owner_capability: operator
+  description: Approve and roll out a proposed tool in one step. Resolves the proposal by tool name or proposal ID, approves it if still pending, registers the code in the runtime, and grants access to the specified role. Use this instead of calling approve_proposal and rollout_proposal separately.
+  parameters:
+    type: object
+    properties:
+      role_name:
+        type: string
+        description: Role to grant the tool to after rollout (e.g. SE).
+      tool_name:
+        type: string
+        description: Name of the tool whose latest pending proposal should be approved and rolled out.
+      proposal_id:
+        type: string
+        description: Specific proposal ID to approve and roll out. Use instead of tool_name when there are multiple proposals for the same tool.
+      approved_by:
+        type: string
+        description: Name of the approving operator. Defaults to the calling agent.
+    required:
+      - role_name
+  code: |
+    return approve_and_rollout_proposal(
+        employee_dict,
+        role_name,
+        tool_name=tool_name,
+        proposal_id=proposal_id,
+        approved_by=approved_by if approved_by is not None else get_caller_name(),
+    )
 - name: builtin.web_search
   grantable: true
   owner_capability: agent

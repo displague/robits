@@ -1026,24 +1026,24 @@ class RuntimeTests(unittest.TestCase):
         self.assertEqual(len(attempts), 2)
         sleep.assert_not_called()
 
-    def test_chat_completion_parallelism_gate_covers_stream_consumption(self):
+    def test_chat_completion_parallelism_gate_covers_api_call(self):
         gate_was_held = []
 
-        def stream():
+        def fake_create(**_kwargs):
             gate_was_held.append(not main.model_call_gate.acquire(blocking=False))
             if not gate_was_held[-1]:
                 main.model_call_gate.release()
-            yield SimpleNamespace(
+            return SimpleNamespace(
                 choices=[
-                    SimpleNamespace(delta=SimpleNamespace(content="hello"))
+                    SimpleNamespace(
+                        message=SimpleNamespace(content="hello", tool_calls=None)
+                    )
                 ]
             )
 
         fake_client = SimpleNamespace(
             chat=SimpleNamespace(
-                completions=SimpleNamespace(
-                    create=lambda **_kwargs: stream()
-                ),
+                completions=SimpleNamespace(create=fake_create),
             )
         )
         provider = main.ChatCompletionsProvider(fake_client)

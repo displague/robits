@@ -215,6 +215,7 @@ class ToolRegistry:
                 "approve_tool_proposal": approve_tool_proposal,
                 "reject_tool_proposal": reject_tool_proposal,
                 "rollout_tool_proposal": rollout_tool_proposal,
+                "approve_and_rollout_proposal": approve_and_rollout_proposal,
                 "workspace_list": workspace_list,
                 "workspace_read": workspace_read,
                 "workspace_write": workspace_write,
@@ -549,27 +550,69 @@ class ModelProvider:
 
 
 class ChatCompletionsProvider(ModelProvider):
-    def __init__(self, api_client):
+    def __init__(self, api_client, registry=None):
         self.client = api_client
+        self.registry = registry if registry is not None else tool_registry
 
     def generate(self, role, model, sender, messages):
-        def request():
-            stream = self.client.chat.completions.create(
-                model=model,
-                messages=messages,
-                max_tokens=role.max_tokens,
-                n=1,
-                temperature=role.temperature,
-                user=f"robits_{role.name}",
-                stream=True,
-            )
-            content = ""
-            for chunk in stream:
-                if chunk.choices[0].delta.content is not None:
-                    content += chunk.choices[0].delta.content
-            return content
+        employee_dict = getattr(role, "employee_dict", None)
+        tools = self.registry.as_chat_completion_tools(role)
+        kwargs = {
+            "model": model,
+            "messages": list(messages),
+            "max_tokens": role.max_tokens,
+            "n": 1,
+            "temperature": role.temperature,
+            "user": f"robits_{role.name}",
+        }
+        if tools:
+            kwargs["tools"] = tools
+            kwargs["tool_choice"] = "auto"
 
-        return _with_model_retries(request)
+        for _ in range(8):
+            response = _with_model_retries(lambda: self.client.chat.completions.create(**kwargs))
+            message = response.choices[0].message
+            tool_calls = getattr(message, "tool_calls", None) or []
+            if not tool_calls:
+                return message.content or ""
+            if employee_dict is None:
+                return "Error: Tool call requested but no employee dictionary is available."
+            kwargs["messages"] = list(kwargs["messages"]) + [message]
+            tool_results = []
+            for call in tool_calls:
+                tool_name = call.function.name
+                call_id = call.id
+                payload = {
+                    "agent": getattr(role, "name", None),
+                    "role_name": getattr(role, "runtime_role_name", None),
+                    "call_id": call_id,
+                    "tool_name": tool_name,
+                }
+                try:
+                    args = json.loads(call.function.arguments or "{}")
+                except json.JSONDecodeError as error:
+                    payload["arguments"] = call.function.arguments
+                    payload["error"] = f"Invalid tool arguments JSON: {error}"
+                    _emit_role_tool_event(role, "tool_call.requested", payload)
+                    result = f"Error: Invalid tool arguments JSON: {error}"
+                else:
+                    payload["arguments"] = args
+                    _emit_role_tool_event(role, "tool_call.requested", payload)
+                    result = self.registry.execute(tool_name, args, employee_dict, caller=role)
+                status_payload = {**payload, "result": result}
+                event_type = "tool_call.failed" if str(result).startswith("Error:") else "tool_call.executed"
+                _emit_role_tool_event(role, event_type, status_payload)
+                _record_role_tool_result(
+                    role,
+                    f"{event_type}: {tool_name}({json.dumps(payload.get('arguments'), sort_keys=True)}) -> {result}",
+                )
+                tool_results.append({
+                    "role": "tool",
+                    "tool_call_id": call_id,
+                    "content": str(result),
+                })
+            kwargs["messages"] = kwargs["messages"] + tool_results
+        return "Error: Too many consecutive tool-call rounds."
 
 
 class ResponsesProvider(ModelProvider):
@@ -1279,6 +1322,31 @@ def rollout_tool_proposal(employee_dict, proposal_id, role_name, granted_by=None
         granted_roles=granted_roles,
     )
     return json.dumps({"proposal": updated, "grant_result": grant_result}, sort_keys=True)
+
+
+def approve_and_rollout_proposal(employee_dict, role_name, tool_name=None, proposal_id=None, approved_by=None):
+    """Approve and roll out a proposal in one step, by tool_name or proposal_id."""
+    store = get_tool_proposal_store()
+    if proposal_id:
+        proposal = store.get(proposal_id)
+        if proposal is None:
+            return f"Error: Proposal '{proposal_id}' not found."
+    elif tool_name:
+        candidates = [p for p in store.list(status="proposed") if p["tool_name"] == tool_name]
+        if not candidates:
+            candidates = [p for p in store.list(status="approved") if p["tool_name"] == tool_name]
+        if not candidates:
+            return f"Error: No pending proposal found for tool '{tool_name}'."
+        proposal = candidates[-1]
+        proposal_id = proposal["proposal_id"]
+    else:
+        return "Error: Provide tool_name or proposal_id."
+    approver = approved_by or (active_tool_caller_name or getattr(active_tool_caller, "name", None) or "Ops")
+    if proposal["status"] == "proposed":
+        approve_result = approve_tool_proposal(employee_dict, proposal_id, approved_by=approver)
+        if approve_result.startswith("Error:"):
+            return approve_result
+    return rollout_tool_proposal(employee_dict, proposal_id, role_name, granted_by=approver)
 
 
 def validate_role_name(role_name):
