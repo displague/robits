@@ -396,14 +396,30 @@ class ToolRegistry:
             system_tool=system_tool,
             grantable=grantable,
         )
-        # Remove stale aliases from the old definition before installing the new one.
+        # Inherit existing custom aliases when the instruction doesn't supply new ones,
+        # so that callers using prior alias names continue to work after a tool update.
         old_tool = self._tools.get(name)
+        effective_aliases = aliases if aliases else (old_tool.aliases if old_tool else ())
         if old_tool is not None:
             stale = [k for k, v in self._aliases.items() if v == name]
             for k in stale:
                 del self._aliases[k]
+        tool = ToolDefinition(
+            name=tool.name,
+            description=tool.description,
+            parameters=tool.parameters,
+            args=tool.args,
+            required_args=tool.required_args,
+            func=tool.func,
+            aliases=effective_aliases,
+            namespace=tool.namespace,
+            required_capabilities=tool.required_capabilities,
+            owner_capability=tool.owner_capability,
+            system_tool=tool.system_tool,
+            grantable=tool.grantable,
+        )
         self._tools[name] = tool
-        for alias in aliases:
+        for alias in effective_aliases:
             self._aliases[alias] = name
         openai_name = tool.openai_name
         if openai_name != name:
@@ -562,7 +578,7 @@ def _tool_result_is_error(raw_result):
     s = str(raw_result)
     if s.startswith("Error:"):
         return True
-    idx = s.find(_EXECUTE_RESULT_MARKER)
+    idx = s.rfind(_EXECUTE_RESULT_MARKER)
     if idx != -1:
         return s[idx + len(_EXECUTE_RESULT_MARKER):].startswith("Error:")
     return False

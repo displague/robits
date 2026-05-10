@@ -148,8 +148,10 @@ workspace_write(employee_dict, get_caller_name(), "status.txt", status)
 return f"Status recorded for {get_caller_name()}."
 
 # ✅ Getting current time — use current_agent_context; json is not importable
+# current_agent_context returns a JSON string; extract fields via str operations
 ctx_json = current_agent_context(employee_dict)
-# ctx_json is a JSON string; parse with dict() if needed or extract with str operations
+# Example: extract a quoted field value
+# ts = ctx_json.split('"current_datetime_local": "')[1].split('"')[0]
 
 # ❌ Nested function definition — rejected at proposal time
 def helper(s):
