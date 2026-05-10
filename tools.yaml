@@ -558,7 +558,7 @@
     properties:
       requested_by:
         type: string
-        description: Agent proposing the tool change.
+        description: Agent proposing the tool change. Defaults to the calling agent's name if omitted.
       tool_name:
         type: string
         description: Tool name being proposed.
@@ -590,15 +590,14 @@
         description: Notes for the engineer or operator implementing the proposal.
       code:
         type: string
-        description: "Python implementation for the tool. Runs in a restricted sandbox: no imports, limited builtins. Available globals: get_caller_name() returns the calling agent's name; workspace_write/read/list manage files; memory_search finds stored context. Example: return f\"{get_caller_name()}: {message}\". If provided, the tool is compiled and validated immediately; a passing compile means rollout can activate the tool without a restart."
+        description: "Python implementation for the tool. Write the body as simple statements ending with a return — do NOT define nested functions or lambdas. No imports; limited builtins. Available globals: get_caller_name() → calling agent's name; workspace_write/read/list → agent files; memory_search → stored context. Good example: return f\"{get_caller_name()}: {message}\". Bad example: def f(x): return x (nested functions not allowed). The code is compiled immediately on proposal; a clean compile means rollout activates the tool without a restart."
     required:
-      - requested_by
       - tool_name
       - description
   code: |
     return propose_tool_change(
         employee_dict,
-        requested_by,
+        requested_by if requested_by is not None else get_caller_name(),
         tool_name,
         description,
         action=action if action is not None else "create",
@@ -642,18 +641,17 @@
         description: Proposal ID to approve.
       approved_by:
         type: string
-        description: Operator approving the proposal.
+        description: Operator approving the proposal. Defaults to the calling agent's name if omitted.
       implementation_notes:
         type: string
         description: Notes on implementation or rollout conditions.
     required:
       - proposal_id
-      - approved_by
   code: |
     return approve_tool_proposal(
         employee_dict,
         proposal_id,
-        approved_by,
+        approved_by if approved_by is not None else get_caller_name(),
         implementation_notes=implementation_notes if implementation_notes is not None else "",
     )
 - name: tools.reject_proposal
@@ -699,7 +697,7 @@
         description: Role receiving access to the approved tool.
       granted_by:
         type: string
-        description: Operator granting access.
+        description: Operator granting access. Defaults to the calling agent's name if omitted.
       rollout_notes:
         type: string
         description: Notes about rollout scope or operating constraints.
@@ -711,7 +709,7 @@
         employee_dict,
         proposal_id,
         role_name,
-        granted_by=granted_by,
+        granted_by=granted_by if granted_by is not None else get_caller_name(),
         rollout_notes=rollout_notes if rollout_notes is not None else "",
     )
 - name: builtin.web_search

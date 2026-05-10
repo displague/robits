@@ -100,7 +100,20 @@ class ToolProposalPipelineTests(unittest.TestCase):
             code="return (",
         )
         self.assertIn("Error:", result)
-        self.assertIn("compile", result)
+        self.assertIn("syntax error", result.lower())
+
+    def test_propose_with_function_definition_is_rejected(self):
+        employee_dict = _make_employee_dict()
+        result = main.propose_tool_change(
+            employee_dict,
+            requested_by="SE",
+            tool_name="team.bad",
+            description="Uses nested def.",
+            parameters={"type": "object", "properties": {"status": {"type": "string"}}, "required": ["status"]},
+            code='def helper(s):\n    return s\nreturn helper(status)',
+        )
+        self.assertIn("Error:", result)
+        self.assertIn("function", result)
 
     def test_propose_without_code_still_succeeds(self):
         employee_dict = _make_employee_dict()
@@ -224,6 +237,40 @@ class ToolProposalPipelineTests(unittest.TestCase):
             "team.pulse", {"status": "reviewing"}, employee_dict, caller=se_role
         )
         self.assertIn("SE: reviewing", result)
+
+    # --- flat property-map parameters are auto-normalized ---
+
+    def test_propose_flat_property_map_is_normalized_to_json_schema(self):
+        employee_dict = _make_employee_dict()
+        result = json.loads(main.propose_tool_change(
+            employee_dict,
+            requested_by="SE",
+            tool_name="team.pulse",
+            description="Status tool.",
+            parameters={"status": {"type": "string", "description": "Current status."}},
+            code='return f"{get_caller_name()}: {status}"',
+        ))
+        params = result["parameters"]
+        self.assertEqual(params["type"], "object")
+        self.assertIn("status", params["properties"])
+        self.assertIn("status", params["required"])
+
+    def test_propose_already_correct_schema_is_unchanged(self):
+        employee_dict = _make_employee_dict()
+        full_schema = {
+            "type": "object",
+            "properties": {"status": {"type": "string"}},
+            "required": ["status"],
+        }
+        result = json.loads(main.propose_tool_change(
+            employee_dict,
+            requested_by="SE",
+            tool_name="team.pulse",
+            description="Status tool.",
+            parameters=full_schema,
+            code='return f"{get_caller_name()}: {status}"',
+        ))
+        self.assertEqual(result["parameters"], full_schema)
 
     # --- get_caller_name is available in sandbox ---
 

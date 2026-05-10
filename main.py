@@ -2,6 +2,7 @@
 from dataclasses import dataclass, field
 from openai import OpenAI
 
+import ast
 import random
 import time
 import os
@@ -1075,6 +1076,24 @@ def _coerce_json_object(value, default=None):
     return value
 
 
+def _normalize_tool_parameters(params):
+    """Coerce a flat {name: schema} property map into proper JSON Schema object format.
+
+    Models often omit the outer {type: object, properties: {...}, required: [...]} wrapper.
+    If the dict has no 'type' key and all values look like property schemas (dicts with a
+    'type' field), wrap automatically so compile_tool gets the right arg list.
+    """
+    if not isinstance(params, dict) or "properties" in params or "type" in params:
+        return params
+    if params and all(isinstance(v, dict) and "type" in v for v in params.values()):
+        return {
+            "type": "object",
+            "properties": params,
+            "required": list(params.keys()),
+        }
+    return params
+
+
 def _coerce_string_list(value):
     if value is None:
         return []
@@ -1110,10 +1129,10 @@ def propose_tool_change(
     del employee_dict
     try:
         tool_registry.validate_tool_name(tool_name)
-        normalized_parameters = _coerce_json_object(
+        normalized_parameters = _normalize_tool_parameters(_coerce_json_object(
             parameters,
             {"type": "object", "properties": {}, "required": []},
-        )
+        ))
         normalized_capabilities = _coerce_string_list(required_capabilities)
     except ValueError as e:
         return f"Error: {e}"
@@ -1127,6 +1146,21 @@ def propose_tool_change(
             return f"Error: System tool '{tool_name}' cannot be changed by SE proposal."
     normalized_code = code.strip() if isinstance(code, str) else ""
     if normalized_code:
+        try:
+            tree = ast.parse(normalized_code)
+        except SyntaxError as e:
+            return f"Error: Tool code has a syntax error: {e}"
+        top_level_defs = [
+            node for node in tree.body
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
+        ]
+        if top_level_defs:
+            names = ", ".join(n.name for n in top_level_defs)
+            return (
+                f"Error: Tool code must not define functions or classes ({names}). "
+                "Write a direct return statement instead. "
+                f"Example: return f\"{'{'}get_caller_name(){'}'}: {'{'}status{'}'}\""
+            )
         arg_names = list(normalized_parameters.get("properties", {}).keys())
         required_arg_names = normalized_parameters.get("required", [])
         try:
@@ -2073,7 +2107,7 @@ class Angel(Role):
 class SoftwareEngineer(Role):
     def __init__(self, employee_dict):
         template = """As a Software Engineer (SE), you are responsible for designing, developing, and maintaining software applications. You primarily propose trusted tools when requested by others in your organization."""
-        group_template_additions = """You are part of the Engineering group. Tools are trusted functions described by namespaced OpenAI-compatible metadata. You can propose tools with working Python code using the `code` field in tools.propose. The code runs in a restricted sandbox: no imports, limited builtins (bool, int, str, list, dict, len, max, min, range, sum). Available globals: get_caller_name() returns the calling agent's name; workspace_write/read/list manage agent files; memory_search finds stored context; work_todo_add tracks tasks. Example code for a status tool: return f"{get_caller_name()}: {status}". Approved proposals with code are registered and activated at rollout without a restart."""
+        group_template_additions = """You are part of the Engineering group. Tools are trusted functions described by namespaced OpenAI-compatible metadata. You can propose tools with working Python code using the `code` field in tools.propose. IMPORTANT CODE RULES: write the body as a sequence of simple statements ending with a single `return` — do NOT define nested functions or lambdas. The sandbox has no imports and limited builtins (bool, int, str, list, dict, len, max, min, range, sum). Available globals: get_caller_name() → calling agent's name; workspace_write/read/list → agent files; memory_search → stored context; work_todo_add → task tracking. Example for a status tool with a `status` parameter: `return f"{get_caller_name()}: {status}"`. Parameters must use JSON Schema format: {"type":"object","properties":{"status":{"type":"string"}},"required":["status"]}. Approved proposals with code are registered and activated at rollout without a restart."""
         super().__init__(self.__class__.__name__, template, employee_dict, group_template_additions)
         self.capabilities = {"engineer"}
         self.allowed_tools.update({"tools.list", "tools.list_proposals", "tools.propose"})
@@ -2098,7 +2132,10 @@ class Human(Role):
         self.runtime_tool_results = []
 
     def interact(self, *_):
-        return input(f"{self.name}: ")
+        try:
+            return input(f"{self.name}: ")
+        except EOFError:
+            return '{"action":"wait"}'
 
 
 def parse_tool_instruction(s):
