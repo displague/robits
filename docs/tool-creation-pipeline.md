@@ -24,34 +24,35 @@ is available immediately in the same session.
 
 ## Step-by-step with exact tool call format
 
+Agents use native function calling. The tool name `tools.propose` is presented to the
+model as `tools__propose` (dots replaced with double underscores) in the Chat
+Completions and Responses APIs.
+
 ### 1 — SE proposes the tool
 
-SE calls `tools.propose` with a `code` field containing a **direct return statement**
-(no function definitions, no lambdas).
+SE calls `tools__propose` with a `code` field containing a **direct return statement**
+(no function or class definitions, no import statements).
 
 ```json
 {
-  "exec": "tools.propose",
-  "args": {
-    "tool_name": "team.pulse",
-    "description": "Report the calling agent's current status.",
-    "parameters": {
-      "type": "object",
-      "properties": {
-        "status": {
-          "type": "string",
-          "description": "Current activity or state to broadcast."
-        }
-      },
-      "required": ["status"]
+  "tool_name": "team.pulse",
+  "description": "Report the calling agent's current status.",
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "status": {
+        "type": "string",
+        "description": "Current activity or state to broadcast."
+      }
     },
-    "code": "return f\"{get_caller_name()}: {status}\""
-  }
+    "required": ["status"]
+  },
+  "code": "return f\"{get_caller_name()}: {status}\""
 }
 ```
 
-The runtime compiles `code` immediately. If it contains a `def` or `lambda`, the
-proposal is rejected with a clear error. On success, the response includes a
+The runtime compiles `code` immediately. If it contains a `def`, `class`, or `import`,
+the proposal is rejected with a clear error. On success, the response includes a
 `proposal_id` that Ops will need.
 
 **Example success response (abbreviated):**
@@ -66,35 +67,21 @@ proposal is rejected with a clear error. On success, the response includes a
 
 ### 2 — Ops lists and reviews pending proposals
 
-```json
-{
-  "exec": "tools.list_proposals",
-  "args": { "status": "proposed" }
-}
-```
+Call `tools__list_proposals` with `{"status": "proposed"}`.
 
 ### 3 — Ops approves the proposal
 
-```json
-{
-  "exec": "tools.approve_proposal",
-  "args": {
-    "proposal_id": "tool-proposal-ef9cf15f-..."
-  }
-}
-```
+Call `tools__approve_proposal` with `{"proposal_id": "tool-proposal-ef9cf15f-..."}`.
 
 `approved_by` defaults to the calling agent's name if omitted.
 
 ### 4 — Ops rolls out the tool (compiles and registers it live)
 
+Call `tools__rollout_proposal` with:
 ```json
 {
-  "exec": "tools.rollout_proposal",
-  "args": {
-    "proposal_id": "tool-proposal-ef9cf15f-...",
-    "role_name": "SE"
-  }
+  "proposal_id": "tool-proposal-ef9cf15f-...",
+  "role_name": "SE"
 }
 ```
 
@@ -108,17 +95,12 @@ At this point, `team.pulse` is compiled from the proposal code and registered in
 }
 ```
 
-To grant the tool to additional roles, call `tools.rollout_proposal` again with a
+To grant the tool to additional roles, call `tools__rollout_proposal` again with a
 different `role_name`.
 
 ### 5 — Agents call the new tool
 
-```json
-{
-  "exec": "team.pulse",
-  "args": { "status": "on-task, reviewing PRs" }
-}
-```
+Call `team__pulse` with `{"status": "on-task, reviewing PRs"}`.
 
 **Result:** `SE: on-task, reviewing PRs`
 
@@ -138,11 +120,13 @@ Tool code runs inside a compiled Python function. Available globals:
 | `work_todo_add(employee_dict, title, content)` | Add a todo item |
 | `current_agent_context(employee_dict)` | Return the calling agent's full runtime context (JSON) |
 
-**Builtins:** `bool`, `int`, `str`, `float`, `list`, `dict`, `tuple`, `set`,
-`len`, `max`, `min`, `sum`, `range`, `sorted`, `enumerate`, `zip`, `abs`, `round`
+**Builtins:** `abs`, `bool`, `dict`, `enumerate`, `float`, `int`, `len`, `list`,
+`max`, `min`, `range`, `round`, `set`, `sorted`, `str`, `sum`, `tuple`, `zip`
 
-**Prohibited:** `import`, `exec`, `eval`, function definitions (`def`/`lambda`),
-class definitions, file I/O, network calls outside the provided globals.
+**Prohibited:** `import`, `exec`, `eval`, function definitions (`def`), class
+definitions, file I/O, network calls outside the provided globals.
+
+**Lambdas** are permitted as expressions within a return statement.
 
 ### Code patterns
 
@@ -155,18 +139,28 @@ if not message:
     return "Error: message is required."
 return f"[{get_caller_name()}] {message}"
 
+# ✅ Lambda as a local expression
+transform = lambda x: x.strip()
+return f"{get_caller_name()}: {transform(status)}"
+
 # ✅ Using workspace to persist state
 workspace_write(employee_dict, get_caller_name(), "status.txt", status)
 return f"Status recorded for {get_caller_name()}."
+
+# ✅ Getting current time — use current_agent_context; json is not importable
+# current_agent_context returns a JSON string; extract fields via str operations
+ctx_json = current_agent_context(employee_dict)
+# Example: extract a quoted field value
+# ts = ctx_json.split('"current_datetime_local": "')[1].split('"')[0]
 
 # ❌ Nested function definition — rejected at proposal time
 def helper(s):
     return s.upper()
 return helper(status)
 
-# ❌ Lambda — rejected at proposal time
-transform = lambda x: x.strip()
-return transform(status)
+# ❌ Import statement — rejected at proposal time
+import json
+return json.dumps({"caller": get_caller_name(), "status": status})
 ```
 
 ---
@@ -175,28 +169,22 @@ return transform(status)
 
 To replace the implementation of an already-active tool, propose with `action: update`:
 
+Call `tools__propose` with:
 ```json
 {
-  "exec": "tools.propose",
-  "args": {
-    "tool_name": "team.pulse",
-    "action": "update",
-    "description": "Report status with timestamp.",
-    "parameters": {
-      "type": "object",
-      "properties": {
-        "status": { "type": "string" }
-      },
-      "required": ["status"]
+  "tool_name": "team.pulse",
+  "action": "update",
+  "description": "Report status with caller name.",
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "status": { "type": "string" }
     },
-    "code": "ctx = current_agent_context(employee_dict); import json; ts = json.loads(ctx).get('current_datetime_local',''); return f\"{get_caller_name()} [{ts}]: {status}\""
-  }
+    "required": ["status"]
+  },
+  "code": "return f\"{get_caller_name()}: {status}\""
 }
 ```
-
-Wait — `import` is not allowed in the sandbox. Use the `current_agent_context` return
-value via a workaround if you need the timestamp. In practice, the agent can include
-date/time from the runtime context provided in every system prompt instead.
 
 ---
 
@@ -204,7 +192,7 @@ date/time from the runtime context provided in every system prompt instead.
 
 The pipeline requires a model that can:
 
-1. Follow multi-step tool-call instructions
+1. Follow multi-step tool-call instructions using the native function-calling protocol
 2. Provide JSON Schema parameter definitions
 3. Write a direct return expression in the `code` field
 
@@ -216,6 +204,7 @@ The pipeline requires a model that can:
 ```bash
 OPENAI_BASE_URL=http://127.0.0.1:11434/v1/ \
 OPENAI_API_KEY=ollama \
+ROBITS_PROVIDER_API=chat \
 OPENAI_MODEL=granite4.1:8b \
 .venv/bin/python main.py --turns 20 --log /tmp/robits-demo.log \
   --prompt "Team, we need a shared status signal.
@@ -223,7 +212,7 @@ SE: call tools.propose with tool_name=team.pulse,
 description='Report caller status', and code exactly as:
 return f\"{get_caller_name()}: {status}\"
 Set parameters to: {\"type\":\"object\",\"properties\":{\"status\":{\"type\":\"string\"}},\"required\":[\"status\"]}
-Do NOT write def or lambda in code.
+Do NOT write def or import in code.
 Ops: after the proposal appears in tools.list_proposals, call tools.approve_proposal
 with the proposal_id, then tools.rollout_proposal with proposal_id and role_name=SE.
 Once rolled out, every agent calls team.pulse to report current status."
@@ -284,9 +273,8 @@ in `ToolRegistry`. If not, it compiles the proposal's `code` with the declared
 parameter schema and registers it in-place. Subsequent agents can call it immediately.
 
 **Update proposals:** When `action: update`, `tools.rollout_proposal` calls
-`ToolRegistry.replace_definition`, which swaps the compiled function without touching
-the tool's name or existing grants. System tools (`system_tool: true`) cannot be
-replaced this way.
+`ToolRegistry.replace_definition`, which swaps the compiled function and re-registers
+all aliases. System tools (`system_tool: true`) cannot be replaced this way.
 
 **Proposal store:** Proposals persist across sessions in `var/tool_proposals.json`
 (configurable via `ROBITS_TOOL_PROPOSALS_FILE`). Registered tools are only
