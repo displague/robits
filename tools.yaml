@@ -593,13 +593,12 @@
         description: "Python implementation for the tool. Write the body as simple statements ending with a return — do NOT define nested functions or lambdas. No imports; limited builtins. Available globals: get_caller_name() → calling agent's name; workspace_write/read/list → agent files; memory_search → stored context. Good example: return f\"{get_caller_name()}: {message}\". Bad example: def f(x): return x (nested functions not allowed). The code is compiled immediately on proposal; a clean compile means rollout activates the tool without a restart."
     required:
       - tool_name
-      - description
   code: |
     return propose_tool_change(
         employee_dict,
         requested_by if requested_by is not None else get_caller_name(),
         tool_name,
-        description,
+        description if description is not None else tool_name,
         action=action if action is not None else "create",
         parameters=parameters,
         required_capabilities=required_capabilities,

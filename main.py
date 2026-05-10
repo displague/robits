@@ -2131,11 +2131,32 @@ class Human(Role):
         self.runtime_role_name = self.name
         self.runtime_tool_results = []
 
+    # Slash commands the human CEO can type at the prompt.
+    _SLASH_COMMANDS = {
+        "/quit": "Stop the session immediately.",
+        "/exit": "Stop the session immediately.",
+        "/help": "List available slash commands.",
+    }
+
     def interact(self, *_):
         try:
-            return input(f"{self.name}: ")
+            text = input(f"{self.name}: ")
         except EOFError:
             return '{"action":"wait"}'
+        stripped = text.strip()
+        if stripped.startswith("/"):
+            cmd = stripped.split()[0].lower()
+            if cmd in ("/quit", "/exit"):
+                raise SystemExit(0)
+            if cmd == "/help":
+                lines = ["Available slash commands:"]
+                for name, desc in self._SLASH_COMMANDS.items():
+                    lines.append(f"  {name}  — {desc}")
+                print("\n".join(lines))
+                return '{"action":"wait"}'
+            print(f"Unknown command: {cmd}. Type /help for available commands.")
+            return '{"action":"wait"}'
+        return text
 
 
 def parse_tool_instruction(s):
@@ -2367,6 +2388,12 @@ class Session:
             return []
         tool_instruction = parse_tool_instruction(message)
         if tool_instruction is None or tool_instruction == "":
+            return []
+        try:
+            obj = json.loads(tool_instruction)
+        except json.JSONDecodeError:
+            return []
+        if not isinstance(obj, dict) or "exec" not in obj:
             return []
 
         system_response = self.system.interact(tool_instruction, caller=sender)
@@ -2779,8 +2806,11 @@ class Session:
         if last_response is None:
             last_response = ""
 
-        while effective_max_turns is None or self.turns_completed < effective_max_turns:
-            last_response = self.step(last_response)
+        try:
+            while effective_max_turns is None or self.turns_completed < effective_max_turns:
+                last_response = self.step(last_response)
+        except SystemExit:
+            print(colored("\nSession ended by CEO.", "yellow"))
 
         self.event_stream.emit(
             "session.completed",
