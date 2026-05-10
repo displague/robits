@@ -2,6 +2,7 @@
 from dataclasses import dataclass, field
 from openai import OpenAI
 
+import ast
 import random
 import time
 import os
@@ -214,11 +215,13 @@ class ToolRegistry:
                 "approve_tool_proposal": approve_tool_proposal,
                 "reject_tool_proposal": reject_tool_proposal,
                 "rollout_tool_proposal": rollout_tool_proposal,
+                "approve_and_rollout_proposal": approve_and_rollout_proposal,
                 "workspace_list": workspace_list,
                 "workspace_read": workspace_read,
                 "workspace_write": workspace_write,
                 "workspace_delete": workspace_delete,
                 "current_agent_context": current_agent_context,
+                "get_caller_name": lambda: active_tool_caller_name or getattr(active_tool_caller, "name", None) or "unknown",
                 "builtin_web_search": builtin_web_search,
                 "builtin_file_search": builtin_file_search,
                 "builtin_shell_run": builtin_shell_run,
@@ -228,6 +231,8 @@ class ToolRegistry:
                 "builtin_image_generation": builtin_image_generation,
                 "org_chat_read": org_chat_read,
                 "work_todo_add": work_todo_add,
+                "agent_think": agent_think,
+                "agent_wait": agent_wait,
             },
             local_dict,
         )
@@ -349,6 +354,45 @@ class ToolRegistry:
             self._aliases[openai_name] = name
         return tool
 
+    def replace_definition(self, instruction):
+        """Replace a non-system tool in-place (for update proposals)."""
+        (
+            name,
+            description,
+            parameters,
+            arg_names,
+            required_arg_names,
+            code,
+            aliases,
+            namespace,
+            required_capabilities,
+            owner_capability,
+            system_tool,
+            grantable,
+        ) = self.normalize_definition(instruction)
+        existing = self._tools.get(name)
+        if existing is None:
+            raise ValueError(f"Tool '{name}' does not exist; use register_definition to create it.")
+        if existing.system_tool:
+            raise ValueError(f"System tool '{name}' cannot be replaced.")
+        func = self.compile_tool(name, arg_names, required_arg_names, code)
+        tool = ToolDefinition(
+            name=name,
+            description=description,
+            parameters=parameters,
+            args=arg_names,
+            required_args=required_arg_names,
+            func=func,
+            aliases=aliases,
+            namespace=namespace,
+            required_capabilities=required_capabilities,
+            owner_capability=owner_capability,
+            system_tool=system_tool,
+            grantable=grantable,
+        )
+        self._tools[name] = tool
+        return tool
+
     def list_tools(self, include_system=True, role=None, include_denied=True):
         rows = []
         for tool in sorted(self._tools.values(), key=lambda item: item.name):
@@ -422,6 +466,7 @@ class ToolRegistry:
 tool_registry = ToolRegistry()
 active_tool_caller = None
 active_tool_caller_name = None
+active_session_transcript_length = 0  # updated by Session.step() before each turn
 
 
 def _response_text(response):
@@ -508,27 +553,69 @@ class ModelProvider:
 
 
 class ChatCompletionsProvider(ModelProvider):
-    def __init__(self, api_client):
+    def __init__(self, api_client, registry=None):
         self.client = api_client
+        self.registry = registry if registry is not None else tool_registry
 
     def generate(self, role, model, sender, messages):
-        def request():
-            stream = self.client.chat.completions.create(
-                model=model,
-                messages=messages,
-                max_tokens=role.max_tokens,
-                n=1,
-                temperature=role.temperature,
-                user=f"robits_{role.name}",
-                stream=True,
-            )
-            content = ""
-            for chunk in stream:
-                if chunk.choices[0].delta.content is not None:
-                    content += chunk.choices[0].delta.content
-            return content
+        employee_dict = getattr(role, "employee_dict", None)
+        tools = self.registry.as_chat_completion_tools(role)
+        kwargs = {
+            "model": model,
+            "messages": list(messages),
+            "max_tokens": role.max_tokens,
+            "n": 1,
+            "temperature": role.temperature,
+            "user": f"robits_{role.name}",
+        }
+        if tools:
+            kwargs["tools"] = tools
+            kwargs["tool_choice"] = "auto"
 
-        return _with_model_retries(request)
+        for _ in range(8):
+            response = _with_model_retries(lambda: self.client.chat.completions.create(**kwargs))
+            message = response.choices[0].message
+            tool_calls = getattr(message, "tool_calls", None) or []
+            if not tool_calls:
+                return message.content or ""
+            if employee_dict is None:
+                return "Error: Tool call requested but no employee dictionary is available."
+            kwargs["messages"] = list(kwargs["messages"]) + [message]
+            tool_results = []
+            for call in tool_calls:
+                tool_name = call.function.name
+                call_id = call.id
+                payload = {
+                    "agent": getattr(role, "name", None),
+                    "role_name": getattr(role, "runtime_role_name", None),
+                    "call_id": call_id,
+                    "tool_name": tool_name,
+                }
+                try:
+                    args = json.loads(call.function.arguments or "{}")
+                except json.JSONDecodeError as error:
+                    payload["arguments"] = call.function.arguments
+                    payload["error"] = f"Invalid tool arguments JSON: {error}"
+                    _emit_role_tool_event(role, "tool_call.requested", payload)
+                    result = f"Error: Invalid tool arguments JSON: {error}"
+                else:
+                    payload["arguments"] = args
+                    _emit_role_tool_event(role, "tool_call.requested", payload)
+                    result = self.registry.execute(tool_name, args, employee_dict, caller=role)
+                status_payload = {**payload, "result": result}
+                event_type = "tool_call.failed" if str(result).startswith("Error:") else "tool_call.executed"
+                _emit_role_tool_event(role, event_type, status_payload)
+                _record_role_tool_result(
+                    role,
+                    f"{event_type}: {tool_name}({json.dumps(payload.get('arguments'), sort_keys=True)}) -> {result}",
+                )
+                tool_results.append({
+                    "role": "tool",
+                    "tool_call_id": call_id,
+                    "content": str(result),
+                })
+            kwargs["messages"] = kwargs["messages"] + tool_results
+        return "Error: Too many consecutive tool-call rounds."
 
 
 class ResponsesProvider(ModelProvider):
@@ -1035,6 +1122,24 @@ def _coerce_json_object(value, default=None):
     return value
 
 
+def _normalize_tool_parameters(params):
+    """Coerce a flat {name: schema} property map into proper JSON Schema object format.
+
+    Models often omit the outer {type: object, properties: {...}, required: [...]} wrapper.
+    If the dict has no 'type' key and all values look like property schemas (dicts with a
+    'type' field), wrap automatically so compile_tool gets the right arg list.
+    """
+    if not isinstance(params, dict) or "properties" in params or "type" in params:
+        return params
+    if params and all(isinstance(v, dict) and "type" in v for v in params.values()):
+        return {
+            "type": "object",
+            "properties": params,
+            "required": list(params.keys()),
+        }
+    return params
+
+
 def _coerce_string_list(value):
     if value is None:
         return []
@@ -1065,14 +1170,15 @@ def propose_tool_change(
     owner_capability=None,
     safety_notes="",
     implementation_notes="",
+    code="",
 ):
     del employee_dict
     try:
         tool_registry.validate_tool_name(tool_name)
-        normalized_parameters = _coerce_json_object(
+        normalized_parameters = _normalize_tool_parameters(_coerce_json_object(
             parameters,
             {"type": "object", "properties": {}, "required": []},
-        )
+        ))
         normalized_capabilities = _coerce_string_list(required_capabilities)
     except ValueError as e:
         return f"Error: {e}"
@@ -1084,6 +1190,29 @@ def propose_tool_change(
         tool = tool_registry.get(tool_name)
         if tool.system_tool:
             return f"Error: System tool '{tool_name}' cannot be changed by SE proposal."
+    normalized_code = code.strip() if isinstance(code, str) else ""
+    if normalized_code:
+        try:
+            tree = ast.parse(normalized_code)
+        except SyntaxError as e:
+            return f"Error: Tool code has a syntax error: {e}"
+        top_level_defs = [
+            node for node in tree.body
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
+        ]
+        if top_level_defs:
+            names = ", ".join(n.name for n in top_level_defs)
+            return (
+                f"Error: Tool code must not define functions or classes ({names}). "
+                "Write a direct return statement instead. "
+                f"Example: return f\"{'{'}get_caller_name(){'}'}: {'{'}status{'}'}\""
+            )
+        arg_names = list(normalized_parameters.get("properties", {}).keys())
+        required_arg_names = normalized_parameters.get("required", [])
+        try:
+            tool_registry.compile_tool(tool_name, arg_names, required_arg_names, normalized_code)
+        except (SyntaxError, ValueError) as e:
+            return f"Error: Tool code failed to compile: {e}"
     proposal = get_tool_proposal_store().create(
         requested_by=requested_by,
         tool_name=tool_name,
@@ -1094,6 +1223,7 @@ def propose_tool_change(
         owner_capability=owner_capability,
         safety_notes=safety_notes,
         implementation_notes=implementation_notes,
+        code=normalized_code,
     )
     return json.dumps(proposal, sort_keys=True)
 
@@ -1147,8 +1277,38 @@ def rollout_tool_proposal(employee_dict, proposal_id, role_name, granted_by=None
     if proposal["status"] != "approved":
         return f"Error: Tool proposal '{proposal_id}' must be approved before rollout."
     tool_name = proposal["tool_name"]
+    code = proposal.get("code", "").strip()
+    action = proposal.get("action", "create")
     if tool_name not in tool_registry:
-        return f"Error: Tool '{tool_name}' is not registered; implement it before rollout."
+        if not code:
+            return f"Error: Tool '{tool_name}' is not registered and proposal has no code to register."
+        try:
+            tool_registry.register_definition({
+                "name": tool_name,
+                "description": proposal["description"],
+                "parameters": proposal.get("parameters", {}),
+                "code": code,
+                "grantable": True,
+                "system_tool": False,
+                "required_capabilities": proposal.get("required_capabilities", []),
+                "owner_capability": proposal.get("owner_capability"),
+            })
+        except (SyntaxError, ValueError) as e:
+            return f"Error: Failed to register tool '{tool_name}': {e}"
+    elif code and action == "update":
+        existing = tool_registry.get(tool_name)
+        if existing and existing.system_tool:
+            return f"Error: Cannot replace system tool '{tool_name}' via proposal."
+        tool_registry.replace_definition({
+            "name": tool_name,
+            "description": proposal["description"],
+            "parameters": proposal.get("parameters", {}),
+            "code": code,
+            "grantable": existing.grantable if existing else True,
+            "system_tool": False,
+            "required_capabilities": proposal.get("required_capabilities", []),
+            "owner_capability": proposal.get("owner_capability"),
+        })
     grant_result = grant_tool_access(
         employee_dict,
         role_name,
@@ -1165,6 +1325,31 @@ def rollout_tool_proposal(employee_dict, proposal_id, role_name, granted_by=None
         granted_roles=granted_roles,
     )
     return json.dumps({"proposal": updated, "grant_result": grant_result}, sort_keys=True)
+
+
+def approve_and_rollout_proposal(employee_dict, role_name, tool_name=None, proposal_id=None, approved_by=None):
+    """Approve and roll out a proposal in one step, by tool_name or proposal_id."""
+    store = get_tool_proposal_store()
+    if proposal_id:
+        proposal = store.get(proposal_id)
+        if proposal is None:
+            return f"Error: Proposal '{proposal_id}' not found."
+    elif tool_name:
+        candidates = [p for p in store.list(status="proposed") if p["tool_name"] == tool_name]
+        if not candidates:
+            candidates = [p for p in store.list(status="approved") if p["tool_name"] == tool_name]
+        if not candidates:
+            return f"Error: No pending proposal found for tool '{tool_name}'."
+        proposal = candidates[-1]
+        proposal_id = proposal["proposal_id"]
+    else:
+        return "Error: Provide tool_name or proposal_id."
+    approver = approved_by or (active_tool_caller_name or getattr(active_tool_caller, "name", None) or "Ops")
+    if proposal["status"] == "proposed":
+        approve_result = approve_tool_proposal(employee_dict, proposal_id, approved_by=approver)
+        if approve_result.startswith("Error:"):
+            return approve_result
+    return rollout_tool_proposal(employee_dict, proposal_id, role_name, granted_by=approver)
 
 
 def validate_role_name(role_name):
@@ -1804,6 +1989,33 @@ def builtin_image_generation(employee_dict, prompt, size=None, quality=None):
     return "Error: builtin.image_generation is not implemented in this runtime."
 
 
+def agent_think(employee_dict, content):
+    """Private reasoning step — silent return. Thought is preserved in the tool-call history."""
+    del employee_dict, content
+    return ""
+
+
+def agent_wait(employee_dict, minutes):
+    """Suspend the calling agent for up to N minutes. Session skips its turns until the wait
+    expires, then wakes it with a summary of what happened during the wait. Circadian phase
+    transitions (clock_state changes) interrupt the wait early."""
+    del employee_dict
+    caller = active_tool_caller
+    if caller is None:
+        return "Error: agent.wait called outside of agent context."
+    try:
+        duration = float(minutes)
+    except (TypeError, ValueError):
+        return "Error: minutes must be a number."
+    if duration <= 0:
+        return "Error: minutes must be positive."
+    now = datetime.now(timezone.utc)
+    caller.waiting_until = now + timedelta(minutes=duration)
+    caller.wait_started_turn = active_session_transcript_length
+    caller.wait_clock_state = getattr(caller, "runtime_clock_state", clock_state)
+    return ""
+
+
 def due_alarm_reminders(role, now=None):
     now = now or datetime.now(timezone.utc)
     reminders = []
@@ -1876,7 +2088,6 @@ class Role:
         self.name = name
         turn_action_template = """
 On your turn, choose one useful action. You do not need to reply to every message.
-You may reply in plain text, call a tool by returning {"exec":"namespace.tool_name","args":{}}, record a private thought by returning {"action":"think","content":"..."}, or wait silently by returning {"action":"wait"}.
 Only say that you created, changed, or called a tool after the runtime has returned a verified tool result. Without a verified result, describe the work as a request, proposal, or plan instead of a completed fact.
 """
         self.template = template + group_template_additions + turn_action_template
@@ -1896,6 +2107,9 @@ Only say that you created, changed, or called a tool after the runtime has retur
         self.runtime_session_id = None
         self.runtime_role_name = self.name
         self.runtime_tool_results = []
+        self.waiting_until = None       # datetime or None — set by agent.wait
+        self.wait_started_turn = None   # transcript length at wait start
+        self.wait_clock_state = None    # clock_state at wait start (for phase interrupts)
 
     def interact(self, sender, prompt):
         return interact_cheap(self, sender, prompt)
@@ -1961,7 +2175,7 @@ class System(Role):
 class Ops(Role):
     def __init__(self, employee_dict):
         role_description = """You are OPs for an AI powered organization."""
-        group_template_additions = """You are part of the Operations group. Members of this group oversee whether the agent environment is operating successfully. Tools are available to agents through a concise registry; to request a tool, send a JSON blob on a new line in the format: {"exec":"namespace.tool_name", "args":{"string_var":"string", "numeric_var":123}}."""
+        group_template_additions = """You are part of the Operations group. Members of this group oversee whether the agent environment is operating successfully."""
         super().__init__(
             self.__class__.__name__, role_description, employee_dict, group_template_additions
         )
@@ -1974,9 +2188,7 @@ class HR(Role):
 
     def __init__(self, employee_dict):
         role_description = "As the HR, you are responsible for managing AI resources and creating new roles within the organization. Maintaining a productive, sustainable, and respectful workforce and culture in the organization."
-        group_template_additions = """
-You are part of the Human Resources group. To create a new role, send a message in the format 'create role [role_name]', and the system will create a new role with the specified name. The role will have a default description, which can be customized later.
-"""
+        group_template_additions = "\nYou are part of the Human Resources group.\n"
         super().__init__(
             self.__class__.__name__, role_description, employee_dict, group_template_additions
         )
@@ -1993,7 +2205,7 @@ class Angel(Role):
 class SoftwareEngineer(Role):
     def __init__(self, employee_dict):
         template = """As a Software Engineer (SE), you are responsible for designing, developing, and maintaining software applications. You primarily propose trusted tools when requested by others in your organization."""
-        group_template_additions = """You are part of the Engineering group. Tools are trusted, repo-loaded functions described by namespaced OpenAI-compatible metadata. Propose tool behavior in plain language; do not assume untrusted chat output can define executable tools directly."""
+        group_template_additions = """You are part of the Engineering group. Tools are trusted functions described by namespaced OpenAI-compatible metadata. You can propose tools with working Python code using the `code` field in tools.propose. IMPORTANT CODE RULES: write the body as a sequence of simple statements ending with a single `return` — do NOT define nested functions or lambdas. The sandbox has no imports and limited builtins (bool, int, str, list, dict, len, max, min, range, sum). Available globals: get_caller_name() → calling agent's name; workspace_write/read/list → agent files; memory_search → stored context; work_todo_add → task tracking. Example for a status tool with a `status` parameter: `return f"{get_caller_name()}: {status}"`. Parameters must use JSON Schema format: {"type":"object","properties":{"status":{"type":"string"}},"required":["status"]}. Approved proposals with code are registered and activated at rollout without a restart."""
         super().__init__(self.__class__.__name__, template, employee_dict, group_template_additions)
         self.capabilities = {"engineer"}
         self.allowed_tools.update({"tools.list", "tools.list_proposals", "tools.propose"})
@@ -2017,8 +2229,32 @@ class Human(Role):
         self.runtime_role_name = self.name
         self.runtime_tool_results = []
 
+    # Slash commands the human CEO can type at the prompt.
+    _SLASH_COMMANDS = {
+        "/quit": "Stop the session immediately.",
+        "/exit": "Stop the session immediately.",
+        "/help": "List available slash commands.",
+    }
+
     def interact(self, *_):
-        return input(f"{self.name}: ")
+        try:
+            text = input(f"{self.name}: ")
+        except EOFError:
+            return ""
+        stripped = text.strip()
+        if stripped.startswith("/"):
+            cmd = stripped.split()[0].lower()
+            if cmd in ("/quit", "/exit"):
+                raise SystemExit(0)
+            if cmd == "/help":
+                lines = ["Available slash commands:"]
+                for name, desc in self._SLASH_COMMANDS.items():
+                    lines.append(f"  {name}  — {desc}")
+                print("\n".join(lines))
+                return ""
+            print(f"Unknown command: {cmd}. Type /help for available commands.")
+            return ""
+        return text
 
 
 def parse_tool_instruction(s):
@@ -2217,6 +2453,36 @@ class Session:
             except Exception:
                 pass
 
+    def _build_wait_summary(self, role):
+        """Build the wake-up message for a role whose wait just expired."""
+        started = getattr(role, "wait_started_turn", None) or 0
+        since = self.transcript[started:]
+        wu = role.waiting_until
+        role.waiting_until = None
+        role.wait_started_turn = None
+        role.wait_clock_state = None
+        if not since:
+            return "Your wait has ended. Nothing notable happened while you were waiting."
+        lines = ["Your wait has ended. Here is what happened while you were waiting:"]
+        for entry in since:
+            if entry.response and entry.response.strip():
+                snippet = entry.response.strip()[:200]
+                lines.append(f"[Turn {entry.turn}] {entry.sender} → {entry.receiver}: {snippet}")
+        if len(lines) == 1:
+            return "Your wait has ended. Nothing notable happened while you were waiting."
+        return "\n".join(lines)
+
+    def _interrupt_wait_for_phase(self, role):
+        """Return True and clear the wait if a circadian phase transition has occurred."""
+        wait_cs = getattr(role, "wait_clock_state", None)
+        current_cs = getattr(role, "runtime_clock_state", clock_state)
+        if wait_cs is not None and wait_cs != current_cs:
+            role.waiting_until = None
+            role.wait_started_turn = None
+            role.wait_clock_state = None
+            return True
+        return False
+
     def route_message(self, message, last_receiver_name=None):
         prompt_split = message.split(",", 1) if isinstance(message, str) else []
         if len(prompt_split) > 1:
@@ -2234,7 +2500,19 @@ class Session:
                 )
                 return RoutedMessage(self.participants[receiver_name], prompt_split[1].strip(), True)
 
+        now = datetime.now(timezone.utc)
+        tried: set = set()
         receiver_name = self.scheduler.next(last_receiver_name)
+        while receiver_name not in tried:
+            receiver = self.participants.get(receiver_name)
+            if receiver is None:
+                break
+            wu = getattr(receiver, "waiting_until", None)
+            if wu is None or now >= wu or self._interrupt_wait_for_phase(receiver):
+                break
+            tried.add(receiver_name)
+            receiver_name = self.scheduler.next(receiver_name)
+
         self.event_stream.emit(
             "message.routed",
             self.run_id,
@@ -2250,6 +2528,12 @@ class Session:
             return []
         tool_instruction = parse_tool_instruction(message)
         if tool_instruction is None or tool_instruction == "":
+            return []
+        try:
+            obj = json.loads(tool_instruction)
+        except json.JSONDecodeError:
+            return []
+        if not isinstance(obj, dict) or "exec" not in obj:
             return []
 
         system_response = self.system.interact(tool_instruction, caller=sender)
@@ -2608,14 +2892,22 @@ class Session:
         return list(reversed(events))
 
     def step(self, message):
+        global active_session_transcript_length
         sender = self.last_receiver
         self.sync_scheduler_participants()
+        active_session_transcript_length = len(self.transcript)
         routed = self.route_message(message, sender.name)
         system_events = self.process_tool_instruction(message, sender=sender)
         if system_events:
             deliver_verified_tool_results(sender, system_events)
         self.sync_scheduler_participants()
         prompt = routed.prompt
+        # Inject wait-expiry summary if this agent just woke from a wait.
+        now = datetime.now(timezone.utc)
+        wu = getattr(routed.receiver, "waiting_until", None)
+        if wu is not None and now >= wu:
+            wait_summary = self._build_wait_summary(routed.receiver)
+            prompt = wait_summary + "\n\n" + prompt
         reminders = due_alarm_reminders(routed.receiver)
         if reminders:
             prompt = "\n".join(reminders + [prompt])
@@ -2662,8 +2954,11 @@ class Session:
         if last_response is None:
             last_response = ""
 
-        while effective_max_turns is None or self.turns_completed < effective_max_turns:
-            last_response = self.step(last_response)
+        try:
+            while effective_max_turns is None or self.turns_completed < effective_max_turns:
+                last_response = self.step(last_response)
+        except SystemExit:
+            print(colored("\nSession ended by CEO.", "yellow"))
 
         self.event_stream.emit(
             "session.completed",
