@@ -15,6 +15,8 @@ ALARM_RECURRENCES = {"once", "hourly", "daily", "weekly"}
 
 @dataclass
 class LifecycleEvent:
+    """Immutable record of a single lifecycle state transition for an agent."""
+
     action: str
     agent_name: str
     lifecycle_state: str
@@ -28,6 +30,8 @@ class LifecycleEvent:
 
 @dataclass
 class Alarm:
+    """Scheduled reminder that fires when `due_at` is reached, with optional recurrence."""
+
     alarm_id: str
     agent_name: str
     reminder: str
@@ -40,6 +44,7 @@ class Alarm:
 
 
 def _parse_datetime(value):
+    """Parse an ISO 8601 datetime string to a timezone-aware datetime object."""
     if not isinstance(value, str) or not value.strip():
         raise ValueError("Timestamp must be a non-empty ISO datetime string.")
     normalized = value.strip().replace("Z", "+00:00")
@@ -50,10 +55,12 @@ def _parse_datetime(value):
 
 
 def _format_datetime(value):
+    """Normalise a datetime to a UTC ISO 8601 string with second precision."""
     return value.astimezone(timezone.utc).isoformat(timespec="seconds")
 
 
 def validate_role_name(role_name):
+    """Validate and normalise a role name; raise ValueError on invalid input."""
     if not isinstance(role_name, str) or not role_name.strip():
         raise ValueError("Role name must be a non-empty string.")
     normalized = role_name.strip()
@@ -65,12 +72,14 @@ def validate_role_name(role_name):
 
 
 def validate_role_description(role_description):
+    """Validate and normalise a role description; raise ValueError on invalid input."""
     if not isinstance(role_description, str) or not role_description.strip():
         raise ValueError("Role description must be a non-empty string.")
     return role_description.strip()
 
 
 def _caller_can_act_for_agent(agent_name):
+    """Return True if the current tool caller may act on behalf of agent_name."""
     caller = _m.active_tool_caller
     if caller is None:
         return False
@@ -81,10 +90,12 @@ def _caller_can_act_for_agent(agent_name):
 
 
 def _caller_name_for_error():
+    """Return the active caller's name for use in error messages."""
     return _m.active_tool_caller_name or getattr(_m.active_tool_caller, "name", "unknown caller")
 
 
 def _workspace_agent_name(agent_name):
+    """Validate agent_name and authorise the caller; return (name, None) or (None, error)."""
     try:
         normalized_name = validate_role_name(agent_name)
     except ValueError as e:
@@ -102,6 +113,7 @@ def record_lifecycle_event(
     approved_by=None,
     reason=None,
 ):
+    """Append a LifecycleEvent to a role and persist it to the memory store."""
     event = LifecycleEvent(
         action=action,
         agent_name=role.name,
@@ -141,6 +153,7 @@ def record_lifecycle_event(
 
 
 def format_lifecycle_actor_text(requested_by=None, approved_by=None):
+    """Return a parenthetical attribution string, e.g. ' (requested by HR, approved by CEO)'."""
     actor_parts = []
     if requested_by:
         actor_parts.append(f"requested by {requested_by}")
@@ -158,6 +171,7 @@ def create_lifecycle_role(
     requested_by=None,
     approved_by=None,
 ):
+    """Create and register a new Role in employee_dict; return a status string."""
     try:
         normalized_name = validate_role_name(role_name)
         normalized_description = validate_role_description(role_description)
@@ -198,6 +212,7 @@ def change_lifecycle_state(
     reason=None,
     allowed_from=None,
 ):
+    """Transition a role to lifecycle_state, enforcing allowed_from guard if provided."""
     try:
         normalized_name = validate_role_name(role_name)
     except ValueError as e:
@@ -235,6 +250,7 @@ def pause_lifecycle_role(
     approved_by=None,
     reason=None,
 ):
+    """Transition a role from active → paused."""
     return change_lifecycle_state(
         employee_dict,
         role_name,
@@ -254,6 +270,7 @@ def retire_lifecycle_role(
     approved_by=None,
     reason=None,
 ):
+    """Transition a role from active or paused → retired."""
     return change_lifecycle_state(
         employee_dict,
         role_name,
@@ -267,6 +284,7 @@ def retire_lifecycle_role(
 
 
 def _is_role_protected(role_name, role):
+    """Return True if a role is protected and cannot be archived."""
     capabilities = getattr(role, "capabilities", set())
     return (
         role_name in PROTECTED_ROLE_NAMES
@@ -282,6 +300,7 @@ def archive_lifecycle_role(
     approved_by=None,
     reason=None,
 ):
+    """Transition a non-protected role to exited, removing it from active participation."""
     try:
         normalized_name = validate_role_name(role_name)
     except ValueError as e:
@@ -304,6 +323,7 @@ def archive_lifecycle_role(
 
 
 def list_lifecycle_roles(employee_dict, include_exited=True):
+    """Return a JSON array of all roles with their lifecycle state and tool grants."""
     rows = []
     for name, role in sorted(employee_dict.items()):
         state = getattr(role, "lifecycle_state", "active")
@@ -323,10 +343,12 @@ def list_lifecycle_roles(employee_dict, include_exited=True):
 
 
 def _active_alarms(role):
+    """Return all alarms on a role that have status 'active'."""
     return [alarm for alarm in getattr(role, "alarms", []) if alarm.status == "active"]
 
 
 def create_alarm(employee_dict, agent_name, reminder, due_at, recurrence="once"):
+    """Schedule a new alarm for an agent; return a status string or an error."""
     try:
         normalized_name = validate_role_name(agent_name)
         due = _parse_datetime(due_at)
@@ -364,6 +386,7 @@ def create_alarm(employee_dict, agent_name, reminder, due_at, recurrence="once")
 
 
 def list_alarms(employee_dict, agent_name, include_inactive=False):
+    """Return a JSON array of alarms for an agent, optionally including inactive ones."""
     try:
         normalized_name = validate_role_name(agent_name)
     except ValueError as e:
@@ -389,6 +412,7 @@ def list_alarms(employee_dict, agent_name, include_inactive=False):
 
 
 def cancel_alarm(employee_dict, agent_name, alarm_id):
+    """Cancel an active alarm by ID; return a status string or an error."""
     try:
         normalized_name = validate_role_name(agent_name)
     except ValueError as e:
@@ -405,6 +429,7 @@ def cancel_alarm(employee_dict, agent_name, alarm_id):
 
 
 def due_alarm_reminders(role, now=None):
+    """Return reminder strings for any alarms that have fired; advance recurring alarms."""
     now = now or datetime.now(timezone.utc)
     reminders = []
     for alarm in _active_alarms(role):
