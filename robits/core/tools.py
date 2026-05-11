@@ -29,6 +29,8 @@ SAFE_TOOL_BUILTINS = {
 
 @dataclass
 class ToolDefinition:
+    """Metadata and callable for a single registered tool."""
+
     name: str
     description: str
     parameters: dict
@@ -44,9 +46,11 @@ class ToolDefinition:
 
     @property
     def openai_name(self):
+        """Return the tool name with dots replaced by double-underscores for API compatibility."""
         return self.name.replace(".", "__")
 
     def as_responses_tool(self):
+        """Serialise as an OpenAI Responses API tool dict."""
         return {
             "type": "function",
             "name": self.openai_name,
@@ -55,6 +59,7 @@ class ToolDefinition:
         }
 
     def as_chat_completion_tool(self):
+        """Serialise as an OpenAI Chat Completions API tool dict."""
         return {
             "type": "function",
             "function": {
@@ -95,12 +100,14 @@ class _ToolCodeValidator(ast.NodeVisitor):
 
 
 def _validate_tool_code_ast(tree):
+    """Run _ToolCodeValidator on an AST tree; return a list of error messages."""
     validator = _ToolCodeValidator()
     validator.visit(tree)
     return validator.errors
 
 
 def role_can_use_tool(role, tool):
+    """Return True if role has the required capabilities and a matching tool grant."""
     if getattr(role, "name", None) == "CEO":
         return True
     capabilities = getattr(role, "capabilities", set())
@@ -111,6 +118,7 @@ def role_can_use_tool(role, tool):
 
 
 def _tool_grant_matches(tool_name, grant):
+    """Return True if grant covers tool_name (exact, wildcard namespace, or global *)."""
     if grant == "*":
         return True
     if grant.endswith(".*"):
@@ -119,6 +127,7 @@ def _tool_grant_matches(tool_name, grant):
 
 
 def _normalize_tool_grant(tool_name):
+    """Validate and canonicalise a single tool grant string; raise ValueError on unknown names."""
     if tool_name == "*":
         return tool_name
     if tool_name.endswith(".*"):
@@ -130,6 +139,7 @@ def _normalize_tool_grant(tool_name):
 
 
 def _normalize_capabilities(capabilities=None):
+    """Coerce capabilities to a set of stripped non-empty strings; raise ValueError on bad input."""
     if capabilities is None:
         return set()
     if isinstance(capabilities, str):
@@ -145,6 +155,7 @@ def _normalize_capabilities(capabilities=None):
 
 
 def _normalize_tool_grants(tool_grants=None):
+    """Coerce tool_grants to a set of validated canonical grant strings."""
     if tool_grants is None:
         return set()
     if isinstance(tool_grants, str):
@@ -160,6 +171,7 @@ def _normalize_tool_grants(tool_grants=None):
 
 
 def _coerce_json_object(value, default=None):
+    """Accept a dict or a JSON string and return a dict; raise ValueError on other types."""
     if value is None:
         return {} if default is None else default
     if isinstance(value, str):
@@ -186,6 +198,7 @@ def _normalize_tool_parameters(params):
 
 
 def _coerce_string_list(value):
+    """Return value as a list of strings, splitting comma-separated strings if needed."""
     if value is None:
         return []
     if isinstance(value, str):
@@ -196,24 +209,31 @@ def _coerce_string_list(value):
 
 
 class ToolRegistry:
+    """Central registry for tool definitions with alias resolution and access control."""
+
     def __init__(self):
         self._tools = {}
         self._aliases = {}
 
     def clear(self):
+        """Remove all registered tools and aliases."""
         self._tools.clear()
         self._aliases.clear()
 
     def __contains__(self, name):
+        """Return True if name (or its alias) is a registered tool."""
         return self.resolve_name(name) in self._tools
 
     def resolve_name(self, name):
+        """Return the canonical tool name, resolving OpenAI double-underscore aliases."""
         return self._aliases.get(name, name)
 
     def get(self, name):
+        """Return the ToolDefinition for name, raising KeyError if not found."""
         return self._tools[self.resolve_name(name)]
 
     def validate_tool_name(self, name):
+        """Raise ValueError if name is not a valid dot-separated identifier string."""
         if not isinstance(name, str) or not name:
             raise ValueError("Tool name must be a non-empty string.")
         parts = name.split(".")
@@ -221,6 +241,7 @@ class ToolRegistry:
             raise ValueError(f"Invalid tool name: {name}")
 
     def compile_tool(self, name, arg_names, required_arg_names, code):
+        """Compile agent-provided Python code into a callable inside the restricted sandbox."""
         self.validate_tool_name(name)
         for arg_name in required_arg_names:
             if arg_name not in arg_names:
@@ -292,6 +313,7 @@ class ToolRegistry:
         return local_dict[function_name]
 
     def normalize_definition(self, instruction):
+        """Normalise a raw instruction dict into a canonical ToolDefinition-ready form."""
         if "function" in instruction:
             function = instruction["function"]
             name = function["name"]
@@ -362,6 +384,7 @@ class ToolRegistry:
         )
 
     def register_definition(self, instruction):
+        """Compile and register a new tool from an instruction dict; raise on duplicates."""
         (
             name,
             description,
@@ -472,6 +495,7 @@ class ToolRegistry:
         return tool
 
     def list_tools(self, include_system=True, role=None, include_denied=True):
+        """Return a list of tool metadata dicts, optionally filtered by role access."""
         rows = []
         for tool in sorted(self._tools.values(), key=lambda item: item.name):
             if tool.system_tool and not include_system:
@@ -494,9 +518,11 @@ class ToolRegistry:
         return rows
 
     def tools_for_role(self, role):
+        """Return all ToolDefinitions that role is permitted to use."""
         return [tool for tool in self._tools.values() if role_can_use_tool(role, tool)]
 
     def execute(self, name, args, employee_dict, caller=None):
+        """Look up and invoke a tool, setting active_tool_caller for the duration."""
         try:
             self.validate_tool_name(name)
         except ValueError as e:
@@ -532,9 +558,11 @@ class ToolRegistry:
         return f"Executed tool '{resolved_name}' with args {args}. Result: {result}"
 
     def as_responses_tools(self, role=None):
+        """Return all (or role-filtered) tools serialised for the Responses API."""
         tools = self._tools.values() if role is None else self.tools_for_role(role)
         return [tool.as_responses_tool() for tool in tools]
 
     def as_chat_completion_tools(self, role=None):
+        """Return all (or role-filtered) tools serialised for the Chat Completions API."""
         tools = self._tools.values() if role is None else self.tools_for_role(role)
         return [tool.as_chat_completion_tool() for tool in tools]
