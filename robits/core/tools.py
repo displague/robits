@@ -1,7 +1,7 @@
 """Tool definition, registry, and helper utilities."""
 import ast
 import json
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 import main as _m
 
@@ -320,13 +320,13 @@ class ToolRegistry:
             description = function.get("description", "")
             parameters = function.get("parameters", {"type": "object", "properties": {}})
             code = instruction["code"]
-            aliases = tuple(instruction.get("aliases", ()))
+            raw_aliases = instruction.get("aliases", ())
         elif "name" in instruction:
             name = instruction["name"]
             description = instruction.get("description", "")
             parameters = instruction.get("parameters", {"type": "object", "properties": {}})
             code = instruction["code"]
-            aliases = tuple(instruction.get("aliases", ()))
+            raw_aliases = instruction.get("aliases", ())
         else:
             name = instruction["code_name"]
             args = instruction.get("args")
@@ -344,10 +344,21 @@ class ToolRegistry:
                 "required": list(properties),
             }
             code = instruction["code"]
-            aliases = tuple(instruction.get("aliases", ()))
+            raw_aliases = instruction.get("aliases", ())
+
+        if isinstance(raw_aliases, str):
+            raise ValueError("Tool aliases must be a list of strings, not a bare string.")
+        if not isinstance(raw_aliases, (list, tuple, set)):
+            raise ValueError("Tool aliases must be a list of strings.")
+        aliases = tuple(raw_aliases)
 
         namespace = instruction.get("namespace") or name.split(".", 1)[0]
-        required_capabilities = tuple(instruction.get("required_capabilities", ()))
+        raw_capabilities = instruction.get("required_capabilities", ())
+        if isinstance(raw_capabilities, str):
+            raise ValueError("Tool required_capabilities must be a list of strings, not a bare string.")
+        if not isinstance(raw_capabilities, (list, tuple, set)):
+            raise ValueError("Tool required_capabilities must be a list of strings.")
+        required_capabilities = tuple(raw_capabilities)
         owner_capability = instruction.get("owner_capability")
         system_tool = bool(instruction.get("system_tool", False))
         grantable = bool(instruction.get("grantable", True))
@@ -468,6 +479,13 @@ class ToolRegistry:
         )
         old_tool = self._tools.get(name)
         effective_aliases = aliases if aliases else (old_tool.aliases if old_tool else ())
+        for alias in effective_aliases:
+            self.validate_tool_name(alias)
+            existing_target = self._aliases.get(alias)
+            if existing_target is not None and existing_target != name:
+                raise ValueError(f"Tool alias '{alias}' already exists.")
+            if alias in self._tools and alias != name:
+                raise ValueError(f"Tool alias '{alias}' already exists.")
         if old_tool is not None:
             stale = [k for k, v in self._aliases.items() if v == name]
             for k in stale:
@@ -491,6 +509,9 @@ class ToolRegistry:
             self._aliases[alias] = name
         openai_name = tool.openai_name
         if openai_name != name:
+            existing_target = self._aliases.get(openai_name)
+            if existing_target is not None and existing_target != name:
+                raise ValueError(f"Tool openai_name '{openai_name}' conflicts with an existing alias.")
             self._aliases[openai_name] = name
         return tool
 
