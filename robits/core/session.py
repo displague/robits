@@ -20,6 +20,8 @@ from robits.core.lifecycle import due_alarm_reminders
 
 @dataclass
 class TranscriptEntry:
+    """A single turn record in the session transcript."""
+
     turn: int
     sender: str
     receiver: str
@@ -32,6 +34,8 @@ class TranscriptEntry:
 
 @dataclass
 class RuntimeEvent:
+    """An immutable event emitted by the runtime and delivered to subscribers."""
+
     sequence: int
     event_type: str
     session_id: str
@@ -43,6 +47,8 @@ class RuntimeEvent:
 
 
 class RuntimeEventStream:
+    """Ordered log of RuntimeEvents with optional subscriber callbacks."""
+
     def __init__(self):
         self._events = []
         self._subscribers = []
@@ -50,10 +56,12 @@ class RuntimeEventStream:
         self._sequence = 0
 
     def subscribe(self, callback):
+        """Register a callback to be called on every emitted event; return the callback."""
         self._subscribers.append(callback)
         return callback
 
     def emit(self, event_type, session_id, payload=None, visibility="public"):
+        """Create and store a RuntimeEvent, then notify all subscribers."""
         self._sequence += 1
         event = RuntimeEvent(
             sequence=self._sequence,
@@ -76,6 +84,7 @@ class RuntimeEventStream:
         return event
 
     def events(self, visibility=None):
+        """Return all events, optionally filtered to a specific visibility level."""
         if visibility is None:
             return list(self._events)
         return [event for event in self._events if event.visibility == visibility]
@@ -83,12 +92,16 @@ class RuntimeEventStream:
 
 @dataclass
 class RoutedMessage:
+    """The result of routing a message: the receiving role, the prompt text, and whether it was directed."""
+
     receiver: object
     prompt: str
     directed: bool = False
 
 
 class RoundRobinScheduler:
+    """Cycles through participant names in order, skipping the last receiver."""
+
     def __init__(self, participant_names):
         self.participant_names = list(participant_names)
         if not self.participant_names:
@@ -96,6 +109,7 @@ class RoundRobinScheduler:
         self.index = 0
 
     def next(self, last_receiver_name=None):
+        """Return the next participant name, skipping last_receiver_name if possible."""
         for _ in range(len(self.participant_names)):
             name = self.participant_names[self.index % len(self.participant_names)]
             self.index += 1
@@ -104,20 +118,25 @@ class RoundRobinScheduler:
         return self.participant_names[(self.index - 1) % len(self.participant_names)]
 
     def observe(self, participant_name):
+        """Advance the index so that participant_name is next in rotation."""
         if participant_name in self.participant_names:
             self.index = self.participant_names.index(participant_name) + 1
 
     def add_participant(self, participant_name):
+        """Add a new participant to the rotation if not already present."""
         if participant_name not in self.participant_names:
             self.participant_names.append(participant_name)
 
     def remove_participant(self, participant_name):
+        """Remove a participant from the rotation, adjusting the index."""
         if participant_name in self.participant_names and len(self.participant_names) > 1:
             self.participant_names.remove(participant_name)
             self.index %= len(self.participant_names)
 
 
 class Session:
+    """Orchestrates a multi-turn conversation between participants, routing messages and managing memory."""
+
     def __init__(
         self,
         participants=None,
@@ -171,6 +190,7 @@ class Session:
                 pass
 
     def _build_wait_summary(self, role):
+        """Clear a role's wait state and return a summary of what happened while it was waiting."""
         started = getattr(role, "wait_started_turn", None) or 0
         since = self.transcript[started:]
         role.waiting_until = None
@@ -188,6 +208,7 @@ class Session:
         return "\n".join(lines)
 
     def _interrupt_wait_for_phase(self, role):
+        """Cancel a role's wait early if the circadian clock state has changed since it began."""
         wait_cs = getattr(role, "wait_clock_state", None)
         current_cs = self.clock_state
         if wait_cs is not None and wait_cs != current_cs:
@@ -198,6 +219,7 @@ class Session:
         return False
 
     def route_message(self, message, last_receiver_name=None):
+        """Determine the next receiver for message; honour 'Name, prompt' directed syntax."""
         prompt_split = message.split(",", 1) if isinstance(message, str) else []
         if len(prompt_split) > 1:
             receiver_name = prompt_split[0].strip()
@@ -238,6 +260,7 @@ class Session:
         return RoutedMessage(self.participants[receiver_name], message, False)
 
     def process_tool_instruction(self, message, sender=None):
+        """Execute a JSON exec instruction found in message; return a list of result strings."""
         if not isinstance(message, str) or message == "":
             return []
         tool_instruction = parse_tool_instruction(message)
@@ -267,6 +290,7 @@ class Session:
         return [system_response]
 
     def process_agent_action(self, message, sender=None):
+        """Parse a structured agent action from message; return (response_text, system_events)."""
         if not isinstance(message, str) or message.strip() == "":
             return "", []
         action = parse_agent_action(message)
@@ -296,6 +320,7 @@ class Session:
         return message, []
 
     def record_turn(self, sender, receiver, prompt, response, directed=False, system_events=None):
+        """Append a TranscriptEntry, update memory, and trigger auto-digest if due."""
         meaningful_response = bool(str(response or "").strip())
         system_events = system_events or []
         entry = TranscriptEntry(
@@ -391,6 +416,7 @@ class Session:
         return entry
 
     def _auto_digest_reasons(self):
+        """Return a list of trigger reason strings if a digest should be created now."""
         reasons = []
         meaningful_window = [
             e for e in self.transcript[self._last_digest_turn:]
@@ -414,6 +440,7 @@ class Session:
         return reasons
 
     def _auto_digest(self, reasons=None):
+        """Create an episodic memory digest from meaningful turns since the last digest."""
         if _m.memory_digest_interval > 0 and not reasons:
             window = [e for e in self.transcript[-_m.memory_digest_interval:] if e.memory_recorded]
         else:
@@ -461,6 +488,7 @@ class Session:
             pass
 
     def _auto_state_digest(self, digest_type):
+        """Create an identity or goal digest checkpoint for all participants."""
         if _m.memory_store is None:
             return
         source_refs = []
@@ -499,6 +527,7 @@ class Session:
                 pass
 
     def _write_org_chat_jsonl(self, entry):
+        """Append a transcript entry as a JSONL line to the org workspace chat log."""
         if self._org_workspace is None:
             return
         line = json.dumps({
@@ -514,6 +543,7 @@ class Session:
             pass
 
     def _auto_org_digest(self):
+        """Create an org-chat memory digest for all participants from recent transcript turns."""
         if _m.memory_store is None:
             return
         window = self.transcript[-_m.org_digest_interval:]
@@ -551,6 +581,7 @@ class Session:
                 pass
 
     def record_thought(self, agent_name, content, visibility="private"):
+        """Persist a private thought to memory and emit a thought.recorded event."""
         if _m.memory_store is not None:
             try:
                 _m.memory_store.append_thought(
@@ -572,9 +603,11 @@ class Session:
         )
 
     def _canonical_agent_id(self, name):
+        """Resolve a role display name to its participant dict key for FK-safe storage."""
         return self._name_to_key.get(name, name)
 
     def sync_scheduler_participants(self):
+        """Add active roles to and remove non-active roles from the scheduler."""
         for name, participant in self.participants.items():
             if getattr(participant, "lifecycle_state", "active") == "active":
                 self.scheduler.add_participant(name)
@@ -582,6 +615,7 @@ class Session:
                 self.scheduler.remove_participant(name)
 
     def prepare_agent_runtime(self, role):
+        """Attach session-level runtime attributes (event stream, session ID, clock state) to a role."""
         role.runtime_event_stream = self.event_stream
         role.runtime_session_id = self.run_id
         role.runtime_tool_results = []
@@ -593,6 +627,7 @@ class Session:
         role.runtime_role_name = getattr(role, "name", None)
 
     def recent_system_events(self, limit=5):
+        """Return the most recent non-empty system event strings from the transcript."""
         events = []
         for entry in reversed(self.transcript):
             for event in reversed(entry.system_events):
@@ -603,6 +638,7 @@ class Session:
         return list(reversed(events))
 
     def step(self, message):
+        """Execute one turn: route message, run the agent, record the transcript entry."""
         sender = self.last_receiver
         self.sync_scheduler_participants()
         _m.active_session_transcript_length = len(self.transcript)
@@ -653,6 +689,7 @@ class Session:
         return response
 
     def run(self, initial_message=None, max_turns=None):
+        """Run the session loop until max_turns is reached or a SystemExit is raised."""
         effective_max_turns = self.max_turns if max_turns is None else max_turns
         last_response = (
             initial_message
