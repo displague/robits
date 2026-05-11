@@ -10,6 +10,7 @@ _EXECUTE_RESULT_MARKER = ". Result: "
 
 
 def _response_text(response):
+    """Extract concatenated text content from an OpenAI Responses API response object."""
     output_text = getattr(response, "output_text", None)
     if output_text:
         return output_text
@@ -28,6 +29,7 @@ def _response_text(response):
 
 
 def _response_function_calls(response):
+    """Return all function_call output items from a Responses API response."""
     calls = []
     for item in getattr(response, "output", []) or []:
         if getattr(item, "type", None) != "function_call":
@@ -37,6 +39,7 @@ def _response_function_calls(response):
 
 
 def _is_retryable_api_error(error):
+    """Return True for transient API errors (rate-limits, timeouts, 5xx) that warrant a retry."""
     status_code = getattr(error, "status_code", None)
     if status_code in {408, 409, 429, 500, 502, 503, 504}:
         return True
@@ -45,6 +48,7 @@ def _is_retryable_api_error(error):
 
 
 def _with_model_retries(operation):
+    """Run operation() under the concurrency gate, retrying on transient API errors."""
     attempt = 0
     while True:
         try:
@@ -60,6 +64,7 @@ def _with_model_retries(operation):
 
 
 def _emit_role_tool_event(role, event_type, payload):
+    """Emit a tool event to the role's event stream and persist it to the memory store."""
     event_stream = getattr(role, "runtime_event_stream", None)
     session_id = getattr(role, "runtime_session_id", None)
     if event_stream is not None and session_id is not None:
@@ -82,6 +87,7 @@ def _emit_role_tool_event(role, event_type, payload):
 
 
 def _record_role_tool_result(role, result):
+    """Append a tool-result string to the role's runtime_tool_results list."""
     if not hasattr(role, "runtime_tool_results"):
         role.runtime_tool_results = []
     role.runtime_tool_results.append(result)
@@ -99,16 +105,22 @@ def _tool_result_is_error(raw_result):
 
 
 class ModelProvider:
+    """Abstract base for model provider implementations."""
+
     def generate(self, role, model, sender, messages):
+        """Generate a response for role given messages; return the response text."""
         raise NotImplementedError
 
 
 class ChatCompletionsProvider(ModelProvider):
+    """ModelProvider backed by the OpenAI Chat Completions API."""
+
     def __init__(self, api_client, registry=None):
         self.client = api_client
         self.registry = registry if registry is not None else _m.tool_registry
 
     def generate(self, role, model, sender, messages):
+        """Run a chat-completions agentic loop, executing tool calls until a text reply is produced."""
         employee_dict = getattr(role, "employee_dict", None)
         tools = self.registry.as_chat_completion_tools(role)
         kwargs = {
@@ -172,11 +184,14 @@ class ChatCompletionsProvider(ModelProvider):
 
 
 class ResponsesProvider(ModelProvider):
+    """ModelProvider backed by the OpenAI Responses API (stateful multi-turn)."""
+
     def __init__(self, api_client, registry=None):
         self.client = api_client
         self.registry = registry if registry is not None else _m.tool_registry
 
     def generate(self, role, model, sender, messages):
+        """Run a responses agentic loop, chaining previous_response_id for state continuity."""
         employee_dict = getattr(role, "employee_dict", None)
         tools = self.registry.as_responses_tools(role)
         kwargs = {
@@ -259,6 +274,7 @@ class ResponsesProvider(ModelProvider):
 
 
 def make_model_provider():
+    """Instantiate the configured ModelProvider from ROBITS_PROVIDER_API."""
     if _m.provider_api in {"chat", "chat_completions", "chat-completions"}:
         return ChatCompletionsProvider(_m.client)
     return ResponsesProvider(_m.client)
