@@ -24,6 +24,7 @@ from robits.runtime.tool_proposals import ToolProposalStore
 
 
 def workspace_list(employee_dict, agent_name, path=""):
+    """List files in an agent's workspace directory at path."""
     del employee_dict
     normalized_name, error = _workspace_agent_name(agent_name)
     if error:
@@ -35,6 +36,7 @@ def workspace_list(employee_dict, agent_name, path=""):
 
 
 def workspace_read(employee_dict, agent_name, path, max_bytes=65536):
+    """Read a file from an agent's workspace, returning content up to max_bytes."""
     del employee_dict
     normalized_name, error = _workspace_agent_name(agent_name)
     if error:
@@ -50,6 +52,7 @@ def workspace_read(employee_dict, agent_name, path, max_bytes=65536):
 
 
 def workspace_write(employee_dict, agent_name, path, content, append=False):
+    """Write (or append) content to a file in an agent's workspace."""
     del employee_dict
     normalized_name, error = _workspace_agent_name(agent_name)
     if error:
@@ -61,6 +64,7 @@ def workspace_write(employee_dict, agent_name, path, content, append=False):
 
 
 def workspace_delete(employee_dict, agent_name, path):
+    """Delete a file from an agent's workspace."""
     del employee_dict
     normalized_name, error = _workspace_agent_name(agent_name)
     if error:
@@ -72,6 +76,7 @@ def workspace_delete(employee_dict, agent_name, path):
 
 
 def org_chat_read(employee_dict, limit=20):
+    """Return the most recent `limit` org chat log entries as a JSON object."""
     del employee_dict
     if _m._org_workspace is None:
         return json.dumps({"lines": [], "note": "org chat not available"})
@@ -94,6 +99,7 @@ def org_chat_read(employee_dict, limit=20):
 
 
 def work_todo_add(employee_dict, title, content=None):
+    """Append a work-todo memory entry for the active agent."""
     del employee_dict
     if _m.memory_store is None:
         return json.dumps({"error": "memory store not available"})
@@ -113,6 +119,7 @@ def work_todo_add(employee_dict, title, content=None):
 
 
 def grant_tool_access(employee_dict, role_name, tool_name, granted_by=None):
+    """Add tool_name to a role's allowed_tools set; return a status string or error."""
     try:
         normalized_name = validate_role_name(role_name)
         normalized_tool_name = _normalize_tool_grant(tool_name)
@@ -133,6 +140,7 @@ def grant_tool_access(employee_dict, role_name, tool_name, granted_by=None):
 
 
 def revoke_tool_access(employee_dict, role_name, tool_name, revoked_by=None):
+    """Remove tool_name from a role's allowed_tools set; return a status string or error."""
     try:
         normalized_name = validate_role_name(role_name)
         normalized_tool_name = _normalize_tool_grant(tool_name)
@@ -149,6 +157,7 @@ def revoke_tool_access(employee_dict, role_name, tool_name, revoked_by=None):
 
 
 def list_registered_tools(employee_dict, role_name=None, include_system=True, only_allowed=False):
+    """Return a JSON array of registered tools, optionally filtered by role access."""
     role = None
     if only_allowed and not role_name:
         return "Error: role_name is required when only_allowed is true."
@@ -171,6 +180,7 @@ def list_registered_tools(employee_dict, role_name=None, include_system=True, on
 
 
 def get_tool_proposal_store():
+    """Return the global ToolProposalStore, initialising it on first access."""
     if _m.tool_proposal_store is None:
         _m.tool_proposal_store = ToolProposalStore(
             os.environ.get("ROBITS_TOOL_PROPOSALS_FILE", "var/tool_proposals.json")
@@ -191,6 +201,7 @@ def propose_tool_change(
     implementation_notes="",
     code="",
 ):
+    """Submit a create or update proposal for a tool; return a status string or error."""
     del employee_dict
     try:
         _m.tool_registry.validate_tool_name(tool_name)
@@ -242,11 +253,13 @@ def propose_tool_change(
 
 
 def list_tool_proposals(employee_dict, status=None):
+    """Return a JSON array of tool proposals, optionally filtered by status."""
     del employee_dict
     return json.dumps(get_tool_proposal_store().list(status=status), sort_keys=True)
 
 
 def approve_tool_proposal(employee_dict, proposal_id, approved_by, implementation_notes=""):
+    """Mark a proposal as approved; return the updated proposal JSON or an error."""
     del employee_dict
     store = get_tool_proposal_store()
     proposal = store.get(proposal_id)
@@ -264,6 +277,7 @@ def approve_tool_proposal(employee_dict, proposal_id, approved_by, implementatio
 
 
 def reject_tool_proposal(employee_dict, proposal_id, rejected_by, reason):
+    """Mark a proposal as rejected with a mandatory reason string."""
     del employee_dict
     if not isinstance(reason, str) or not reason.strip():
         return "Error: Rejection reason must be a non-empty string."
@@ -283,6 +297,7 @@ def reject_tool_proposal(employee_dict, proposal_id, rejected_by, reason):
 
 
 def rollout_tool_proposal(employee_dict, proposal_id, role_name, granted_by=None, rollout_notes=""):
+    """Register or replace the tool from an approved proposal and grant it to role_name."""
     store = get_tool_proposal_store()
     proposal = store.get(proposal_id)
     if proposal is None:
@@ -369,6 +384,7 @@ def approve_and_rollout_proposal(employee_dict, role_name, tool_name=None, propo
 
 
 def _require_memory_store():
+    """Return (memory_store, None) or (None, error_string) if no store is configured."""
     if _m.memory_store is None:
         return None, "Error: No SQLite memory store is configured."
     return _m.memory_store, None
@@ -409,6 +425,7 @@ def _condense_if_large(agent_name, tool_label, result_json):
 
 
 def memory_search(employee_dict, agent_name, query, limit=10, cascade=True):
+    """Search an agent's memory store and return matching results, condensing large payloads."""
     del employee_dict
     store, error = _require_memory_store()
     if error:
@@ -440,6 +457,7 @@ def memory_search(employee_dict, agent_name, query, limit=10, cascade=True):
 
 
 def memory_list_digests(employee_dict, agent_name, digest_type=None, limit=10):
+    """List current memory digests for an agent, optionally filtered by digest_type."""
     del employee_dict
     store, error = _require_memory_store()
     if error:
@@ -463,6 +481,7 @@ def memory_list_digests(employee_dict, agent_name, digest_type=None, limit=10):
 
 
 def memory_expand_digest(employee_dict, agent_name, digest_id, recursive=True, max_depth=None, max_chars=None):
+    """Expand a memory digest to its source messages, recursively if requested."""
     del employee_dict
     store, error = _require_memory_store()
     if error:
@@ -516,6 +535,7 @@ def memory_expand_digest(employee_dict, agent_name, digest_id, recursive=True, m
 
 
 def builtin_web_search(employee_dict, query, num_results=5):
+    """Perform a web search via the configured search URL or DuckDuckGo as a fallback."""
     del employee_dict
     if not isinstance(query, str) or not query.strip():
         return "Error: Search query must be a non-empty string."
@@ -568,6 +588,7 @@ def builtin_web_search(employee_dict, query, num_results=5):
 
 
 def builtin_file_search(employee_dict, agent_name, query, path="", max_results=10):
+    """Search an agent's workspace files for lines matching query."""
     del employee_dict
     if not isinstance(query, str) or not query.strip():
         return "Error: Search query must be a non-empty string."
@@ -608,6 +629,7 @@ def builtin_file_search(employee_dict, agent_name, query, path="", max_results=1
 
 
 def builtin_shell_run(employee_dict, agent_name, command, timeout=30):
+    """Run a shell command in the agent's workspace; requires the 'shell' capability."""
     del employee_dict
     import subprocess as _subprocess
     caller_caps = getattr(_m.active_tool_caller, "capabilities", set())
@@ -642,6 +664,7 @@ def builtin_shell_run(employee_dict, agent_name, command, timeout=30):
 
 
 def builtin_tool_search(employee_dict, query, role_name=None):
+    """Search registered tool names and descriptions by query; return up to 20 matches."""
     if not isinstance(query, str) or not query.strip():
         return "Error: Tool search query must be a non-empty string."
     query_lower = query.strip().lower()
@@ -665,16 +688,19 @@ def builtin_tool_search(employee_dict, query, role_name=None):
 
 
 def builtin_mcp_call(employee_dict, server_url, tool_name, arguments=None):
+    """Stub: MCP server tool calls are not implemented in this runtime."""
     del employee_dict
     return "Error: builtin.mcp_call is not implemented in this runtime. Configure an MCP server and use a supported MCP connector."
 
 
 def builtin_computer_use(employee_dict, action, coordinate=None):
+    """Stub: computer-use actions are not implemented in this runtime."""
     del employee_dict
     return "Error: builtin.computer_use is not implemented in this runtime."
 
 
 def builtin_image_generation(employee_dict, prompt, size=None, quality=None):
+    """Stub: image generation is not implemented in this runtime."""
     del employee_dict
     return "Error: builtin.image_generation is not implemented in this runtime."
 
