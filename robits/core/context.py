@@ -7,6 +7,7 @@ import main as _m
 
 
 def _runtime_timezone():
+    """Return the configured runtime timezone, falling back to local or UTC."""
     if _m.default_timezone:
         try:
             return ZoneInfo(_m.default_timezone)
@@ -16,6 +17,7 @@ def _runtime_timezone():
 
 
 def _runtime_timezone_name(tzinfo):
+    """Return a human-readable name for the given tzinfo object."""
     if _m.default_timezone:
         return _m.default_timezone
     if tzinfo is None:
@@ -46,6 +48,7 @@ def _get_identity_digests(agent_id):
 
 
 def agent_runtime_context(role=None):
+    """Build a dict of runtime context fields (time, location, identity) for a role."""
     now_utc = datetime.now(timezone.utc)
     local_tz = _runtime_timezone()
     now_local = now_utc.astimezone(local_tz)
@@ -74,6 +77,7 @@ def agent_runtime_context(role=None):
 
 
 def format_agent_context(role=None):
+    """Return a system-prompt snippet containing the agent's runtime context as JSON."""
     context = agent_runtime_context(role)
     return (
         "\nRuntime context available to your tools and decisions:\n"
@@ -84,6 +88,7 @@ def format_agent_context(role=None):
 
 
 def format_org_chat_context(transcript, limit):
+    """Format the most recent `limit` transcript entries as a readable org-chat snippet."""
     if not transcript or limit == 0:
         return ""
     recent = transcript[-limit:]
@@ -96,11 +101,13 @@ def format_org_chat_context(transcript, limit):
 
 
 def current_agent_context(employee_dict):
+    """Tool handler: return the active caller's runtime context as a JSON string."""
     del employee_dict
     return json.dumps(agent_runtime_context(_m.active_tool_caller), sort_keys=True)
 
 
 def format_verified_tool_results(system_events):
+    """Format a list of tool-result strings into a system-message block for injection."""
     verified_events = [event for event in system_events if isinstance(event, str) and event.strip()]
     if not verified_events:
         return ""
@@ -114,6 +121,7 @@ def format_verified_tool_results(system_events):
 
 
 def deliver_verified_tool_results(role, system_events):
+    """Append a verified-tool-results system message to a role's conversation history."""
     content = format_verified_tool_results(system_events)
     if not content or not hasattr(role, "conversation_history"):
         return
@@ -122,6 +130,7 @@ def deliver_verified_tool_results(role, system_events):
 
 
 def prepend_verified_tool_results(prompt, system_events):
+    """Prepend a verified-tool-results block to a prompt string if any events are present."""
     content = format_verified_tool_results(system_events)
     if not content:
         return prompt
