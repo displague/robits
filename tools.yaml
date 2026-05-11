@@ -795,6 +795,31 @@
       - query
   code: |
     return builtin_web_search(employee_dict, query, num_results=num_results if num_results is not None else 5)
+- name: builtin.weather_lookup
+  grantable: true
+  owner_capability: agent
+  description: Look up a current US ZIP-code forecast using public no-key weather APIs.
+  parameters:
+    type: object
+    properties:
+      zipcode:
+        type: string
+        description: US ZIP code, for example "08234".
+      country:
+        type: string
+        description: Country code; currently only US is supported.
+      date:
+        type: string
+        description: Optional requested date in YYYY-MM-DD form. The current forecast period is returned.
+    required:
+      - zipcode
+  code: |
+    return builtin_weather_lookup(
+        employee_dict,
+        zipcode,
+        country=country if country is not None else "US",
+        date=date,
+    )
 - name: builtin.file_search
   grantable: true
   owner_capability: agent
