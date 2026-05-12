@@ -275,35 +275,7 @@ class ToolRegistry:
             cancel_alarm,
         )
         from robits.core.context import current_agent_context
-        from robits.core.tool_functions import (
-            memory_search,
-            memory_list_digests,
-            memory_expand_digest,
-            grant_tool_access,
-            revoke_tool_access,
-            list_registered_tools,
-            propose_tool_change,
-            list_tool_proposals,
-            approve_tool_proposal,
-            reject_tool_proposal,
-            rollout_tool_proposal,
-            approve_and_rollout_proposal,
-            workspace_list,
-            workspace_read,
-            workspace_write,
-            workspace_delete,
-            org_chat_read,
-            work_todo_add,
-            builtin_web_search,
-            builtin_file_search,
-            builtin_shell_run,
-            builtin_tool_search,
-            builtin_mcp_call,
-            builtin_computer_use,
-            builtin_image_generation,
-            agent_think,
-            agent_wait,
-        )
+        from robits.core.tool_functions import SANDBOX_GLOBALS
         local_dict = {}
         exec(
             function_source,
@@ -319,35 +291,9 @@ class ToolRegistry:
                 "create_alarm": create_alarm,
                 "list_alarms": list_alarms,
                 "cancel_alarm": cancel_alarm,
-                "memory_search": memory_search,
-                "memory_list_digests": memory_list_digests,
-                "memory_expand_digest": memory_expand_digest,
-                "grant_tool_access": grant_tool_access,
-                "revoke_tool_access": revoke_tool_access,
-                "list_registered_tools": list_registered_tools,
-                "propose_tool_change": propose_tool_change,
-                "list_tool_proposals": list_tool_proposals,
-                "approve_tool_proposal": approve_tool_proposal,
-                "reject_tool_proposal": reject_tool_proposal,
-                "rollout_tool_proposal": rollout_tool_proposal,
-                "approve_and_rollout_proposal": approve_and_rollout_proposal,
-                "workspace_list": workspace_list,
-                "workspace_read": workspace_read,
-                "workspace_write": workspace_write,
-                "workspace_delete": workspace_delete,
                 "current_agent_context": current_agent_context,
                 "get_caller_name": lambda: _m.active_tool_caller_name or getattr(_m.active_tool_caller, "name", None) or "unknown",
-                "builtin_web_search": builtin_web_search,
-                "builtin_file_search": builtin_file_search,
-                "builtin_shell_run": builtin_shell_run,
-                "builtin_tool_search": builtin_tool_search,
-                "builtin_mcp_call": builtin_mcp_call,
-                "builtin_computer_use": builtin_computer_use,
-                "builtin_image_generation": builtin_image_generation,
-                "org_chat_read": org_chat_read,
-                "work_todo_add": work_todo_add,
-                "agent_think": agent_think,
-                "agent_wait": agent_wait,
+                **SANDBOX_GLOBALS,
             },
             local_dict,
         )
@@ -617,7 +563,7 @@ class ToolRegistry:
         finally:
             _m.active_tool_caller = previous_caller
             _m.active_tool_caller_name = previous_caller_name
-        return f"Executed tool '{resolved_name}' with args {args}. Result: {result}"
+        return result
 
     def as_responses_tools(self, role=None):
         """Return all (or role-filtered) tools serialised for the Responses API."""

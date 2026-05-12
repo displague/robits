@@ -710,8 +710,15 @@ def agent_think(employee_dict, content):
     return ""
 
 
+_WAIT_STATE_FILE = ".wait_state.json"
+
+
 def agent_wait(employee_dict, minutes):
-    """Suspend the calling agent for up to N minutes."""
+    """Suspend the calling agent for up to N minutes.
+
+    The wait state is persisted to the agent's workspace so it survives session
+    boundaries.  On next session start, Session.__init__ restores it.
+    """
     del employee_dict
     caller = _m.active_tool_caller
     if caller is None:
@@ -727,4 +734,80 @@ def agent_wait(employee_dict, minutes):
     caller.waiting_until = now + timedelta(minutes=duration)
     caller.wait_started_turn = _m.active_session_transcript_length
     caller.wait_clock_state = getattr(caller, "runtime_clock_state", _m.clock_state)
+    agent_name = _m.active_tool_caller_name or getattr(caller, "name", None)
+    if agent_name and _m.agent_workspace_store is not None:
+        try:
+            _m.agent_workspace_store.write(
+                agent_name,
+                _WAIT_STATE_FILE,
+                json.dumps({
+                    "waiting_until": caller.waiting_until.isoformat(),
+                    "wait_clock_state": caller.wait_clock_state,
+                }),
+            )
+        except Exception:
+            pass
     return ""
+
+
+def _restore_wait_state(agent_name, role):
+    """Check workspace for a persisted wait state and restore it on role if still active."""
+    if _m.agent_workspace_store is None:
+        return
+    try:
+        result = _m.agent_workspace_store.read(agent_name, _WAIT_STATE_FILE)
+        raw = result.get("content", "") if isinstance(result, dict) else result
+    except Exception:
+        return
+    if not raw:
+        return
+    try:
+        state = json.loads(raw)
+        waiting_until = datetime.fromisoformat(state["waiting_until"])
+    except Exception:
+        try:
+            _m.agent_workspace_store.delete(agent_name, _WAIT_STATE_FILE)
+        except Exception:
+            pass
+        return
+    now = datetime.now(timezone.utc)
+    if waiting_until <= now:
+        try:
+            _m.agent_workspace_store.delete(agent_name, _WAIT_STATE_FILE)
+        except Exception:
+            pass
+        return
+    role.waiting_until = waiting_until
+    role.wait_clock_state = state.get("wait_clock_state")
+
+# Functions available in the tool sandbox (exec globals for compile_tool).
+# Add new sandbox-accessible functions here; compile_tool picks them up automatically.
+SANDBOX_GLOBALS = {
+    "workspace_list": workspace_list,
+    "workspace_read": workspace_read,
+    "workspace_write": workspace_write,
+    "workspace_delete": workspace_delete,
+    "org_chat_read": org_chat_read,
+    "work_todo_add": work_todo_add,
+    "memory_search": memory_search,
+    "memory_list_digests": memory_list_digests,
+    "memory_expand_digest": memory_expand_digest,
+    "grant_tool_access": grant_tool_access,
+    "revoke_tool_access": revoke_tool_access,
+    "list_registered_tools": list_registered_tools,
+    "propose_tool_change": propose_tool_change,
+    "list_tool_proposals": list_tool_proposals,
+    "approve_tool_proposal": approve_tool_proposal,
+    "reject_tool_proposal": reject_tool_proposal,
+    "rollout_tool_proposal": rollout_tool_proposal,
+    "approve_and_rollout_proposal": approve_and_rollout_proposal,
+    "builtin_web_search": builtin_web_search,
+    "builtin_file_search": builtin_file_search,
+    "builtin_shell_run": builtin_shell_run,
+    "builtin_tool_search": builtin_tool_search,
+    "builtin_mcp_call": builtin_mcp_call,
+    "builtin_computer_use": builtin_computer_use,
+    "builtin_image_generation": builtin_image_generation,
+    "agent_think": agent_think,
+    "agent_wait": agent_wait,
+}

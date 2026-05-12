@@ -354,7 +354,7 @@ class RuntimeTests(unittest.TestCase):
                 json.dumps({"exec": "org.list_roles", "args": {}})
             )
 
-        role_list = json.loads(list_response.split("Result: ", 1)[1])
+        role_list = json.loads(list_response)
         sre = next(role for role in role_list if role["role_name"] == "SRE")
 
         self.assertIn("Created a new role: SRE", create_response)
@@ -780,7 +780,7 @@ class RuntimeTests(unittest.TestCase):
                 ),
                 caller=employee_dict["SE"],
             )
-            proposal = json.loads(propose_response.split("Result: ", 1)[1])
+            proposal = json.loads(propose_response)
             list_response = system.interact(
                 json.dumps({"exec": "tools.list_proposals", "args": {"status": "proposed"}}),
                 caller=employee_dict["SE"],
@@ -799,8 +799,8 @@ class RuntimeTests(unittest.TestCase):
                 caller=employee_dict["Ops"],
             )
 
-        proposals = json.loads(list_response.split("Result: ", 1)[1])
-        approved = json.loads(approve_response.split("Result: ", 1)[1])
+        proposals = json.loads(list_response)
+        approved = json.loads(approve_response)
 
         self.assertEqual(proposal["status"], "proposed")
         self.assertEqual(proposal["parameters"]["required"], ["location"])
@@ -826,7 +826,7 @@ class RuntimeTests(unittest.TestCase):
                         }
                     ),
                     caller=employee_dict["SE"],
-                ).split("Result: ", 1)[1]
+                )
             )
             reject_response = system.interact(
                 json.dumps(
@@ -842,7 +842,7 @@ class RuntimeTests(unittest.TestCase):
                 caller=employee_dict["Ops"],
             )
 
-        rejected = json.loads(reject_response.split("Result: ", 1)[1])
+        rejected = json.loads(reject_response)
 
         self.assertEqual(rejected["status"], "rejected")
         self.assertEqual(rejected["rejection_reason"], "Needs a safer provider design.")
@@ -881,7 +881,7 @@ class RuntimeTests(unittest.TestCase):
                         }
                     ),
                     caller=employee_dict["SE"],
-                ).split("Result: ", 1)[1]
+                )
             )
             system.interact(
                 json.dumps(
@@ -906,7 +906,7 @@ class RuntimeTests(unittest.TestCase):
                 caller=employee_dict["Ops"],
             )
 
-        rollout = json.loads(rollout_response.split("Result: ", 1)[1])
+        rollout = json.loads(rollout_response)
 
         self.assertEqual(rollout["proposal"]["status"], "operationalized")
         self.assertIn("weather.lookup", employee_dict["SE"].allowed_tools)
@@ -929,7 +929,7 @@ class RuntimeTests(unittest.TestCase):
                         }
                     ),
                     caller=employee_dict["SE"],
-                ).split("Result: ", 1)[1]
+                )
             )
             system.interact(
                 json.dumps(
@@ -967,7 +967,7 @@ class RuntimeTests(unittest.TestCase):
                 caller=employee_dict["SE"],
             )
 
-        tools = json.loads(response.split("Result: ", 1)[1])
+        tools = json.loads(response)
         names = {tool["name"] for tool in tools}
 
         self.assertIn("tools.propose", names)
@@ -981,7 +981,7 @@ class RuntimeTests(unittest.TestCase):
                 json.dumps({"exec": "tools.list", "args": {}})
             )
 
-        tools = json.loads(response.split("Result: ", 1)[1])
+        tools = json.loads(response)
 
         self.assertIsNone(tools[0]["allowed"])
 
@@ -1129,8 +1129,8 @@ class RuntimeTests(unittest.TestCase):
             )
 
         self.assertIn("Stored tool", response)
-        self.assertIn("Result: a", omitted)
-        self.assertIn("Result: ab", supplied)
+        self.assertEqual(omitted, "a")
+        self.assertEqual(supplied, "ab")
 
     def test_duplicate_tool_name_is_rejected(self):
         system = main.System(main.build_employee_dict())
@@ -1545,7 +1545,7 @@ class RuntimeTests(unittest.TestCase):
                 caller=employee_dict["SE"],
             )
 
-        alarms = json.loads(list_response.split("Result: ", 1)[1])
+        alarms = json.loads(list_response)
 
         self.assertIn("Created alarm", create_response)
         self.assertEqual(alarms[0]["reminder"], "Check build health.")
@@ -1608,7 +1608,7 @@ class RuntimeTests(unittest.TestCase):
                     caller=employee_dict["SE"],
                 )
 
-        context = json.loads(response.split("Result: ", 1)[1])
+        context = json.loads(response)
 
         self.assertEqual(context["agent_name"], "SoftwareEngineer")
         self.assertEqual(context["role_name"], "SE")
@@ -1657,10 +1657,10 @@ class RuntimeTests(unittest.TestCase):
                 caller=employee_dict["SE"],
             )
 
-        written = json.loads(write_response.split("Result: ", 1)[1])
-        listed = json.loads(list_response.split("Result: ", 1)[1])
-        read = json.loads(read_response.split("Result: ", 1)[1])
-        deleted = json.loads(delete_response.split("Result: ", 1)[1])
+        written = json.loads(write_response)
+        listed = json.loads(list_response)
+        read = json.loads(read_response)
+        deleted = json.loads(delete_response)
 
         self.assertEqual(written["path"], "NOTES.md")
         self.assertEqual(listed[0]["path"], "NOTES.md")
@@ -1808,9 +1808,9 @@ class RuntimeTests(unittest.TestCase):
                 main.memory_store = original_store
                 store.close()
 
-        search_results = json.loads(search_response.split("Result: ", 1)[1])
-        digest_results = json.loads(list_response.split("Result: ", 1)[1])
-        expanded = json.loads(expand_response.split("Result: ", 1)[1])
+        search_results = json.loads(search_response)
+        digest_results = json.loads(list_response)
+        expanded = json.loads(expand_response)
 
         self.assertTrue(search_results)
         self.assertEqual(digest_results[0]["digest_id"], digest_id)
@@ -1946,7 +1946,7 @@ class RuntimeTests(unittest.TestCase):
                 receiver="Ops",
                 prompt="create QA",
                 response="",
-                system_events=["Executed tool 'org.create_role' with args {}. Result: Created a new role: QA."],
+                system_events=["tool_call.executed: org.create_role({}) -> Created a new role: QA."],
             )
         )
         session.turns_completed = 1
