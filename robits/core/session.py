@@ -164,6 +164,7 @@ class Session:
         self._last_goal_digest_meaningful_turn = 0
         self.last_receiver = self.participants.get("CEO") or next(iter(self.participants.values()))
         self._name_to_key = {getattr(p, "name", k): k for k, p in self.participants.items()}
+        self._role_to_key = {id(p): k for k, p in self.participants.items()}
         _cs = clock_state or _m.clock_state
         self.clock_state = _cs if _cs in {"on", "off"} else "on"
         self.event_stream.emit(
@@ -195,7 +196,7 @@ class Session:
 
     def _clear_wait_state_file(self, role):
         """Remove the persisted wait-state file for role if agent_workspace_store is available."""
-        agent_name = getattr(role, "runtime_role_name", None) or getattr(role, "name", None)
+        agent_name = self._role_to_key.get(id(role))
         if agent_name and _m.agent_workspace_store is not None:
             try:
                 _m.agent_workspace_store.delete(agent_name, _WAIT_STATE_FILE)

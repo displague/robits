@@ -765,6 +765,10 @@ def _restore_wait_state(agent_name, role):
         state = json.loads(raw)
         waiting_until = datetime.fromisoformat(state["waiting_until"])
     except Exception:
+        try:
+            _m.agent_workspace_store.delete(agent_name, _WAIT_STATE_FILE)
+        except Exception:
+            pass
         return
     now = datetime.now(timezone.utc)
     if waiting_until <= now:
