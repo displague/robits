@@ -1,9 +1,10 @@
 """Model provider implementations and API helpers."""
 import json
 import random
+import time
 from uuid import uuid4
 
-import main as _m
+from robits.core.config import _config as _m
 
 _EXECUTE_RESULT_MARKER = ". Result: "
 
@@ -58,7 +59,7 @@ def _with_model_retries(operation):
                 raise
             delay = min(_m.api_retry_max_seconds, _m.api_retry_base_seconds * (2**attempt))
             if delay:
-                _m.time.sleep(delay + random.uniform(0, delay / 4))
+                time.sleep(delay + random.uniform(0, delay / 4))
             attempt += 1
 
 

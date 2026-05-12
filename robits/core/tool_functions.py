@@ -5,7 +5,7 @@ import os
 from datetime import datetime, timezone
 from uuid import uuid4
 
-import main as _m
+from robits.core.config import _config as _m
 from robits.core.lifecycle import (
     validate_role_name,
     _caller_can_act_for_agent,

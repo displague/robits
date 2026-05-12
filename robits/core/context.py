@@ -3,7 +3,7 @@ import json
 from datetime import datetime, timezone
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-import main as _m
+from robits.core.config import _config as _m
 
 
 def _runtime_timezone():

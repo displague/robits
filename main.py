@@ -1,80 +1,22 @@
 #!/usr/bin/env python3
-"""Main entry point and global state for the robits simulation."""
-import argparse
-import os
+"""Main entry point and re-export harness for the robits simulation.
+
+All global state lives in ``robits.core.config._config``.  This module
+re-exports every public symbol so that existing ``import main; main.X`` usage
+continues to work.  Attribute reads and writes on the ``main`` module are
+proxied through to ``_config`` for attributes that are not explicitly bound in
+this module's namespace (i.e. classes, functions, and CLI helpers).
+"""
 import sys
-import threading
-import time
+import time  # kept for patch("main.time.sleep") compatibility in tests
+import types
 from pathlib import Path
 
-from openai import OpenAI
-
-from robits.memory.sqlite import SQLiteMemoryStore
-from robits.runtime.tool_proposals import ToolProposalStore
-from robits.runtime.workspace import AgentWorkspaceStore, WorkspacePathError
+from robits.core.config import _config, Config  # noqa: F401
 
 
 # ---------------------------------------------------------------------------
-# Client factory
-# ---------------------------------------------------------------------------
-
-def make_client():
-    client_kwargs = {
-        "api_key": os.environ.get("OPENAI_API_KEY", "not-needed"),
-    }
-    organization = os.environ.get("OPENAI_ORG")
-    if organization:
-        client_kwargs["organization"] = organization
-    base_url = os.environ.get("OPENAI_BASE_URL") or os.environ.get("OPENAI_API_BASE")
-    if base_url:
-        client_kwargs["base_url"] = base_url
-    return OpenAI(**client_kwargs)
-
-
-# ---------------------------------------------------------------------------
-# Module-level globals (tests and sub-modules reference these via _m.X)
-# ---------------------------------------------------------------------------
-
-client = make_client()
-default_model = os.environ.get("ROBITS_MODEL") or os.environ.get("OPENAI_MODEL") or "gpt-4o-mini"
-costly_model = os.environ.get("ROBITS_COSTLY_MODEL", default_model)
-cheap_model = os.environ.get("ROBITS_CHEAP_MODEL", default_model)
-provider_api = os.environ.get("ROBITS_PROVIDER_API", "responses").strip().lower()
-max_parallelism = max(1, int(os.environ.get("ROBITS_MAX_PARALLELISM", "1")))
-max_api_retries = max(0, int(os.environ.get("ROBITS_MAX_API_RETRIES", "3")))
-api_retry_base_seconds = max(0.0, float(os.environ.get("ROBITS_API_RETRY_BASE_SECONDS", "0.25")))
-api_retry_max_seconds = max(api_retry_base_seconds, float(os.environ.get("ROBITS_API_RETRY_MAX_SECONDS", "4.0")))
-model_call_gate = threading.BoundedSemaphore(max_parallelism)
-builtin_search_url = os.environ.get("ROBITS_SEARCH_URL", "").strip()
-memory_db_path = os.environ.get("ROBITS_MEMORY_DB")
-memory_store = SQLiteMemoryStore(memory_db_path) if memory_db_path else None
-tool_proposal_store = None
-memory_max_depth = max(0, int(os.environ.get("ROBITS_MEMORY_MAX_DEPTH", "3")))
-memory_max_rows = max(1, int(os.environ.get("ROBITS_MEMORY_MAX_ROWS", "100")))
-memory_cache_threshold = max(512, int(os.environ.get("ROBITS_MEMORY_CACHE_THRESHOLD", "8192")))
-memory_digest_interval = max(0, int(os.environ.get("ROBITS_DIGEST_INTERVAL", "0")))
-memory_digest_context_chars = max(0, int(os.environ.get("ROBITS_DIGEST_CONTEXT_CHARS", "0")))
-memory_digest_elapsed_seconds = max(0, int(os.environ.get("ROBITS_DIGEST_ELAPSED_SECONDS", "0")))
-memory_identity_digest_interval = max(0, int(os.environ.get("ROBITS_IDENTITY_DIGEST_INTERVAL", "0")))
-memory_goal_digest_interval = max(0, int(os.environ.get("ROBITS_GOAL_DIGEST_INTERVAL", "0")))
-org_chat_context_lines = max(0, int(os.environ.get("ROBITS_ORG_CHAT_CONTEXT_LINES", "20")))
-org_digest_interval = max(0, int(os.environ.get("ROBITS_ORG_DIGEST_INTERVAL", "0")))
-_reasoning_effort_env = os.environ.get("ROBITS_REASONING_EFFORT", "").strip().lower() or None
-
-_raw_clock_state = os.environ.get("ROBITS_CLOCK_STATE", "on").strip().lower()
-clock_state = _raw_clock_state if _raw_clock_state in {"on", "off"} else "on"
-agent_workspace_store = AgentWorkspaceStore()
-_org_workspace = agent_workspace_store if memory_store is not None else None
-default_location = os.environ.get("ROBITS_LOCATION", "").strip()
-default_timezone = os.environ.get("ROBITS_TIMEZONE", "").strip()
-
-active_tool_caller = None
-active_tool_caller_name = None
-active_session_transcript_length = 0
-
-
-# ---------------------------------------------------------------------------
-# Sub-module imports (order matters to avoid partial initialization issues)
+# Sub-module imports (order matters: config must be fully initialised first)
 # ---------------------------------------------------------------------------
 
 from robits.core.io import TeeStream  # noqa: E402
@@ -181,8 +123,56 @@ from robits.core.session import (  # noqa: E402
     Session,
 )
 
-tool_registry = ToolRegistry()
-model_provider = make_model_provider()
+from robits.memory.sqlite import SQLiteMemoryStore  # noqa: F401
+from robits.runtime.tool_proposals import ToolProposalStore  # noqa: F401
+from robits.runtime.workspace import AgentWorkspaceStore, WorkspacePathError  # noqa: F401
+
+
+# ---------------------------------------------------------------------------
+# Initialise runtime singletons on _config
+# ---------------------------------------------------------------------------
+
+_config.tool_registry = ToolRegistry()
+_config.model_provider = make_model_provider()
+
+
+# ---------------------------------------------------------------------------
+# Module proxy — forward attribute reads/writes to _config for state attrs
+# ---------------------------------------------------------------------------
+
+class _MainModule(types.ModuleType):
+    """Proxy so that ``main.X = y`` writes reach ``_config.X`` transparently."""
+
+    def __getattr__(self, name):
+        try:
+            return getattr(_config, name)
+        except AttributeError:
+            raise AttributeError(f"module 'main' has no attribute {name!r}") from None
+
+    def __setattr__(self, name, value):
+        if name.startswith("__") and name.endswith("__"):
+            super().__setattr__(name, value)
+        elif name in self.__dict__:
+            # Attribute lives in this module's own namespace (re-exported
+            # classes/functions defined here).  Keep it there so that code
+            # inside main.py that calls these by name still finds the patched
+            # version in its globals.
+            super().__setattr__(name, value)
+        else:
+            setattr(_config, name, value)
+
+    def __delattr__(self, name):
+        # ``patch.object`` calls delattr on teardown for attributes it found via
+        # ``__getattr__`` (i.e. not in ``__dict__``).  Those attributes live on
+        # ``_config``, so the delete is a no-op here — the value was already
+        # restored via ``__setattr__`` before this call.
+        try:
+            super().__delattr__(name)
+        except AttributeError:
+            pass
+
+
+sys.modules[__name__].__class__ = _MainModule
 
 
 # ---------------------------------------------------------------------------
@@ -190,20 +180,26 @@ model_provider = make_model_provider()
 # ---------------------------------------------------------------------------
 
 def run_simulation(initial_message=None, max_turns=None):
+    """Initialise the session, load tools, and run the simulation loop."""
     session = Session()
     load_tools(session.system)
     return session.run(initial_message=initial_message, max_turns=max_turns)
 
 
 def parse_args(argv=None):
+    """Parse CLI arguments and return the namespace."""
+    import argparse
     parser = argparse.ArgumentParser()
     parser.add_argument("--prompt", help="Initial message to start the simulation.")
     parser.add_argument("--turns", type=int, help="Maximum model turns to run.")
-    parser.add_argument("--log", help="Write the console transcript to this file while still printing it.")
+    parser.add_argument(
+        "--log", help="Write the console transcript to this file while still printing it."
+    )
     return parser.parse_args(argv)
 
 
 def main(argv=None):
+    """CLI entry point: parse args, optionally tee stdout/stderr, run simulation."""
     args = parse_args(argv)
     if args.log:
         log_path = Path(args.log)

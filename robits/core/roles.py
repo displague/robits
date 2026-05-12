@@ -4,7 +4,7 @@ import random
 import yaml
 from pathlib import Path
 
-import main as _m
+from robits.core.config import _config as _m
 from robits.runtime.sandbox import SandboxMetadata
 from robits.core.context import format_agent_context
 

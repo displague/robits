@@ -4,7 +4,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from uuid import uuid4
 
-import main as _m
+from robits.core.config import _config as _m
 from robits.core.tools import _normalize_capabilities, _normalize_tool_grants
 from robits.core.context import agent_runtime_context
 
@@ -181,10 +181,11 @@ def create_lifecycle_role(
         return f"Error: {e}"
     if normalized_name in employee_dict:
         return f"Error: Role '{normalized_name}' already exists."
-    if len(employee_dict) >= _m.HR.max_organization_members:
-        return f"Error: The organization has reached its maximum size of {_m.HR.max_organization_members} members."
+    from robits.core.roles import HR, Role
+    if len(employee_dict) >= HR.max_organization_members:
+        return f"Error: The organization has reached its maximum size of {HR.max_organization_members} members."
 
-    new_role = _m.Role(normalized_name, normalized_description, employee_dict)
+    new_role = Role(normalized_name, normalized_description, employee_dict)
     new_role.capabilities = normalized_capabilities
     new_role.allowed_tools.update(normalized_tool_grants)
     record_lifecycle_event(

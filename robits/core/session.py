@@ -5,7 +5,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from uuid import uuid4
 
-import main as _m
+from robits.core.config import _config as _m
 from termcolor import colored
 
 from robits.memory.sqlite import CHANNEL_ORG_CHAT, SOCIAL_PROFESSIONAL, compute_phase_shift
