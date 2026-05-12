@@ -728,3 +728,35 @@ def agent_wait(employee_dict, minutes):
     caller.wait_started_turn = _m.active_session_transcript_length
     caller.wait_clock_state = getattr(caller, "runtime_clock_state", _m.clock_state)
     return ""
+
+# Functions available in the tool sandbox (exec globals for compile_tool).
+# Add new sandbox-accessible functions here; compile_tool picks them up automatically.
+SANDBOX_GLOBALS = {
+    "workspace_list": workspace_list,
+    "workspace_read": workspace_read,
+    "workspace_write": workspace_write,
+    "workspace_delete": workspace_delete,
+    "org_chat_read": org_chat_read,
+    "work_todo_add": work_todo_add,
+    "memory_search": memory_search,
+    "memory_list_digests": memory_list_digests,
+    "memory_expand_digest": memory_expand_digest,
+    "grant_tool_access": grant_tool_access,
+    "revoke_tool_access": revoke_tool_access,
+    "list_registered_tools": list_registered_tools,
+    "propose_tool_change": propose_tool_change,
+    "list_tool_proposals": list_tool_proposals,
+    "approve_tool_proposal": approve_tool_proposal,
+    "reject_tool_proposal": reject_tool_proposal,
+    "rollout_tool_proposal": rollout_tool_proposal,
+    "approve_and_rollout_proposal": approve_and_rollout_proposal,
+    "builtin_web_search": builtin_web_search,
+    "builtin_file_search": builtin_file_search,
+    "builtin_shell_run": builtin_shell_run,
+    "builtin_tool_search": builtin_tool_search,
+    "builtin_mcp_call": builtin_mcp_call,
+    "builtin_computer_use": builtin_computer_use,
+    "builtin_image_generation": builtin_image_generation,
+    "agent_think": agent_think,
+    "agent_wait": agent_wait,
+}

@@ -89,6 +89,7 @@ from robits.core.tool_functions import (  # noqa: E402
     agent_think,
     agent_wait,
     _condense_if_large,
+    SANDBOX_GLOBALS,
 )
 from robits.core.roles import (  # noqa: E402
     Role,
