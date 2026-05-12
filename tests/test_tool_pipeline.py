@@ -346,6 +346,48 @@ class ToolProposalPipelineTests(unittest.TestCase):
         self.assertLessEqual(se_role.waiting_until, expected_max)
         self.assertEqual(se_role.wait_started_turn, 0)
 
+    def test_agent_wait_persists_to_workspace_and_restores_on_session_start(self):
+        """Wait state written to workspace survives session end; new Session restores it."""
+        import tempfile
+        from datetime import datetime, timezone, timedelta
+        from robits.runtime.workspace import AgentWorkspaceStore
+        from robits.core.tool_functions import _WAIT_STATE_FILE
+
+        saved_workspace = main.agent_workspace_store
+        saved_caller = main.active_tool_caller
+        saved_caller_name = main.active_tool_caller_name
+        saved_transcript_len = main.active_session_transcript_length
+        with tempfile.TemporaryDirectory() as tmp:
+            main.agent_workspace_store = AgentWorkspaceStore(tmp)
+            employee_dict = _make_employee_dict()
+            se_role = employee_dict["SE"]
+            main.active_tool_caller = se_role
+            main.active_tool_caller_name = "SE"
+            main.active_session_transcript_length = 0
+            try:
+                result = main.agent_wait(employee_dict={}, minutes=60)
+            finally:
+                main.active_tool_caller = saved_caller
+                main.active_tool_caller_name = saved_caller_name
+                main.active_session_transcript_length = saved_transcript_len
+
+            self.assertEqual(result, "")
+            raw = main.agent_workspace_store.read("SE", _WAIT_STATE_FILE)
+            self.assertTrue(raw, "Wait state not persisted to workspace")
+
+            # Simulate next session: create a fresh role and restore via Session init
+            fresh_dict = _make_employee_dict()
+            system = main.System(fresh_dict)
+            with redirect_stdout(StringIO()):
+                main.load_tools(system)
+            session = main.Session(participants=fresh_dict, system=system)
+            self.assertIsNotNone(
+                fresh_dict["SE"].waiting_until,
+                "waiting_until not restored from workspace on new Session",
+            )
+            self.assertGreater(fresh_dict["SE"].waiting_until, datetime.now(timezone.utc))
+        main.agent_workspace_store = saved_workspace
+
     def test_agent_wait_rejects_nonpositive_minutes(self):
         employee_dict = _make_employee_dict()
         se_role = employee_dict["SE"]

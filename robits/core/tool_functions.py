@@ -710,8 +710,15 @@ def agent_think(employee_dict, content):
     return ""
 
 
+_WAIT_STATE_FILE = ".wait_state.json"
+
+
 def agent_wait(employee_dict, minutes):
-    """Suspend the calling agent for up to N minutes."""
+    """Suspend the calling agent for up to N minutes.
+
+    The wait state is persisted to the agent's workspace so it survives session
+    boundaries.  On next session start, Session.__init__ restores it.
+    """
     del employee_dict
     caller = _m.active_tool_caller
     if caller is None:
@@ -727,7 +734,47 @@ def agent_wait(employee_dict, minutes):
     caller.waiting_until = now + timedelta(minutes=duration)
     caller.wait_started_turn = _m.active_session_transcript_length
     caller.wait_clock_state = getattr(caller, "runtime_clock_state", _m.clock_state)
+    agent_name = _m.active_tool_caller_name or getattr(caller, "name", None)
+    if agent_name and _m.agent_workspace_store is not None:
+        try:
+            _m.agent_workspace_store.write(
+                agent_name,
+                _WAIT_STATE_FILE,
+                json.dumps({
+                    "waiting_until": caller.waiting_until.isoformat(),
+                    "wait_clock_state": caller.wait_clock_state,
+                }),
+            )
+        except Exception:
+            pass
     return ""
+
+
+def _restore_wait_state(agent_name, role):
+    """Check workspace for a persisted wait state and restore it on role if still active."""
+    if _m.agent_workspace_store is None:
+        return
+    try:
+        result = _m.agent_workspace_store.read(agent_name, _WAIT_STATE_FILE)
+        raw = result.get("content", "") if isinstance(result, dict) else result
+    except Exception:
+        return
+    if not raw:
+        return
+    try:
+        state = json.loads(raw)
+        waiting_until = datetime.fromisoformat(state["waiting_until"])
+    except Exception:
+        return
+    now = datetime.now(timezone.utc)
+    if waiting_until <= now:
+        try:
+            _m.agent_workspace_store.delete(agent_name, _WAIT_STATE_FILE)
+        except Exception:
+            pass
+        return
+    role.waiting_until = waiting_until
+    role.wait_clock_state = state.get("wait_clock_state")
 
 # Functions available in the tool sandbox (exec globals for compile_tool).
 # Add new sandbox-accessible functions here; compile_tool picks them up automatically.

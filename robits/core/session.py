@@ -16,6 +16,7 @@ from robits.core.context import (
     prepend_verified_tool_results,
 )
 from robits.core.lifecycle import due_alarm_reminders
+from robits.core.tool_functions import _restore_wait_state, _WAIT_STATE_FILE
 
 
 @dataclass
@@ -174,6 +175,9 @@ class Session:
                 "clock_state": self.clock_state,
             },
         )
+        for name, participant in self.participants.items():
+            _restore_wait_state(name, participant)
+
         self._org_workspace = _m._org_workspace
         self._org_chat_channel_id = None
         if _m.memory_store is not None:
@@ -189,6 +193,15 @@ class Session:
             except Exception:
                 pass
 
+    def _clear_wait_state_file(self, role):
+        """Remove the persisted wait-state file for role if agent_workspace_store is available."""
+        agent_name = getattr(role, "runtime_role_name", None) or getattr(role, "name", None)
+        if agent_name and _m.agent_workspace_store is not None:
+            try:
+                _m.agent_workspace_store.delete(agent_name, _WAIT_STATE_FILE)
+            except Exception:
+                pass
+
     def _build_wait_summary(self, role):
         """Clear a role's wait state and return a summary of what happened while it was waiting."""
         started = getattr(role, "wait_started_turn", None) or 0
@@ -196,6 +209,7 @@ class Session:
         role.waiting_until = None
         role.wait_started_turn = None
         role.wait_clock_state = None
+        self._clear_wait_state_file(role)
         if not since:
             return "Your wait has ended. Nothing notable happened while you were waiting."
         lines = ["Your wait has ended. Here is what happened while you were waiting:"]
@@ -215,6 +229,7 @@ class Session:
             role.waiting_until = None
             role.wait_started_turn = None
             role.wait_clock_state = None
+            self._clear_wait_state_file(role)
             return True
         return False
 
