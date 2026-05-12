@@ -319,8 +319,7 @@ class ToolProposalPipelineTests(unittest.TestCase):
         result = main.tool_registry.execute(
             "agent.think", {"content": "Planning next step."}, employee_dict, caller=employee_dict["SE"]
         )
-        self.assertIn("Result: ", result)
-        self.assertTrue(result.endswith("Result: "), f"Expected empty inner result, got: {result!r}")
+        self.assertEqual(result, "")
 
     # --- agent.wait: sets waiting_until on the caller role ---
 

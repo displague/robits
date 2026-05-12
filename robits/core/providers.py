@@ -6,8 +6,6 @@ from uuid import uuid4
 
 from robits.core.config import _config as _m
 
-_EXECUTE_RESULT_MARKER = ". Result: "
-
 
 def _response_text(response):
     """Extract concatenated text content from an OpenAI Responses API response object."""
@@ -95,13 +93,7 @@ def _record_role_tool_result(role, result):
 
 def _tool_result_is_error(raw_result):
     """Return True if the raw execute() output represents an error."""
-    s = str(raw_result)
-    if s.startswith("Error:"):
-        return True
-    idx = s.rfind(_EXECUTE_RESULT_MARKER)
-    if idx != -1:
-        return s[idx + len(_EXECUTE_RESULT_MARKER):].startswith("Error:")
-    return False
+    return str(raw_result).startswith("Error:")
 
 
 class ModelProvider:

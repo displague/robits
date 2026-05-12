@@ -617,7 +617,7 @@ class ToolRegistry:
         finally:
             _m.active_tool_caller = previous_caller
             _m.active_tool_caller_name = previous_caller_name
-        return f"Executed tool '{resolved_name}' with args {args}. Result: {result}"
+        return result
 
     def as_responses_tools(self, role=None):
         """Return all (or role-filtered) tools serialised for the Responses API."""
