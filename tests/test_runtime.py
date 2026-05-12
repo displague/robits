@@ -1015,7 +1015,7 @@ class RuntimeTests(unittest.TestCase):
                     raise FakeRateLimit("too many requests")
                 return "ok"
 
-            with patch("main.time.sleep") as sleep:
+            with patch("robits.core.providers.time.sleep") as sleep:
                 result = main._with_model_retries(operation)
         finally:
             main.max_api_retries = original_retries
