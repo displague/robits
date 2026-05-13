@@ -90,13 +90,18 @@ class Config:
             0, int(env.get("ROBITS_ORG_DIGEST_INTERVAL", "0"))
         )
 
+        # --- personas ---
+        self.personas_file = env.get("ROBITS_PERSONAS_FILE", "").strip() or None
+        from robits.core.persona import load_personas
+        self.persona_entries = load_personas(self.personas_file)
+
         # --- misc ---
         self.builtin_search_url = env.get("ROBITS_SEARCH_URL", "").strip()
         self._reasoning_effort_env = (
             env.get("ROBITS_REASONING_EFFORT", "").strip().lower() or None
         )
         _raw_clock = env.get("ROBITS_CLOCK_STATE", "on").strip().lower()
-        self.clock_state = _raw_clock if _raw_clock in {"on", "off"} else "on"
+        self.clock_state = _raw_clock if _raw_clock in {"on", "off", "break"} else "on"
         self.default_location = env.get("ROBITS_LOCATION", "").strip()
         self.default_timezone = env.get("ROBITS_TIMEZONE", "").strip()
 
