@@ -416,6 +416,7 @@ class Session:
                 if directed
                 else self._org_chat_channel_id
             )
+            msg_visibility = "private" if directed else "public"
             try:
                 sender_phase = _m.memory_store.get_agent_phase(canonical_sender)
                 receiver_phase = _m.memory_store.get_agent_phase(canonical_receiver)
@@ -426,6 +427,7 @@ class Session:
                         receiver_agent_id=canonical_receiver,
                         content=prompt,
                         kind="message",
+                        visibility=msg_visibility,
                         channel_id=msg_channel_id,
                         sender_phase=sender_phase,
                     )
@@ -436,6 +438,7 @@ class Session:
                         receiver_agent_id=canonical_sender,
                         content=response,
                         kind="message",
+                        visibility=msg_visibility,
                         channel_id=msg_channel_id,
                         sender_phase=receiver_phase,
                     )
@@ -592,8 +595,8 @@ class Session:
                 pass
 
     def _write_org_chat_jsonl(self, entry):
-        """Append a transcript entry as a JSONL line to the org workspace chat log."""
-        if self._org_workspace is None:
+        """Append a non-directed transcript entry as a JSONL line to the org workspace chat log."""
+        if self._org_workspace is None or getattr(entry, "directed", False):
             return
         line = json.dumps({
             "turn": entry.turn,

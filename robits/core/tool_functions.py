@@ -423,7 +423,7 @@ def _condense_if_large(agent_name, tool_label, result_json):
     return json.dumps(condensed, sort_keys=True)
 
 
-_WORK_CHANNEL_TYPES = {"org_chat", "work_peer", "system"}
+_WORK_CHANNEL_TYPES = {"org_chat", "work_peer"}
 
 
 def memory_search(employee_dict, agent_name, query, limit=10, cascade=True, channel_type=None):

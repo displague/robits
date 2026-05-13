@@ -86,16 +86,17 @@ def format_agent_context(role=None):
 
 
 def format_org_chat_context(transcript, limit):
-    """Format the most recent `limit` transcript entries as a readable org-chat snippet."""
+    """Format the most recent `limit` non-directed transcript entries as an org-chat snippet."""
     if not transcript or limit == 0:
         return ""
-    recent = transcript[-limit:]
+    public = [e for e in transcript if not getattr(e, "directed", False)]
+    recent = public[-limit:]
     lines = []
     for e in recent:
         lines.append(f"[Turn {e.turn}] {e.sender} -> {e.receiver}: {e.prompt[:400]}")
         if e.response:
             lines.append(f"  -> {e.response[:400]}")
-    return "\nRecent org chat:\n" + "\n".join(lines) + "\n"
+    return "\nRecent org chat:\n" + "\n".join(lines) + "\n" if lines else ""
 
 
 def current_agent_context(employee_dict):

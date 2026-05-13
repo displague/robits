@@ -3275,7 +3275,9 @@ class ChannelScopedMemoryTests(unittest.TestCase):
         self.store = SQLiteMemoryStore(Path(self.store_temp.name) / "ch.sqlite3")
         self.addCleanup(self.store.close)
         self.original_store = main.memory_store
+        self.original_clock = main.clock_state
         main.memory_store = self.store
+        main.clock_state = "on"
         self.addCleanup(self._restore)
         self.store.create_session("s1")
         self.store.upsert_agent("A", "Role", "A")
@@ -3283,6 +3285,7 @@ class ChannelScopedMemoryTests(unittest.TestCase):
 
     def _restore(self):
         main.memory_store = self.original_store
+        main.clock_state = self.original_clock
 
     def _make_session(self, participants=None):
         if participants is None:
@@ -3326,12 +3329,22 @@ class ChannelScopedMemoryTests(unittest.TestCase):
         session = self._make_session()
         session.record_turn("A", "B", "hey", "sup", directed=True)
         rows = self.store.connection.execute(
-            "SELECT m.channel_id, c.channel_type FROM messages m"
+            "SELECT m.channel_id, c.channel_type, m.visibility FROM messages m"
             " LEFT JOIN channels c ON c.channel_id = m.channel_id"
             " WHERE m.session_id=?", (session.run_id,)
         ).fetchall()
         self.assertTrue(rows)
         self.assertTrue(all(r["channel_type"] == CHANNEL_AGENT_DM for r in rows))
+        self.assertTrue(all(r["visibility"] == "private" for r in rows))
+
+    def test_directed_message_excluded_from_org_chat_context(self):
+        from robits.core.context import format_org_chat_context
+        session = self._make_session()
+        session.record_turn("A", "B", "public update", "ack", directed=False)
+        session.record_turn("A", "B", "private dm", "private reply", directed=True)
+        ctx = format_org_chat_context(session.transcript, 10)
+        self.assertIn("public update", ctx)
+        self.assertNotIn("private dm", ctx)
 
     def test_undirected_message_tagged_with_org_chat_channel(self):
         from robits.memory.sqlite import CHANNEL_ORG_CHAT
