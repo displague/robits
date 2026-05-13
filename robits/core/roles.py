@@ -314,6 +314,7 @@ def build_employee_dict(persona_map=None):
                 default_keys_replaced.add(default_key)
             instance = RoleClass(employee_dict)
             instance.name = username
+            instance.role_key = role_key
             instance.full_name = full_name
             parts = full_name.split(None, 1)
             instance.first_name = parts[0] if parts else username

@@ -196,7 +196,7 @@ class Session:
             for form in (
                 k,
                 getattr(p, "name", None),
-                getattr(p, "runtime_role_name", None),
+                getattr(p, "role_key", None),
                 getattr(p, "full_name", None),
                 getattr(p, "first_name", None),
             ):

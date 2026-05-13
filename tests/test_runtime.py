@@ -4034,7 +4034,7 @@ class DirectedRoutingTests(unittest.TestCase):
 
     def _make_participants(self):
         se = FakeRole("alex_chen", ["ok"])
-        se.runtime_role_name = "SE"
+        se.role_key = "SE"
         se.full_name = "Alex Chen"
         se.first_name = "Alex"
         hr = FakeRole("HR", ["ok"])
@@ -4107,6 +4107,19 @@ class DirectedRoutingTests(unittest.TestCase):
         p = self._make_participants()
         session = main.Session(participants=p, run_id="routing-test")
         self.assertEqual(session._canonical_agent_id("Unknown"), "Unknown")
+
+    def test_route_by_role_key_with_real_persona_build(self):
+        """Role alias routing works for persona-built participants (role_key set by build_employee_dict)."""
+        from robits.core.roles import build_employee_dict
+        persona_map = {
+            "alex_chen": {"role": "SE", "full_name": "Alex Chen", "entries": []},
+        }
+        participants = build_employee_dict(persona_map)
+        session = main.Session(participants=participants, run_id="routing-real")
+        with redirect_stdout(StringIO()):
+            routed = session.route_message("SE, implement the feature", "CEO")
+        self.assertTrue(routed.directed)
+        self.assertEqual(routed.receiver.name, "alex_chen")
 
 
 if __name__ == "__main__":
