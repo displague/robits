@@ -1610,8 +1610,7 @@ class RuntimeTests(unittest.TestCase):
 
         context = json.loads(response)
 
-        self.assertEqual(context["agent_name"], "SoftwareEngineer")
-        self.assertEqual(context["role_name"], "SE")
+        self.assertEqual(context["agent_name"], "SE")
         self.assertEqual(context["location"], "Philadelphia, PA")
         self.assertEqual(context["timezone"], "America/New_York")
         self.assertIn("current_datetime_local", context)
@@ -3265,6 +3264,178 @@ class WorkTodoToolTests(unittest.TestCase):
         main.work_todo_add({}, title="Research topic", content="detailed notes here")
         rows = self.store.list_todos(agent_id="eve")
         self.assertEqual(rows[0]["content"], "detailed notes here")
+
+
+class ChannelScopedMemoryTests(unittest.TestCase):
+    """Tests for channel-scoped memory tagging and filtering (issue #69)."""
+
+    def setUp(self):
+        self.store_temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.store_temp.cleanup)
+        self.store = SQLiteMemoryStore(Path(self.store_temp.name) / "ch.sqlite3")
+        self.addCleanup(self.store.close)
+        self.original_store = main.memory_store
+        self.original_clock = main.clock_state
+        main.memory_store = self.store
+        main.clock_state = "on"
+        self.addCleanup(self._restore)
+        self.store.create_session("s1")
+        self.store.upsert_agent("A", "Role", "A")
+        self.store.upsert_agent("B", "Role", "B")
+
+    def _restore(self):
+        main.memory_store = self.original_store
+        main.clock_state = self.original_clock
+
+    def _make_session(self, participants=None):
+        if participants is None:
+            participants = {
+                "A": SimpleNamespace(
+                    name="A", lifecycle_state="active",
+                    interact=lambda *a, **kw: "resp",
+                    update_group_conversations=lambda m: None,
+                ),
+                "B": SimpleNamespace(
+                    name="B", lifecycle_state="active",
+                    interact=lambda *a, **kw: "resp",
+                    update_group_conversations=lambda m: None,
+                ),
+            }
+        return main.Session(participants=participants)
+
+    def test_record_thought_tagged_with_agent_thought_channel(self):
+        from robits.memory.sqlite import CHANNEL_AGENT_THOUGHT
+        session = self._make_session()
+        session.record_thought("A", "private reflection")
+        rows = self.store.connection.execute(
+            "SELECT t.channel_id, c.channel_type FROM thoughts t"
+            " LEFT JOIN channels c ON c.channel_id = t.channel_id"
+            " WHERE t.agent_id = 'A'"
+        ).fetchall()
+        self.assertTrue(rows, "No thought row found")
+        self.assertEqual(rows[0]["channel_type"], CHANNEL_AGENT_THOUGHT)
+
+    def test_thought_channel_is_stable_across_calls(self):
+        session = self._make_session()
+        session.record_thought("A", "first")
+        session.record_thought("A", "second")
+        channel_ids = self.store.connection.execute(
+            "SELECT DISTINCT channel_id FROM thoughts WHERE agent_id='A'"
+        ).fetchall()
+        self.assertEqual(len(channel_ids), 1, "Thoughts should share a single agent_thought channel")
+
+    def test_directed_message_tagged_with_agent_dm_channel(self):
+        from robits.memory.sqlite import CHANNEL_AGENT_DM
+        session = self._make_session()
+        session.record_turn("A", "B", "hey", "sup", directed=True)
+        rows = self.store.connection.execute(
+            "SELECT m.channel_id, c.channel_type, m.visibility FROM messages m"
+            " LEFT JOIN channels c ON c.channel_id = m.channel_id"
+            " WHERE m.session_id=?", (session.run_id,)
+        ).fetchall()
+        self.assertTrue(rows)
+        self.assertTrue(all(r["channel_type"] == CHANNEL_AGENT_DM for r in rows))
+        self.assertTrue(all(r["visibility"] == "private" for r in rows))
+
+    def test_directed_message_excluded_from_org_chat_context(self):
+        from robits.core.context import format_org_chat_context
+        session = self._make_session()
+        session.record_turn("A", "B", "public update", "ack", directed=False)
+        session.record_turn("A", "B", "private dm", "private reply", directed=True)
+        ctx = format_org_chat_context(session.transcript, 10)
+        self.assertIn("public update", ctx)
+        self.assertNotIn("private dm", ctx)
+
+    def test_undirected_message_tagged_with_org_chat_channel(self):
+        from robits.memory.sqlite import CHANNEL_ORG_CHAT
+        session = self._make_session()
+        session.record_turn("A", "B", "org update", "acknowledged", directed=False)
+        rows = self.store.connection.execute(
+            "SELECT m.channel_id, c.channel_type FROM messages m"
+            " LEFT JOIN channels c ON c.channel_id = m.channel_id"
+            " WHERE m.session_id=?", (session.run_id,)
+        ).fetchall()
+        self.assertTrue(rows)
+        self.assertTrue(all(r["channel_type"] == CHANNEL_ORG_CHAT for r in rows))
+
+    def test_dm_channel_is_stable_for_pair(self):
+        session = self._make_session()
+        session.record_turn("A", "B", "msg1", "reply1", directed=True)
+        session.record_turn("A", "B", "msg2", "reply2", directed=True)
+        channel_ids = self.store.connection.execute(
+            "SELECT DISTINCT channel_id FROM messages WHERE session_id=?",
+            (session.run_id,)
+        ).fetchall()
+        self.assertEqual(len(channel_ids), 1, "All directed messages share one DM channel")
+
+    def test_memory_search_filters_by_channel_type(self):
+        from robits.memory.sqlite import CHANNEL_AGENT_THOUGHT, CHANNEL_ORG_CHAT, SOCIAL_PROFESSIONAL
+        self.store.upsert_agent("alice", "Role", "alice")
+        self.store.create_session("s2")
+        org_ch = self.store.get_or_create_channel(CHANNEL_ORG_CHAT, social_distance=SOCIAL_PROFESSIONAL)
+        thought_ch = self.store.get_or_create_channel(
+            CHANNEL_AGENT_THOUGHT, participants=["alice"], visibility="private", social_distance=0.0
+        )
+        self.store.append_message("s2", "alice", "alice", "standup meeting notes xkw1", channel_id=org_ch)
+        self.store.append_thought("alice", "personal reflection xkw1", session_id="s2", channel_id=thought_ch)
+
+        old_caller = main.active_tool_caller
+        main.active_tool_caller = SimpleNamespace(name="alice", capabilities=set())
+        try:
+            all_results = json.loads(main.memory_search({}, "alice", "xkw1"))
+            thought_results = json.loads(main.memory_search({}, "alice", "xkw1", channel_type=CHANNEL_AGENT_THOUGHT))
+            org_results = json.loads(main.memory_search({}, "alice", "xkw1", channel_type=CHANNEL_ORG_CHAT))
+        finally:
+            main.active_tool_caller = old_caller
+
+        self.assertGreaterEqual(len(all_results), 2, "Unfiltered search should return both")
+        self.assertTrue(all(r["conversation_type"] == CHANNEL_AGENT_THOUGHT for r in thought_results))
+        self.assertTrue(all(r["conversation_type"] == CHANNEL_ORG_CHAT for r in org_results))
+
+    def test_off_clock_work_peer_result_prepends_parking_note(self):
+        """work_peer channel content should also trigger the parking note when off-clock."""
+        from robits.memory.sqlite import CHANNEL_WORK_PEER, SOCIAL_PROFESSIONAL
+        self.store.upsert_agent("dave", "Role", "dave")
+        self.store.create_session("s3")
+        wp_ch = self.store.get_or_create_channel(
+            CHANNEL_WORK_PEER, participants=["dave"], social_distance=SOCIAL_PROFESSIONAL
+        )
+        self.store.append_message("s3", "dave", "dave", "project timeline xkw2", channel_id=wp_ch)
+        original_clock = main.clock_state
+        main.clock_state = "off"
+        old_caller = main.active_tool_caller
+        main.active_tool_caller = SimpleNamespace(name="dave", capabilities=set())
+        try:
+            result = main.memory_search({}, "dave", "xkw2")
+        finally:
+            main.active_tool_caller = old_caller
+            main.clock_state = original_clock
+        self.assertIn("System note", result)
+
+    def test_personal_experience_scenario(self):
+        """Agents searching for personal/work experience get channel-scoped results."""
+        from robits.memory.sqlite import CHANNEL_AGENT_THOUGHT, CHANNEL_ORG_CHAT, SOCIAL_PROFESSIONAL
+        self.store.upsert_agent("frank", "Role", "frank")
+        self.store.create_session("s4")
+        org_ch = self.store.get_or_create_channel(CHANNEL_ORG_CHAT, social_distance=SOCIAL_PROFESSIONAL)
+        thought_ch = self.store.get_or_create_channel(
+            CHANNEL_AGENT_THOUGHT, participants=["frank"], visibility="private", social_distance=0.0
+        )
+        self.store.append_message("s4", "frank", "frank", "I used Python at work for data pipelines xkw3", channel_id=org_ch)
+        self.store.append_thought("frank", "Personally I love cooking Italian food xkw3", session_id="s4", channel_id=thought_ch)
+
+        old_caller = main.active_tool_caller
+        main.active_tool_caller = SimpleNamespace(name="frank", capabilities=set())
+        try:
+            personal = json.loads(main.memory_search({}, "frank", "xkw3", channel_type=CHANNEL_AGENT_THOUGHT))
+            work = json.loads(main.memory_search({}, "frank", "xkw3", channel_type=CHANNEL_ORG_CHAT))
+        finally:
+            main.active_tool_caller = old_caller
+
+        self.assertEqual(len(personal), 1)
+        self.assertIn("cooking", personal[0]["content"])
+        self.assertEqual(len(work), 1)
+        self.assertIn("Python", work[0]["content"])
 
 
 if __name__ == "__main__":

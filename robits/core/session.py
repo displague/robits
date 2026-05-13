@@ -8,7 +8,14 @@ from uuid import uuid4
 from robits.core.config import _config as _m
 from termcolor import colored
 
-from robits.memory.sqlite import CHANNEL_ORG_CHAT, SOCIAL_PROFESSIONAL, compute_phase_shift
+from robits.memory.sqlite import (
+    CHANNEL_AGENT_DM,
+    CHANNEL_AGENT_THOUGHT,
+    CHANNEL_ORG_CHAT,
+    SOCIAL_FAMILIAL,
+    SOCIAL_PROFESSIONAL,
+    compute_phase_shift,
+)
 from robits.core.roles import System, build_employee_dict, parse_tool_instruction, parse_agent_action
 from robits.core.context import (
     format_org_chat_context,
@@ -181,6 +188,8 @@ class Session:
 
         self._org_workspace = _m._org_workspace
         self._org_chat_channel_id = None
+        self._thought_channel_ids: dict = {}
+        self._dm_channel_ids: dict = {}
         if _m.memory_store is not None:
             try:
                 _m.memory_store.create_session(self.run_id)
@@ -193,6 +202,41 @@ class Session:
                 )
             except Exception:
                 pass
+
+    def _get_thought_channel_id(self, agent_name):
+        """Return the agent_thought channel ID for agent_name, creating it if needed."""
+        if _m.memory_store is None:
+            return None
+        if agent_name not in self._thought_channel_ids:
+            try:
+                cid = _m.memory_store.get_or_create_channel(
+                    CHANNEL_AGENT_THOUGHT,
+                    participants=[agent_name],
+                    visibility="private",
+                    social_distance=0.0,
+                )
+                self._thought_channel_ids[agent_name] = cid
+            except Exception:
+                return None
+        return self._thought_channel_ids.get(agent_name)
+
+    def _get_dm_channel_id(self, agent_a, agent_b):
+        """Return the agent_dm channel ID for a pair of agents, creating it if needed."""
+        if _m.memory_store is None:
+            return None
+        key = frozenset((agent_a, agent_b))
+        if key not in self._dm_channel_ids:
+            try:
+                cid = _m.memory_store.get_or_create_channel(
+                    CHANNEL_AGENT_DM,
+                    participants=sorted([agent_a, agent_b]),
+                    visibility="private",
+                    social_distance=SOCIAL_FAMILIAL,
+                )
+                self._dm_channel_ids[key] = cid
+            except Exception:
+                return None
+        return self._dm_channel_ids.get(key)
 
     def _clear_wait_state_file(self, role):
         """Remove the persisted wait-state file for role if agent_workspace_store is available."""
@@ -367,6 +411,12 @@ class Session:
         if _m.memory_store is not None:
             canonical_sender = self._canonical_agent_id(sender)
             canonical_receiver = self._canonical_agent_id(receiver)
+            msg_channel_id = (
+                self._get_dm_channel_id(canonical_sender, canonical_receiver)
+                if directed
+                else self._org_chat_channel_id
+            )
+            msg_visibility = "private" if directed else "public"
             try:
                 sender_phase = _m.memory_store.get_agent_phase(canonical_sender)
                 receiver_phase = _m.memory_store.get_agent_phase(canonical_receiver)
@@ -377,7 +427,8 @@ class Session:
                         receiver_agent_id=canonical_receiver,
                         content=prompt,
                         kind="message",
-                        channel_id=self._org_chat_channel_id,
+                        visibility=msg_visibility,
+                        channel_id=msg_channel_id,
                         sender_phase=sender_phase,
                     )
                 if meaningful_response and response:
@@ -387,13 +438,14 @@ class Session:
                         receiver_agent_id=canonical_sender,
                         content=response,
                         kind="message",
-                        channel_id=self._org_chat_channel_id,
+                        visibility=msg_visibility,
+                        channel_id=msg_channel_id,
                         sender_phase=receiver_phase,
                     )
-                if self._org_chat_channel_id is not None and sender_phase is not None and receiver_phase is not None:
+                if msg_channel_id is not None and sender_phase is not None and receiver_phase is not None:
                     try:
                         social_distance = _m.memory_store.get_channel_social_distance(
-                            self._org_chat_channel_id
+                            msg_channel_id
                         )
                         if social_distance is not None:
                             shifted = compute_phase_shift(
@@ -543,8 +595,8 @@ class Session:
                 pass
 
     def _write_org_chat_jsonl(self, entry):
-        """Append a transcript entry as a JSONL line to the org workspace chat log."""
-        if self._org_workspace is None:
+        """Append a non-directed transcript entry as a JSONL line to the org workspace chat log."""
+        if self._org_workspace is None or getattr(entry, "directed", False):
             return
         line = json.dumps({
             "turn": entry.turn,
@@ -599,12 +651,14 @@ class Session:
     def record_thought(self, agent_name, content, visibility="private"):
         """Persist a private thought to memory and emit a thought.recorded event."""
         if _m.memory_store is not None:
+            canonical = self._canonical_agent_id(agent_name)
             try:
                 _m.memory_store.append_thought(
-                    agent_id=self._canonical_agent_id(agent_name),
+                    agent_id=canonical,
                     content=content,
                     session_id=self.run_id,
                     visibility=visibility,
+                    channel_id=self._get_thought_channel_id(canonical),
                 )
             except Exception:
                 pass

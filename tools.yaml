@@ -381,9 +381,9 @@
   grantable: true
   owner_capability: agent
   description: >
-    Record a private thought or reasoning step before acting. Silent — returns nothing
-    visible to other agents. Use this to reason through a problem, weigh options, or
-    plan a sequence of actions before committing to one.
+    Record a private thought before acting. Silent — not visible to other agents.
+    Use to reason, weigh options, or plan before committing. Prefer this over
+    fabricating an answer when uncertain.
   parameters:
     type: object
     properties:
@@ -416,7 +416,11 @@
   system_tool: true
   grantable: true
   owner_capability: system
-  description: Search an agent's accessible SQLite memory records. Returns outer-level FTS hits and surfaces parent digests for any inner records that also match.
+  description: >
+    Search an agent's memory records. Use this whenever asked about past events,
+    personal experiences, or work history — do not answer from assumed knowledge.
+    Use channel_type=agent_thought for personal/private memories,
+    channel_type=org_chat for work context. Returns FTS hits and parent digests.
   parameters:
     type: object
     properties:
@@ -432,6 +436,9 @@
       cascade:
         type: boolean
         description: Also search inner source records of digests and surface parent digests for matches (default true).
+      channel_type:
+        type: string
+        description: "Restrict search to a specific conversation scope. Valid values: org_chat, agent_thought, agent_dm, therapist, family_member, family_group, work_peer, system. Omit to search across all channels."
     required:
       - agent_name
       - query
@@ -442,12 +449,13 @@
         query,
         limit=limit if limit is not None else 10,
         cascade=cascade if cascade is not None else True,
+        channel_type=channel_type if channel_type is not None else None,
     )
 - name: memory.list_digests
   system_tool: true
   grantable: true
   owner_capability: system
-  description: List an agent's current accessible memory digests.
+  description: List an agent's memory digests. Use to recall summarised identity, goals, or episode history before responding about who you are or what you've done.
   parameters:
     type: object
     properties:

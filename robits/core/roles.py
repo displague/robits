@@ -67,6 +67,7 @@ class Role:
         turn_action_template = """
 On your turn, choose one useful action. You do not need to reply to every message.
 Only say that you created, changed, or called a tool after the runtime has returned a verified tool result. Without a verified result, describe the work as a request, proposal, or plan instead of a completed fact.
+When thinking, recalling past events, or forming memories, use your tools rather than relying on assumed knowledge.
 """
         self.template = template + group_template_additions + turn_action_template
         self.employee_dict = employee_dict

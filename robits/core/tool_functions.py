@@ -423,7 +423,10 @@ def _condense_if_large(agent_name, tool_label, result_json):
     return json.dumps(condensed, sort_keys=True)
 
 
-def memory_search(employee_dict, agent_name, query, limit=10, cascade=True):
+_WORK_CHANNEL_TYPES = {"org_chat", "work_peer"}
+
+
+def memory_search(employee_dict, agent_name, query, limit=10, cascade=True, channel_type=None):
     """Search an agent's memory store and return matching results, condensing large payloads."""
     del employee_dict
     store, error = _require_memory_store()
@@ -438,13 +441,16 @@ def memory_search(employee_dict, agent_name, query, limit=10, cascade=True):
     if not isinstance(query, str) or not query.strip():
         return "Error: Memory query must be a non-empty string."
     effective_limit = max(1, min(int(limit or 10), _m.memory_max_rows))
+    search_kwargs = dict(agent_id=normalized_name, limit=effective_limit)
+    if channel_type is not None:
+        search_kwargs["conversation_type"] = channel_type
     if cascade:
-        results = store.search_cascade(query, agent_id=normalized_name, limit=effective_limit)
+        results = store.search_cascade(query, **search_kwargs)
     else:
-        results = store.search(query, agent_id=normalized_name, limit=effective_limit)
+        results = store.search(query, **search_kwargs)
     result_json = json.dumps([result.__dict__ for result in results], sort_keys=True)
     if _m.clock_state == "off" and any(
-        getattr(r, "conversation_type", None) == "org_chat" for r in results
+        getattr(r, "conversation_type", None) in _WORK_CHANNEL_TYPES for r in results
     ):
         note = (
             "[System note: work-related content surfaced in these results. "
