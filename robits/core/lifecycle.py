@@ -83,7 +83,8 @@ def _caller_can_act_for_agent(agent_name):
     caller = _m.active_tool_caller
     if caller is None:
         return False
-    if _m.active_tool_caller_name == agent_name or getattr(caller, "name", None) == agent_name:
+    caller_name = _m.active_tool_caller_name or getattr(caller, "name", None)
+    if caller_name == agent_name:
         return True
     capabilities = getattr(caller, "capabilities", set())
     return bool({"operator", "hr"} & capabilities)

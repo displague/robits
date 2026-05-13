@@ -57,12 +57,10 @@ def agent_runtime_context(role=None):
         or getattr(role, "runtime_role_name", None)
         or getattr(role, "name", None)
     )
-    agent_name = getattr(role, "name", None)
-    canonical_id = getattr(role, "runtime_role_name", None) or agent_name
+    canonical_id = role_name
     primary_id, secondary_id = _get_identity_digests(canonical_id)
     context = {
-        "agent_name": agent_name,
-        "role_name": role_name,
+        "agent_name": role_name,
         "session_id": getattr(role, "runtime_session_id", None),
         "current_datetime_utc": now_utc.isoformat(timespec="seconds"),
         "current_datetime_local": now_local.isoformat(timespec="seconds"),

@@ -1610,8 +1610,7 @@ class RuntimeTests(unittest.TestCase):
 
         context = json.loads(response)
 
-        self.assertEqual(context["agent_name"], "SoftwareEngineer")
-        self.assertEqual(context["role_name"], "SE")
+        self.assertEqual(context["agent_name"], "SE")
         self.assertEqual(context["location"], "Philadelphia, PA")
         self.assertEqual(context["timezone"], "America/New_York")
         self.assertIn("current_datetime_local", context)
