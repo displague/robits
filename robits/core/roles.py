@@ -187,7 +187,7 @@ class HR(Role):
             self.__class__.__name__, role_description, employee_dict, group_template_additions
         )
         self.capabilities = {"hr", "protected", "essential"}
-        self.allowed_tools.update({"org.*", "tools.list"})
+        self.allowed_tools.update({"org.*", "tools.list", "tools.list_proposals"})
 
 
 class Angel(Role):
