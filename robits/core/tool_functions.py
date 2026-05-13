@@ -382,7 +382,7 @@ def approve_and_rollout_proposal(employee_dict, role_name, tool_name=None, propo
 def _require_memory_store():
     """Return (memory_store, None) or (None, error_string) if no store is configured."""
     if _m.memory_store is None:
-        return None, "Error: No SQLite memory store is configured."
+        return None, "[runtime.config] memory tools unavailable — ROBITS_MEMORY_DB not set; skip memory calls this session"
     return _m.memory_store, None
 
 

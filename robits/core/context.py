@@ -75,6 +75,7 @@ def agent_runtime_context(role=None):
         "break_schedule": break_schedule,
         "identity_primary": primary_id,
         "identity_secondary": secondary_id,
+        "memory_available": False if _m.memory_store is None else None,
     }
     return {key: value for key, value in context.items() if value is not None}
 
