@@ -444,19 +444,30 @@ def memory_search(employee_dict, agent_name, query, limit=10, cascade=True, chan
     search_kwargs = dict(agent_id=normalized_name, limit=effective_limit)
     if channel_type is not None:
         search_kwargs["conversation_type"] = channel_type
-    if cascade:
+    from robits.core.embeddings import embedding_model_name
+    _embed_model = embedding_model_name()
+    if cascade and _embed_model:
+        results = store.search_hybrid(query, _embed_model, **search_kwargs)
+    elif cascade:
         results = store.search_cascade(query, **search_kwargs)
     else:
         results = store.search(query, **search_kwargs)
     result_json = json.dumps([result.__dict__ for result in results], sort_keys=True)
-    if _m.clock_state == "off" and any(
+    _clock = _m.clock_state
+    if _clock in {"off", "break"} and any(
         getattr(r, "conversation_type", None) in _WORK_CHANNEL_TYPES for r in results
     ):
-        note = (
-            "[System note: work-related content surfaced in these results. "
-            "Consider parking any useful insights via the work.todo tool "
-            "and return focus to the current personal context.]\n"
-        )
+        if _clock == "off":
+            note = (
+                "[System note: work-related content surfaced in these results. "
+                "Consider parking any useful insights via the work.todo tool "
+                "and return focus to the current personal context.]\n"
+            )
+        else:
+            note = (
+                "[System note: work-related content surfaced during a break. "
+                "You may briefly note any insights via work.todo, but keep your break focus.]\n"
+            )
         result_json = note + result_json
     return _condense_if_large(normalized_name, "memory_search", result_json)
 

@@ -3438,5 +3438,223 @@ class ChannelScopedMemoryTests(unittest.TestCase):
         self.assertIn("Python", work[0]["content"])
 
 
+class PersonaSeedingTests(unittest.TestCase):
+    """Tests for persona seeding into memory on first session."""
+
+    def setUp(self):
+        self.store_temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.store_temp.cleanup)
+        self.store = SQLiteMemoryStore(Path(self.store_temp.name) / "persona.sqlite3")
+        self.addCleanup(self.store.close)
+
+    def test_seed_persona_writes_thought(self):
+        self.store.upsert_agent("alice", "Role", "alice")
+        from robits.core.persona import seed_persona
+        written = seed_persona(self.store, "alice", [
+            {"kind": "thought", "content": "I enjoy hiking.", "visibility": "private"},
+        ])
+        self.assertEqual(written, 1)
+        rows = self.store._rows("SELECT * FROM thoughts WHERE agent_id = 'alice'")
+        self.assertEqual(len(rows), 1)
+        self.assertIn("hiking", rows[0]["content"])
+
+    def test_seed_persona_writes_digest(self):
+        self.store.upsert_agent("bob", "Role", "bob")
+        from robits.core.persona import seed_persona
+        written = seed_persona(self.store, "bob", [
+            {"kind": "digest", "digest_type": "identity", "content": "Bob is a backend engineer."},
+        ])
+        self.assertEqual(written, 1)
+        digests = self.store.list_memory_digests(agent_id="bob", digest_type="identity")
+        self.assertEqual(len(digests), 1)
+        self.assertIn("backend engineer", digests[0]["content"])
+
+    def test_seed_persona_is_idempotent(self):
+        self.store.upsert_agent("carol", "Role", "carol")
+        from robits.core.persona import seed_persona
+        entries = [{"kind": "thought", "content": "First seed.", "visibility": "private"}]
+        first = seed_persona(self.store, "carol", entries)
+        second = seed_persona(self.store, "carol", entries)
+        self.assertEqual(first, 1)
+        self.assertEqual(second, 0)
+        rows = self.store._rows("SELECT * FROM thoughts WHERE agent_id = 'carol'")
+        self.assertEqual(len(rows), 1)
+
+    def test_load_personas_missing_file_returns_empty(self):
+        from robits.core.persona import load_personas
+        result = load_personas("/nonexistent/path/personas.yaml")
+        self.assertEqual(result, {})
+
+    def test_seed_persona_writes_memory_entry(self):
+        self.store.upsert_agent("dave", "Role", "dave")
+        from robits.core.persona import seed_persona
+        written = seed_persona(self.store, "dave", [
+            {"kind": "entry", "digest_type": "identity", "content": "Dave values honesty."},
+        ])
+        self.assertEqual(written, 1)
+        rows = self.store._rows("SELECT * FROM memory_entries WHERE agent_id = 'dave'")
+        self.assertEqual(len(rows), 1)
+        self.assertIn("honesty", rows[0]["content"])
+
+
+class BreakClockStateTests(unittest.TestCase):
+    """Tests for the 'break' clock state — transitional between on and off."""
+
+    def setUp(self):
+        self.original_clock = main.clock_state
+        self.addCleanup(self._restore)
+
+    def _restore(self):
+        main.clock_state = self.original_clock
+
+    def test_break_is_valid_session_clock_state(self):
+        a = SimpleNamespace(name="A", lifecycle_state="active",
+                            interact=lambda *a, **kw: "hi",
+                            update_group_conversations=lambda m: None)
+        session = main.Session(participants={"A": a}, clock_state="break")
+        self.assertEqual(session.clock_state, "break")
+
+    def test_break_suppresses_org_chat_context(self):
+        received_prompts = []
+
+        class CapturingRole:
+            name = "B"
+            lifecycle_state = "active"
+            conversation_history = {}
+            template = ""
+            max_tokens = 100
+            temperature = 0.7
+            base_temperature = 0.7
+            runtime_tool_results = []
+            runtime_event_stream = None
+            runtime_session_id = None
+            runtime_role_name = None
+            runtime_clock_state = None
+            allowed_tools = set()
+
+            def interact(self, sender=None, prompt=None):
+                received_prompts.append(prompt or "")
+                return "response"
+
+            def update_group_conversations(self, m):
+                pass
+
+        a = SimpleNamespace(name="A", lifecycle_state="active",
+                            interact=lambda *a, **kw: "initial",
+                            update_group_conversations=lambda m: None)
+        b = CapturingRole()
+        old_lines = main.org_chat_context_lines
+        main.org_chat_context_lines = 5
+        try:
+            session = main.Session(participants={"A": a, "B": b}, clock_state="break")
+            session.transcript.append(main.TranscriptEntry(1, "A", "B", "seed", "response"))
+            session.turns_completed = 1
+            session.last_receiver = a
+            session.step("hello")
+        finally:
+            main.org_chat_context_lines = old_lines
+
+        self.assertFalse(any("Recent org chat" in p for p in received_prompts))
+
+    def test_break_temperature_modulation(self):
+        from robits.core.session import _modulate_temperature
+        role = SimpleNamespace(temperature=0.7, base_temperature=0.7)
+        _modulate_temperature(role, "on")
+        on_temp = role.temperature
+        role.temperature = 0.7
+        _modulate_temperature(role, "break")
+        break_temp = role.temperature
+        role.temperature = 0.7
+        _modulate_temperature(role, "off")
+        off_temp = role.temperature
+        self.assertLess(on_temp, break_temp)
+        self.assertLess(break_temp, off_temp)
+
+    def test_break_parking_note_is_softer(self):
+        store_temp = tempfile.TemporaryDirectory()
+        store = SQLiteMemoryStore(Path(store_temp.name) / "bp.sqlite3")
+        store.upsert_agent("eve", "Role", "eve")
+        store.create_session("s_break")
+        from robits.memory.sqlite import CHANNEL_ORG_CHAT, SOCIAL_PROFESSIONAL
+        ch = store.get_or_create_channel(CHANNEL_ORG_CHAT, social_distance=SOCIAL_PROFESSIONAL)
+        store.append_message("s_break", "eve", "eve", "sprint review xkw_break", channel_id=ch)
+        original_store = main.memory_store
+        original_clock = main.clock_state
+        main.memory_store = store
+        main.clock_state = "break"
+        old_caller = main.active_tool_caller
+        main.active_tool_caller = SimpleNamespace(name="eve", capabilities=set())
+        try:
+            result = main.memory_search({}, "eve", "xkw_break")
+        finally:
+            main.active_tool_caller = old_caller
+            main.memory_store = original_store
+            main.clock_state = original_clock
+            store.close()
+            store_temp.cleanup()
+        self.assertIn("System note", result)
+        self.assertIn("break", result)
+
+
+class EmbeddingSearchTests(unittest.TestCase):
+    """Tests for embedding-based semantic search in SQLiteMemoryStore."""
+
+    def setUp(self):
+        self.store_temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.store_temp.cleanup)
+        self.store = SQLiteMemoryStore(Path(self.store_temp.name) / "embed.sqlite3")
+        self.addCleanup(self.store.close)
+        self.store.upsert_agent("zoe", "Role", "zoe")
+        self.store.create_session("s_embed")
+
+    def test_store_embedding_and_search_semantic(self):
+        if not self.store._vec_enabled:
+            self.skipTest("sqlite-vec not available")
+        msg_id = self.store.append_message(
+            "s_embed", "zoe", "zoe", "semantic pool chemistry test"
+        )
+        vector = [0.1] * 768
+        self.store.store_embedding("messages", str(msg_id), vector, "test-model")
+        results = self.store.search_semantic(
+            "pool chemistry", "test-model", agent_id="zoe", limit=5,
+            _query_vector=vector,
+        )
+        record_ids = [r.record_id for r in results]
+        self.assertIn(str(msg_id), record_ids)
+
+    def test_store_embedding_idempotent(self):
+        if not self.store._vec_enabled:
+            self.skipTest("sqlite-vec not available")
+        msg_id = self.store.append_message("s_embed", "zoe", "zoe", "embedding idempotency check")
+        vector = [0.2] * 384
+        eid1 = self.store.store_embedding("messages", str(msg_id), vector, "model-a")
+        eid2 = self.store.store_embedding("messages", str(msg_id), vector, "model-a")
+        self.assertEqual(eid1, eid2)
+
+    def test_get_pending_embedding_records_returns_unembedded(self):
+        if not self.store._vec_enabled:
+            self.skipTest("sqlite-vec not available")
+        self.store.append_message("s_embed", "zoe", "zoe", "unembedded record abc")
+        pending = self.store.get_pending_embedding_records("test-model", limit=50)
+        contents = [r["content"] for r in pending]
+        self.assertTrue(any("unembedded record abc" in c for c in contents))
+
+    def test_search_hybrid_falls_back_to_fts_without_model(self):
+        self.store.append_message("s_embed", "zoe", "zoe", "hybrid fts only search xyz99")
+        results = self.store.search_hybrid(
+            "xyz99", "nonexistent-model", agent_id="zoe", limit=10
+        )
+        contents = [r.content for r in results]
+        self.assertTrue(any("xyz99" in c for c in contents))
+
+    def test_vec_table_created_per_dimension(self):
+        if not self.store._vec_enabled:
+            self.skipTest("sqlite-vec not available")
+        self.store._ensure_vec_table(128)
+        self.store._ensure_vec_table(256)
+        self.assertIn(128, self.store._vec_tables)
+        self.assertIn(256, self.store._vec_tables)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -2,3 +2,4 @@ openai
 PyYaml
 termcolor
 aiosqlite
+sqlite-vec

@@ -24,6 +24,7 @@ from robits.core.context import (
 )
 from robits.core.lifecycle import due_alarm_reminders
 from robits.core.tool_functions import _restore_wait_state, _WAIT_STATE_FILE
+from robits.core.persona import seed_persona
 
 
 @dataclass
@@ -142,6 +143,21 @@ class RoundRobinScheduler:
             self.index %= len(self.participant_names)
 
 
+_CLOCK_TEMP_MULTIPLIER = {"on": 0.6, "break": 0.9, "off": 1.3}
+
+
+def _modulate_temperature(role, clock_state):
+    """Adjust role.temperature around its base_temperature for the given clock state.
+
+    Initialises base_temperature from the current temperature on first call so
+    that repeated calls always modulate from the same stable baseline.
+    """
+    if not hasattr(role, "base_temperature"):
+        role.base_temperature = getattr(role, "temperature", 0.7)
+    multiplier = _CLOCK_TEMP_MULTIPLIER.get(clock_state, 1.0)
+    role.temperature = max(0.05, min(1.0, role.base_temperature * multiplier))
+
+
 class Session:
     """Orchestrates a multi-turn conversation between participants, routing messages and managing memory."""
 
@@ -173,7 +189,7 @@ class Session:
         self._name_to_key = {getattr(p, "name", k): k for k, p in self.participants.items()}
         self._role_to_key = {id(p): k for k, p in self.participants.items()}
         _cs = clock_state or _m.clock_state
-        self.clock_state = _cs if _cs in {"on", "off"} else "on"
+        self.clock_state = _cs if _cs in {"on", "off", "break"} else "on"
         self.event_stream.emit(
             "session.created",
             self.run_id,
@@ -196,6 +212,8 @@ class Session:
                 for name, participant in self.participants.items():
                     role_type = type(participant).__name__
                     _m.memory_store.upsert_agent(name, role_type, display_name=name)
+                    if _m.persona_entries.get(name):
+                        seed_persona(_m.memory_store, name, _m.persona_entries[name])
                 self._org_chat_channel_id = _m.memory_store.get_or_create_channel(
                     CHANNEL_ORG_CHAT,
                     social_distance=SOCIAL_PROFESSIONAL,
@@ -247,6 +265,18 @@ class Session:
             except Exception:
                 pass
 
+    def _embed_pending(self):
+        """Backfill embeddings for any unembedded memory records (sleep-cycle task)."""
+        if _m.memory_store is None:
+            return
+        from robits.core.embeddings import embedding_model_name
+        model = embedding_model_name()
+        if model:
+            try:
+                _m.memory_store.embed_pending(model)
+            except Exception:
+                pass
+
     def _build_wait_summary(self, role):
         """Clear a role's wait state and return a summary of what happened while it was waiting."""
         started = getattr(role, "wait_started_turn", None) or 0
@@ -255,6 +285,7 @@ class Session:
         role.wait_started_turn = None
         role.wait_clock_state = None
         self._clear_wait_state_file(role)
+        self._embed_pending()
         if not since:
             return "Your wait has ended. Nothing notable happened while you were waiting."
         lines = ["Your wait has ended. Here is what happened while you were waiting:"]
@@ -690,6 +721,7 @@ class Session:
         role.runtime_session_id = self.run_id
         role.runtime_tool_results = []
         role.runtime_clock_state = self.clock_state
+        _modulate_temperature(role, self.clock_state)
         for name, participant in self.participants.items():
             if participant is role:
                 role.runtime_role_name = name
@@ -787,4 +819,5 @@ class Session:
                 _m.memory_store.end_session(self.run_id)
             except Exception:
                 pass
+        self._embed_pending()
         return self

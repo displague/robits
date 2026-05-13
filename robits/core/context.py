@@ -44,7 +44,7 @@ def _get_identity_digests(agent_id):
     work = _fetch("work") or _fetch(None)
     if _m.clock_state == "on":
         return work, personal
-    return personal, work
+    return personal, work  # break and off both weight personal identity higher
 
 
 def agent_runtime_context(role=None):

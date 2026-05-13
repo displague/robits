@@ -75,6 +75,7 @@ When thinking, recalling past events, or forming memories, use your tools rather
         self.group_conversation_history = {}
         self.global_conversation_history = []
         self.temperature = 0.7
+        self.base_temperature = self.temperature
         self.max_tokens = random.randint(250, 400)
         self.lifecycle_state = "active"
         self.lifecycle_events = []
