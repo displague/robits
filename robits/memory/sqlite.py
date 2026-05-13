@@ -87,7 +87,18 @@ class SQLiteMemoryStore:
         self.connection = sqlite3.connect(str(self.path))
         self.connection.row_factory = sqlite3.Row
         self.connection.execute("PRAGMA foreign_keys = ON")
+        self._vec_enabled = self._load_vec_extension()
+        self._vec_tables: set[int] = set()
         self.ensure_schema()
+
+    def _load_vec_extension(self) -> bool:
+        """Load sqlite-vec if available; return True on success."""
+        try:
+            import sqlite_vec
+            sqlite_vec.load(self.connection)
+            return True
+        except Exception:
+            return False
 
     def close(self):
         self.connection.close()
@@ -297,9 +308,23 @@ class SQLiteMemoryStore:
             CREATE INDEX IF NOT EXISTS idx_memory_digests_agent ON memory_digests(agent_id);
             CREATE INDEX IF NOT EXISTS idx_memory_digest_sources_digest
                 ON memory_digest_sources(digest_id);
+            CREATE TABLE IF NOT EXISTS memory_embeddings (
+                embedding_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                source_table TEXT NOT NULL,
+                source_id TEXT NOT NULL,
+                embedding_model TEXT NOT NULL,
+                embedding_dimension INTEGER NOT NULL,
+                created_at TEXT NOT NULL,
+                UNIQUE(source_table, source_id, embedding_model)
+            );
+
             CREATE INDEX IF NOT EXISTS idx_runtime_events_session ON runtime_events(session_id);
             CREATE INDEX IF NOT EXISTS idx_runtime_events_type ON runtime_events(event_type);
             CREATE INDEX IF NOT EXISTS idx_channels_type ON channels(channel_type);
+            CREATE INDEX IF NOT EXISTS idx_memory_embeddings_source
+                ON memory_embeddings(source_table, source_id);
+            CREATE INDEX IF NOT EXISTS idx_memory_embeddings_model
+                ON memory_embeddings(embedding_model);
             """
         )
         self._ensure_memory_digest_columns()
@@ -1651,3 +1676,224 @@ class SQLiteMemoryStore:
 
     def _rows(self, query, params=()):
         return [dict(row) for row in self.connection.execute(query, params).fetchall()]
+
+    # ------------------------------------------------------------------ #
+    # Embedding / semantic search                                          #
+    # ------------------------------------------------------------------ #
+
+    def _vec_table_name(self, dimension: int) -> str:
+        return f"vec_{dimension}"
+
+    def _ensure_vec_table(self, dimension: int) -> bool:
+        """Create the vec0 virtual table for the given dimension if needed."""
+        if not self._vec_enabled:
+            return False
+        if dimension in self._vec_tables:
+            return True
+        table = self._vec_table_name(dimension)
+        try:
+            self.connection.execute(
+                f"CREATE VIRTUAL TABLE IF NOT EXISTS {table} "
+                f"USING vec0(rowid INTEGER PRIMARY KEY, embedding FLOAT[{dimension}])"
+            )
+            self.connection.commit()
+            self._vec_tables.add(dimension)
+            return True
+        except Exception:
+            return False
+
+    def store_embedding(
+        self,
+        source_table: str,
+        source_id: str | int,
+        vector: list[float],
+        model_name: str,
+    ) -> int | None:
+        """Store a float vector for a memory record; return embedding_id or None on error."""
+        if not self._vec_enabled or not vector:
+            return None
+        dim = len(vector)
+        if not self._ensure_vec_table(dim):
+            return None
+        try:
+            import sqlite_vec
+            cursor = self.connection.execute(
+                """
+                INSERT OR IGNORE INTO memory_embeddings
+                    (source_table, source_id, embedding_model, embedding_dimension, created_at)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (source_table, str(source_id), model_name, dim, _utc_now()),
+            )
+            embedding_id = cursor.lastrowid
+            if embedding_id == 0:
+                # Row already existed; fetch its id
+                row = self.connection.execute(
+                    "SELECT embedding_id FROM memory_embeddings "
+                    "WHERE source_table=? AND source_id=? AND embedding_model=?",
+                    (source_table, str(source_id), model_name),
+                ).fetchone()
+                if row is None:
+                    return None
+                embedding_id = row["embedding_id"]
+            table = self._vec_table_name(dim)
+            self.connection.execute(f"DELETE FROM {table} WHERE rowid = ?", (embedding_id,))
+            self.connection.execute(
+                f"INSERT INTO {table}(rowid, embedding) VALUES (?, ?)",
+                (embedding_id, sqlite_vec.serialize_float32(vector)),
+            )
+            self.connection.commit()
+            return embedding_id
+        except Exception:
+            return None
+
+    def get_pending_embedding_records(
+        self, model_name: str, limit: int = 50
+    ) -> list[dict]:
+        """Return FTS records that have no embedding for model_name yet."""
+        return self._rows(
+            """
+            SELECT mf.rowid AS fts_rowid, mf.kind, mf.record_id,
+                   mf.agent_id, mf.created_at, mf.content
+            FROM memory_fts mf
+            LEFT JOIN memory_embeddings me
+                ON me.source_table = CASE mf.kind
+                    WHEN 'message'      THEN 'messages'
+                    WHEN 'thought'      THEN 'thoughts'
+                    WHEN 'memory_digest' THEN 'memory_digests'
+                    ELSE 'memory_entries'
+                   END
+                AND me.source_id = mf.record_id
+                AND me.embedding_model = ?
+            WHERE me.embedding_id IS NULL
+            LIMIT ?
+            """,
+            [model_name, limit],
+        )
+
+    def embed_pending(self, model_name: str, limit: int = 50) -> int:
+        """Generate and store embeddings for unembedded FTS records; return count written."""
+        from robits.core.embeddings import get_embedding
+        _kind_to_table = {
+            "message": "messages",
+            "thought": "thoughts",
+            "memory_digest": "memory_digests",
+        }
+        records = self.get_pending_embedding_records(model_name, limit=limit)
+        written = 0
+        for rec in records:
+            vector = get_embedding(rec["content"], model=model_name)
+            if vector is None:
+                continue
+            source_table = _kind_to_table.get(rec["kind"], "memory_entries")
+            if self.store_embedding(source_table, rec["record_id"], vector, model_name):
+                written += 1
+        return written
+
+    def search_semantic(
+        self,
+        query: str,
+        model_name: str,
+        agent_id: str | None = None,
+        limit: int = 20,
+        _query_vector: list[float] | None = None,
+    ) -> list[MemorySearchResult]:
+        """Return MemorySearchResults ordered by embedding distance for query.
+
+        Pass _query_vector to skip the embedding API call (useful in tests).
+        """
+        if not self._vec_enabled:
+            return []
+        if _query_vector is not None:
+            vector = _query_vector
+        else:
+            from robits.core.embeddings import get_embedding
+            vector = get_embedding(query, model=model_name)
+        if vector is None:
+            return []
+        dim = len(vector)
+        if not self._ensure_vec_table(dim):
+            return []
+        try:
+            import sqlite_vec
+            table = self._vec_table_name(dim)
+            # vec0 requires LIMIT as the 'k' constraint; JOIN prevents this, so split into two queries.
+            knn_rows = self.connection.execute(
+                f"SELECT rowid, distance FROM {table} WHERE embedding MATCH ? ORDER BY distance LIMIT ?",
+                [sqlite_vec.serialize_float32(vector), limit * 2],
+            ).fetchall()
+            if not knn_rows:
+                return []
+            rowid_to_dist = {row["rowid"]: row["distance"] for row in knn_rows}
+            placeholders = ", ".join("?" * len(rowid_to_dist))
+            meta_rows = self.connection.execute(
+                f"SELECT embedding_id, source_table, source_id FROM memory_embeddings "
+                f"WHERE embedding_id IN ({placeholders})",
+                list(rowid_to_dist.keys()),
+            ).fetchall()
+            rows = [
+                {"rowid": r["embedding_id"], "distance": rowid_to_dist[r["embedding_id"]],
+                 "source_table": r["source_table"], "source_id": r["source_id"]}
+                for r in meta_rows
+            ]
+            rows.sort(key=lambda r: r["distance"])
+        except Exception:
+            return []
+
+        _table_to_kind = {
+            "messages": "message",
+            "thoughts": "thought",
+            "memory_digests": "memory_digest",
+            "memory_entries": "identity",
+        }
+        results = []
+        seen_ids: set[str] = set()
+        for row in rows:
+            source_table = row["source_table"]  # plain dict from our list comprehension
+            source_id = row["source_id"]
+            key = f"{source_table}:{source_id}"
+            if key in seen_ids:
+                continue
+            rec = self._fetch_source_record(source_table, source_id)
+            if rec is None:
+                continue
+            rec_agent = rec.get("agent_id") or rec.get("sender_agent_id")
+            if agent_id is not None and rec_agent != agent_id:
+                continue
+            seen_ids.add(key)
+            results.append(
+                MemorySearchResult(
+                    kind=_table_to_kind.get(source_table, "memory_entry"),
+                    record_id=source_id,
+                    content=rec.get("content", ""),
+                    agent_id=rec_agent,
+                    session_id=rec.get("session_id"),
+                    source=rec.get("source"),
+                    relationship_type=rec.get("relationship_type"),
+                    conversation_type=rec.get("conversation_type"),
+                    created_at=rec.get("created_at", ""),
+                )
+            )
+            if len(results) >= limit:
+                break
+        return results
+
+    def search_hybrid(
+        self,
+        query: str,
+        model_name: str,
+        agent_id: str | None = None,
+        limit: int = 20,
+        **kwargs,
+    ) -> list[MemorySearchResult]:
+        """Merge FTS cascade results with semantic results, deduplicating by record_id."""
+        fts_results = self.search_cascade(query, agent_id=agent_id, limit=limit, **kwargs)
+        if not self._vec_enabled:
+            return fts_results
+        sem_results = self.search_semantic(query, model_name, agent_id=agent_id, limit=limit)
+        seen = {r.record_id for r in fts_results}
+        for r in sem_results:
+            if r.record_id not in seen:
+                fts_results.append(r)
+                seen.add(r.record_id)
+        return fts_results[:limit]

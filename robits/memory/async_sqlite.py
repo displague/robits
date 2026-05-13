@@ -783,3 +783,18 @@ class AsyncSQLiteMemoryStore:
     async def get_channel_social_distance(self, channel_id) -> float | None:
         """Return the social_distance for a channel, or None if not found or unset."""
         return await self._run_sync("get_channel_social_distance", channel_id)
+
+    async def store_embedding(self, source_table, source_id, vector, model_name):
+        return await self._run_sync("store_embedding", source_table, source_id, vector, model_name)
+
+    async def get_pending_embedding_records(self, model_name, limit=50):
+        return await self._run_sync("get_pending_embedding_records", model_name, limit=limit)
+
+    async def embed_pending(self, model_name, limit=50):
+        return await self._run_sync("embed_pending", model_name, limit=limit)
+
+    async def search_semantic(self, query, model_name, agent_id=None, limit=20, _query_vector=None):
+        return await self._run_sync("search_semantic", query, model_name, agent_id=agent_id, limit=limit, _query_vector=_query_vector)
+
+    async def search_hybrid(self, query, model_name, agent_id=None, limit=20, **kwargs):
+        return await self._run_sync("search_hybrid", query, model_name, agent_id=agent_id, limit=limit, **kwargs)
