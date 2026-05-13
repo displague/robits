@@ -151,18 +151,27 @@ class AsyncSQLiteMemoryStore:
         lifecycle_state="active",
         created_at=None,
         metadata=None,
+        username=None,
+        first_name=None,
+        last_name=None,
+        full_name=None,
     ):
         timestamp = created_at or _utc_now()
         async with self._db_lock:
             await self.connection.execute(
                 """
                 INSERT INTO agents(
-                    agent_id, role, display_name, lifecycle_state, created_at, metadata_json
+                    agent_id, role, display_name, username, first_name, last_name, full_name,
+                    lifecycle_state, created_at, metadata_json
                 )
-                VALUES (?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(agent_id) DO UPDATE SET
                     role = excluded.role,
                     display_name = excluded.display_name,
+                    username = COALESCE(excluded.username, agents.username),
+                    first_name = COALESCE(excluded.first_name, agents.first_name),
+                    last_name = COALESCE(excluded.last_name, agents.last_name),
+                    full_name = COALESCE(excluded.full_name, agents.full_name),
                     lifecycle_state = excluded.lifecycle_state,
                     metadata_json = excluded.metadata_json
                 """,
@@ -170,6 +179,10 @@ class AsyncSQLiteMemoryStore:
                     agent_id,
                     role,
                     display_name,
+                    username,
+                    first_name,
+                    last_name,
+                    full_name,
                     lifecycle_state,
                     timestamp,
                     _json_dumps(metadata),
@@ -177,6 +190,23 @@ class AsyncSQLiteMemoryStore:
             )
             await self.connection.commit()
         return agent_id
+
+    async def get_agent_name_tokens(self) -> dict:
+        """Return a mapping of active agent_id → set of lowercase name tokens."""
+        rows = await self._rows(
+            "SELECT agent_id, username, first_name, last_name, full_name "
+            "FROM agents WHERE lifecycle_state = 'active'"
+        )
+        result = {}
+        for row in rows:
+            tokens = set()
+            for col in ("agent_id", "username", "first_name", "last_name", "full_name"):
+                val = row[col] if hasattr(row, "__getitem__") else getattr(row, col, None)
+                if val:
+                    tokens.add(str(val).lower())
+            agent_id = row["agent_id"] if hasattr(row, "__getitem__") else row.agent_id
+            result[agent_id] = tokens
+        return result
 
     async def append_message(
         self,

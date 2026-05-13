@@ -147,15 +147,17 @@ _CLOCK_TEMP_MULTIPLIER = {"on": 0.6, "break": 0.9, "off": 1.3}
 
 
 def _modulate_temperature(role, clock_state):
-    """Adjust role.temperature around its base_temperature for the given clock state.
+    """Adjust role.temperature and role.top_p around their base values for clock state.
 
-    Initialises base_temperature from the current temperature on first call so
-    that repeated calls always modulate from the same stable baseline.
+    Initialises base values from current values on first call so repeated calls
+    always modulate from the same stable baseline.
     """
     if not hasattr(role, "base_temperature"):
         role.base_temperature = getattr(role, "temperature", 0.7)
     multiplier = _CLOCK_TEMP_MULTIPLIER.get(clock_state, 1.0)
     role.temperature = max(0.05, min(1.0, role.base_temperature * multiplier))
+    if hasattr(role, "base_top_p"):
+        role.top_p = max(0.1, min(1.0, role.base_top_p * multiplier))
 
 
 class Session:
@@ -171,7 +173,10 @@ class Session:
         event_stream=None,
         clock_state=None,
     ):
-        self.participants = participants if participants is not None else build_employee_dict()
+        self.participants = (
+            participants if participants is not None
+            else build_employee_dict(_m.persona_entries or None)
+        )
         self.system = system if system is not None else System(self.participants)
         scheduler_names = list(self.participants)
         self.scheduler = scheduler if scheduler is not None else RoundRobinScheduler(scheduler_names)
@@ -211,9 +216,19 @@ class Session:
                 _m.memory_store.create_session(self.run_id)
                 for name, participant in self.participants.items():
                     role_type = type(participant).__name__
-                    _m.memory_store.upsert_agent(name, role_type, display_name=name)
-                    if _m.persona_entries.get(name):
-                        seed_persona(_m.memory_store, name, _m.persona_entries[name])
+                    persona = _m.persona_entries.get(name) or {}
+                    full_name = persona.get("full_name") if isinstance(persona, dict) else None
+                    _m.memory_store.upsert_agent(
+                        name, role_type,
+                        display_name=full_name or name,
+                        username=name,
+                        full_name=full_name,
+                        first_name=getattr(participant, "first_name", None),
+                        last_name=getattr(participant, "last_name", None),
+                    )
+                    entries = persona.get("entries") if isinstance(persona, dict) else persona
+                    if entries:
+                        seed_persona(_m.memory_store, name, entries)
                 self._org_chat_channel_id = _m.memory_store.get_or_create_channel(
                     CHANNEL_ORG_CHAT,
                     social_distance=SOCIAL_PROFESSIONAL,
@@ -707,6 +722,65 @@ class Session:
         """Resolve a role display name to its participant dict key for FK-safe storage."""
         return self._name_to_key.get(name, name)
 
+    def _detect_mentions(self, message: str) -> set:
+        """Return the set of participant keys mentioned in message.
+
+        Matching rules (in priority order):
+        - ``@username``: case-insensitive, always matched.
+        - Full name (multi-word): phrase match on normalised text, always matched.
+        - Single-word username / first / last name: only matched when the token
+          appears CAPITALISED in the original message, reducing false positives for
+          common English words (will, may, mark, grace, …).
+        """
+        import re as _re
+        if not isinstance(message, str) or not message:
+            return set()
+        normalised = _re.sub(r"[^a-z0-9@_]+", " ", message.lower())
+        mentioned: set = set()
+        if _m.memory_store is not None:
+            try:
+                name_tokens = _m.memory_store.get_agent_name_tokens()
+                for agent_id, tokens in name_tokens.items():
+                    if agent_id not in self.participants:
+                        continue
+                    for token in tokens:
+                        if not token:
+                            continue
+                        norm_token = _re.sub(r"[^a-z0-9@_]+", " ", token.lower()).strip()
+                        if not norm_token:
+                            continue
+                        # @username — always match
+                        if f"@{norm_token}" in normalised:
+                            mentioned.add(agent_id)
+                            break
+                        # Multi-word full name — phrase match
+                        if " " in norm_token and f" {norm_token} " in f" {normalised} ":
+                            mentioned.add(agent_id)
+                            break
+                        # Single-word token — only if capitalised in original text
+                        cap = token[0].upper() + token[1:].lower() if len(token) > 1 else token.upper()
+                        if _re.search(r"\b" + _re.escape(cap) + r"\b", message):
+                            mentioned.add(agent_id)
+                            break
+            except Exception:
+                pass
+        return mentioned
+
+    def _effective_clock_state(self) -> str:
+        """Return 'break' if inside a configured break window and base state is 'on', else clock_state.
+
+        Scheduled breaks only promote 'on' → 'break'; they never override 'off' (which
+        is more restrictive than 'break' and has a higher temperature multiplier).
+        """
+        if self.clock_state == "on":
+            schedule = getattr(_m, "break_schedule", [])
+            if schedule:
+                now = datetime.now(timezone.utc).astimezone().strftime("%H:%M")
+                for start, end in schedule:
+                    if start <= now < end:
+                        return "break"
+        return self.clock_state
+
     def sync_scheduler_participants(self):
         """Add active roles to and remove non-active roles from the scheduler."""
         for name, participant in self.participants.items():
@@ -720,8 +794,9 @@ class Session:
         role.runtime_event_stream = self.event_stream
         role.runtime_session_id = self.run_id
         role.runtime_tool_results = []
-        role.runtime_clock_state = self.clock_state
-        _modulate_temperature(role, self.clock_state)
+        effective_clock = self._effective_clock_state()
+        role.runtime_clock_state = effective_clock
+        _modulate_temperature(role, effective_clock)
         for name, participant in self.participants.items():
             if participant is role:
                 role.runtime_role_name = name
@@ -758,11 +833,15 @@ class Session:
         reminders = due_alarm_reminders(routed.receiver)
         if reminders:
             prompt = "\n".join(reminders + [prompt])
+        receiver_key = self._role_to_key.get(id(routed.receiver))
+        mentions = self._detect_mentions(message)
+        if receiver_key and receiver_key in mentions:
+            prompt = f"[Note: you were mentioned in this message]\n{prompt}"
         raw_prompt = prepend_verified_tool_results(
             prompt,
             self.recent_system_events() + system_events,
         )
-        effective_org_lines = _m.org_chat_context_lines if self.clock_state == "on" else 0
+        effective_org_lines = _m.org_chat_context_lines if self._effective_clock_state() == "on" else 0
         org_context = format_org_chat_context(self.transcript, effective_org_lines)
         model_prompt = org_context + raw_prompt if org_context else raw_prompt
         self.prepare_agent_runtime(routed.receiver)

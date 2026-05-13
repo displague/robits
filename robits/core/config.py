@@ -7,6 +7,39 @@ import os
 import threading
 
 
+def _parse_break_schedule(raw: str) -> list:
+    """Parse 'HH:MM-HH:MM[,HH:MM-HH:MM...]' into a list of (start, end) string pairs.
+
+    Normalises single-digit hours (9:00 → 09:00). Rejects midnight-wrapping windows
+    (start >= end) and silently skips malformed segments.
+    """
+    import logging
+    windows = []
+    for segment in (raw or "").split(","):
+        segment = segment.strip()
+        if not segment:
+            continue
+        parts = segment.split("-", 1)
+        if len(parts) != 2:
+            logging.warning("robits: skipping malformed break schedule segment %r", segment)
+            continue
+        try:
+            from datetime import datetime as _dt
+            s = _dt.strptime(parts[0].strip(), "%H:%M").time()
+            e = _dt.strptime(parts[1].strip(), "%H:%M").time()
+        except ValueError:
+            logging.warning("robits: skipping unparseable break schedule segment %r", segment)
+            continue
+        if s >= e:
+            logging.warning(
+                "robits: skipping midnight-wrapping or zero-length break window %s-%s",
+                s.strftime("%H:%M"), e.strftime("%H:%M"),
+            )
+            continue
+        windows.append((s.strftime("%H:%M"), e.strftime("%H:%M")))
+    return windows
+
+
 class Config:
     """All env-derived settings and mutable runtime state in one injectable object.
 
@@ -77,7 +110,8 @@ class Config:
             0, int(env.get("ROBITS_GOAL_DIGEST_INTERVAL", "0"))
         )
 
-        self.agent_workspace_store = AgentWorkspaceStore()
+        self.agent_workspace_root = env.get("ROBITS_AGENT_WORKSPACE_ROOT", "var/agents")
+        self.agent_workspace_store = AgentWorkspaceStore(self.agent_workspace_root)
         self._org_workspace = (
             self.agent_workspace_store if self.memory_store is not None else None
         )
@@ -104,6 +138,10 @@ class Config:
         self.personas_file = env.get("ROBITS_PERSONAS_FILE", "").strip() or None
         from robits.core.persona import load_personas
         self.persona_entries = load_personas(self.personas_file)
+
+        # --- schedule ---
+        self.break_schedule = _parse_break_schedule(env.get("ROBITS_BREAK_SCHEDULE", ""))
+        self.tool_proposals_file = env.get("ROBITS_TOOL_PROPOSALS_FILE", "var/tool_proposals.json")
 
         # --- misc ---
         self.builtin_search_url = env.get("ROBITS_SEARCH_URL", "").strip()

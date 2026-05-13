@@ -123,6 +123,9 @@ class ChatCompletionsProvider(ModelProvider):
             "temperature": role.temperature,
             "user": f"robits_{role.name}",
         }
+        top_p = getattr(role, "top_p", None)
+        if top_p is not None:
+            kwargs["top_p"] = top_p
         if tools:
             kwargs["tools"] = tools
             kwargs["tool_choice"] = "auto"
@@ -193,6 +196,9 @@ class ResponsesProvider(ModelProvider):
             "temperature": role.temperature,
             "user": f"robits_{role.name}",
         }
+        top_p = getattr(role, "top_p", None)
+        if top_p is not None:
+            kwargs["top_p"] = top_p
         if tools:
             kwargs["tools"] = tools
             kwargs["tool_choice"] = "auto"

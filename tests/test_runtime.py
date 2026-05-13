@@ -3438,6 +3438,211 @@ class ChannelScopedMemoryTests(unittest.TestCase):
         self.assertIn("Python", work[0]["content"])
 
 
+class PersonaRedesignTests(unittest.TestCase):
+    """Tests for #93 persona redesign: username/full_name schema and @mention detection."""
+
+    def setUp(self):
+        self.store_temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.store_temp.cleanup)
+        self.store = SQLiteMemoryStore(Path(self.store_temp.name) / "persona93.sqlite3")
+        self.addCleanup(self.store.close)
+
+    def test_load_personas_new_schema(self):
+        import tempfile as _tf, yaml as _yaml
+        from robits.core.persona import load_personas
+        content = [
+            {"username": "alex_chen", "full_name": "Alex Chen", "role": "SE",
+             "memories": [{"kind": "thought", "content": "I like Python."}]},
+            {"username": "jamie", "full_name": "Jamie Okonkwo", "role": "SE",
+             "memories": [{"kind": "thought", "content": "Distributed systems fan."}]},
+        ]
+        with _tf.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
+            _yaml.dump(content, f)
+            path = f.name
+        try:
+            result = load_personas(path)
+            self.assertIn("alex_chen", result)
+            self.assertIn("jamie", result)
+            self.assertEqual(result["alex_chen"]["role"], "SE")
+            self.assertEqual(result["alex_chen"]["full_name"], "Alex Chen")
+            self.assertEqual(len(result["alex_chen"]["entries"]), 1)
+        finally:
+            import os; os.unlink(path)
+
+    def test_load_personas_legacy_schema_still_works(self):
+        import tempfile as _tf, yaml as _yaml
+        from robits.core.persona import load_personas
+        content = [
+            {"agent": "SE", "memories": [{"kind": "thought", "content": "Old schema."}]},
+        ]
+        with _tf.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
+            _yaml.dump(content, f)
+            path = f.name
+        try:
+            result = load_personas(path)
+            self.assertIn("SE", result)
+            self.assertEqual(result["SE"]["role"], "SE")
+            self.assertEqual(len(result["SE"]["entries"]), 1)
+        finally:
+            import os; os.unlink(path)
+
+    def test_multiple_personas_same_role(self):
+        import tempfile as _tf, yaml as _yaml
+        from robits.core.persona import load_personas
+        content = [
+            {"username": "eng1", "full_name": "Alice Smith", "role": "SE",
+             "memories": [{"kind": "thought", "content": "Alice's memory."}]},
+            {"username": "eng2", "full_name": "Bob Jones", "role": "SE",
+             "memories": [{"kind": "thought", "content": "Bob's memory."}]},
+        ]
+        with _tf.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
+            _yaml.dump(content, f)
+            path = f.name
+        try:
+            result = load_personas(path)
+            self.assertIn("eng1", result)
+            self.assertIn("eng2", result)
+            self.assertEqual(result["eng1"]["full_name"], "Alice Smith")
+            self.assertEqual(result["eng2"]["full_name"], "Bob Jones")
+        finally:
+            import os; os.unlink(path)
+
+    def test_upsert_agent_stores_identity_fields(self):
+        self.store.upsert_agent(
+            "alex_chen", "SE", display_name="Alex Chen",
+            username="alex_chen", first_name="Alex", last_name="Chen", full_name="Alex Chen"
+        )
+        rows = self.store._rows("SELECT * FROM agents WHERE agent_id = 'alex_chen'")
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["username"], "alex_chen")
+        self.assertEqual(rows[0]["first_name"], "Alex")
+        self.assertEqual(rows[0]["last_name"], "Chen")
+        self.assertEqual(rows[0]["full_name"], "Alex Chen")
+
+    def test_get_agent_name_tokens_returns_all_forms(self):
+        self.store.upsert_agent(
+            "alex_chen", "SE", username="alex_chen",
+            first_name="Alex", last_name="Chen", full_name="Alex Chen"
+        )
+        tokens_map = self.store.get_agent_name_tokens()
+        self.assertIn("alex_chen", tokens_map)
+        tokens = tokens_map["alex_chen"]
+        self.assertIn("alex_chen", tokens)
+        self.assertIn("alex", tokens)
+        self.assertIn("chen", tokens)
+        self.assertIn("alex chen", tokens)
+
+    def test_build_employee_dict_uses_persona_usernames(self):
+        from robits.core.roles import build_employee_dict
+        persona_map = {
+            "alex_chen": {"role": "SE", "full_name": "Alex Chen", "entries": []},
+        }
+        d = build_employee_dict(persona_map)
+        self.assertIn("alex_chen", d)
+        self.assertNotIn("SE", d)
+        self.assertEqual(d["alex_chen"].name, "alex_chen")
+
+    def test_build_employee_dict_multiple_same_role(self):
+        from robits.core.roles import build_employee_dict
+        persona_map = {
+            "eng1": {"role": "SE", "full_name": "Alice Smith", "entries": []},
+            "eng2": {"role": "SE", "full_name": "Bob Jones", "entries": []},
+        }
+        d = build_employee_dict(persona_map)
+        self.assertIn("eng1", d)
+        self.assertIn("eng2", d)
+        self.assertNotIn("SE", d)
+
+    def test_mention_detection_at_username(self):
+        from robits.core.session import Session
+        self.store.upsert_agent("alex_chen", "SE", username="alex_chen",
+                                first_name="Alex", last_name="Chen", full_name="Alex Chen")
+        a = SimpleNamespace(name="CEO", lifecycle_state="active",
+                            interact=lambda *a, **kw: "",
+                            update_group_conversations=lambda m: None)
+        b_role = SimpleNamespace(name="alex_chen", lifecycle_state="active",
+                                 interact=lambda *a, **kw: "",
+                                 update_group_conversations=lambda m: None)
+        session = Session(participants={"CEO": a, "alex_chen": b_role})
+        old_store = main.memory_store
+        main.memory_store = self.store
+        try:
+            mentioned = session._detect_mentions("Hey @alex_chen can you review this?")
+            self.assertIn("alex_chen", mentioned)
+        finally:
+            main.memory_store = old_store
+
+    def test_mention_detection_by_first_name(self):
+        from robits.core.session import Session
+        self.store.upsert_agent("alex_chen", "SE", username="alex_chen",
+                                first_name="Alex", last_name="Chen", full_name="Alex Chen")
+        a = SimpleNamespace(name="CEO", lifecycle_state="active",
+                            interact=lambda *a, **kw: "",
+                            update_group_conversations=lambda m: None)
+        b_role = SimpleNamespace(name="alex_chen", lifecycle_state="active",
+                                 interact=lambda *a, **kw: "",
+                                 update_group_conversations=lambda m: None)
+        session = Session(participants={"CEO": a, "alex_chen": b_role})
+        old_store = main.memory_store
+        main.memory_store = self.store
+        try:
+            mentioned = session._detect_mentions("Alex, what do you think about this?")
+            self.assertIn("alex_chen", mentioned)
+        finally:
+            main.memory_store = old_store
+
+    def test_no_mention_when_no_match(self):
+        from robits.core.session import Session
+        self.store.upsert_agent("alex_chen", "SE", username="alex_chen",
+                                first_name="Alex", last_name="Chen", full_name="Alex Chen")
+        a = SimpleNamespace(name="CEO", lifecycle_state="active",
+                            interact=lambda *a, **kw: "",
+                            update_group_conversations=lambda m: None)
+        b_role = SimpleNamespace(name="alex_chen", lifecycle_state="active",
+                                 interact=lambda *a, **kw: "",
+                                 update_group_conversations=lambda m: None)
+        session = Session(participants={"CEO": a, "alex_chen": b_role})
+        old_store = main.memory_store
+        main.memory_store = self.store
+        try:
+            mentioned = session._detect_mentions("What does everyone think?")
+            self.assertNotIn("alex_chen", mentioned)
+        finally:
+            main.memory_store = old_store
+
+    def test_mention_no_false_positive_common_word(self):
+        from robits.core.session import Session
+        self.store.upsert_agent("will_smith", "SE", username="will_smith",
+                                first_name="Will", last_name="Smith", full_name="Will Smith")
+        a = SimpleNamespace(name="CEO", lifecycle_state="active",
+                            interact=lambda *a, **kw: "",
+                            update_group_conversations=lambda m: None)
+        b_role = SimpleNamespace(name="will_smith", lifecycle_state="active",
+                                 interact=lambda *a, **kw: "",
+                                 update_group_conversations=lambda m: None)
+        session = Session(participants={"CEO": a, "will_smith": b_role})
+        old_store = main.memory_store
+        main.memory_store = self.store
+        try:
+            # lowercase "will" in a sentence should NOT trigger a mention
+            mentioned = session._detect_mentions("I will look into it, no worries.")
+            self.assertNotIn("will_smith", mentioned)
+            # Capitalised "Will" (addressing the agent) SHOULD trigger
+            mentioned2 = session._detect_mentions("Will, can you review the PR?")
+            self.assertIn("will_smith", mentioned2)
+        finally:
+            main.memory_store = old_store
+
+    def test_build_employee_dict_ceo_persona(self):
+        from robits.core.roles import build_employee_dict, Human
+        persona_map = {
+            "CEO": {"role": "CEO", "full_name": "CEO", "entries": []},
+        }
+        d = build_employee_dict(persona_map)
+        self.assertIn("CEO", d)
+        self.assertIsInstance(d["CEO"], Human)
+
+
 class PersonaSeedingTests(unittest.TestCase):
     """Tests for persona seeding into memory on first session."""
 
@@ -3495,6 +3700,104 @@ class PersonaSeedingTests(unittest.TestCase):
         rows = self.store._rows("SELECT * FROM memory_entries WHERE agent_id = 'dave'")
         self.assertEqual(len(rows), 1)
         self.assertIn("honesty", rows[0]["content"])
+
+
+class BreakScheduleTests(unittest.TestCase):
+    """Tests for scheduled break windows and org.schedule tool."""
+
+    def test_parse_break_schedule_single_window(self):
+        from robits.core.config import _parse_break_schedule
+        result = _parse_break_schedule("12:00-13:00")
+        self.assertEqual(result, [("12:00", "13:00")])
+
+    def test_parse_break_schedule_multiple_windows(self):
+        from robits.core.config import _parse_break_schedule
+        result = _parse_break_schedule("12:00-13:00,15:00-15:30")
+        self.assertEqual(result, [("12:00", "13:00"), ("15:00", "15:30")])
+
+    def test_parse_break_schedule_empty(self):
+        from robits.core.config import _parse_break_schedule
+        self.assertEqual(_parse_break_schedule(""), [])
+        self.assertEqual(_parse_break_schedule(None), [])
+
+    def test_parse_break_schedule_single_digit_hour(self):
+        from robits.core.config import _parse_break_schedule
+        result = _parse_break_schedule("9:00-9:30")
+        self.assertEqual(result, [("09:00", "09:30")])
+
+    def test_parse_break_schedule_rejects_midnight_wrap(self):
+        from robits.core.config import _parse_break_schedule
+        result = _parse_break_schedule("22:00-02:00")
+        self.assertEqual(result, [])
+
+    def test_parse_break_schedule_rejects_malformed(self):
+        from robits.core.config import _parse_break_schedule
+        result = _parse_break_schedule("notawindow,12:00-13:00")
+        self.assertEqual(result, [("12:00", "13:00")])
+
+    def test_effective_clock_state_off_not_promoted_to_break(self):
+        from robits.core.session import Session
+        a = SimpleNamespace(name="A", lifecycle_state="active",
+                            interact=lambda *a, **kw: "hi",
+                            update_group_conversations=lambda m: None)
+        session = Session(participants={"A": a}, clock_state="off")
+        old_schedule = main.break_schedule
+        main.break_schedule = [("00:00", "23:59")]
+        try:
+            self.assertEqual(session._effective_clock_state(), "off")
+        finally:
+            main.break_schedule = old_schedule
+
+    def test_effective_clock_state_within_window(self):
+        from robits.core.session import Session
+        a = SimpleNamespace(name="A", lifecycle_state="active",
+                            interact=lambda *a, **kw: "hi",
+                            update_group_conversations=lambda m: None)
+        session = Session(participants={"A": a}, clock_state="on")
+        session.clock_state = "on"
+        old_schedule = main.break_schedule
+        main.break_schedule = [("00:00", "23:59")]
+        try:
+            self.assertEqual(session._effective_clock_state(), "break")
+        finally:
+            main.break_schedule = old_schedule
+
+    def test_effective_clock_state_outside_window(self):
+        from robits.core.session import Session
+        a = SimpleNamespace(name="A", lifecycle_state="active",
+                            interact=lambda *a, **kw: "hi",
+                            update_group_conversations=lambda m: None)
+        session = Session(participants={"A": a}, clock_state="on")
+        old_schedule = main.break_schedule
+        main.break_schedule = [("99:00", "99:30")]
+        try:
+            self.assertEqual(session._effective_clock_state(), "on")
+        finally:
+            main.break_schedule = old_schedule
+
+    def test_effective_clock_state_no_schedule(self):
+        from robits.core.session import Session
+        a = SimpleNamespace(name="A", lifecycle_state="active",
+                            interact=lambda *a, **kw: "hi",
+                            update_group_conversations=lambda m: None)
+        session = Session(participants={"A": a}, clock_state="off")
+        old_schedule = main.break_schedule
+        main.break_schedule = []
+        try:
+            self.assertEqual(session._effective_clock_state(), "off")
+        finally:
+            main.break_schedule = old_schedule
+
+    def test_break_schedule_in_agent_context(self):
+        from robits.core.context import agent_runtime_context
+        old_schedule = main.break_schedule
+        main.break_schedule = [("09:00", "09:30")]
+        try:
+            ctx = agent_runtime_context()
+            self.assertIn("break_schedule", ctx)
+            self.assertEqual(ctx["break_schedule"], [("09:00", "09:30")])
+        finally:
+            main.break_schedule = old_schedule
 
 
 class BreakClockStateTests(unittest.TestCase):
@@ -3594,6 +3897,76 @@ class BreakClockStateTests(unittest.TestCase):
             store_temp.cleanup()
         self.assertIn("System note", result)
         self.assertIn("break", result)
+
+    def test_top_p_modulation_follows_clock_state(self):
+        from robits.core.session import _modulate_temperature
+        role = SimpleNamespace(temperature=0.7, base_temperature=0.7, top_p=0.9, base_top_p=0.9)
+        _modulate_temperature(role, "on")
+        on_top_p = role.top_p
+        role.top_p = 0.9
+        _modulate_temperature(role, "break")
+        break_top_p = role.top_p
+        role.top_p = 0.9
+        _modulate_temperature(role, "off")
+        off_top_p = role.top_p
+        self.assertLess(on_top_p, break_top_p)
+        self.assertLess(break_top_p, off_top_p)
+
+    def test_top_p_clamped_to_valid_range(self):
+        from robits.core.session import _modulate_temperature
+        role = SimpleNamespace(temperature=0.7, base_temperature=0.7, top_p=1.0, base_top_p=1.0)
+        _modulate_temperature(role, "off")
+        self.assertLessEqual(role.top_p, 1.0)
+        role2 = SimpleNamespace(temperature=0.7, base_temperature=0.7, top_p=0.1, base_top_p=0.1)
+        _modulate_temperature(role2, "on")
+        self.assertGreaterEqual(role2.top_p, 0.1)
+
+    def test_role_base_top_p_initialised(self):
+        from robits.core.roles import Role
+        role = Role("test_role", "template", {})
+        self.assertTrue(hasattr(role, "base_top_p"))
+        self.assertEqual(role.base_top_p, role.top_p)
+
+    def test_providers_pass_top_p(self):
+        from robits.core.providers import ChatCompletionsProvider
+        calls = []
+
+        class FakeClient:
+            class chat:
+                class completions:
+                    @staticmethod
+                    def create(**kwargs):
+                        calls.append(kwargs)
+                        msg = SimpleNamespace(
+                            tool_calls=None,
+                            content="done",
+                            model_dump=lambda: {"role": "assistant", "content": "done"},
+                        )
+                        return SimpleNamespace(choices=[SimpleNamespace(message=msg)])
+
+        role = SimpleNamespace(
+            name="tester",
+            runtime_role_name="tester",
+            max_tokens=100,
+            temperature=0.5,
+            top_p=0.75,
+            employee_dict={},
+            allowed_tools=set(),
+        )
+
+        class FakeRegistry:
+            def as_chat_completion_tools(self, role):
+                return []
+            def execute(self, *a, **kw):
+                return ""
+            def resolve_name(self, n):
+                return n
+
+        provider = ChatCompletionsProvider(FakeClient(), registry=FakeRegistry())
+        provider.generate(role, "model-x", "sender", [{"role": "user", "content": "hi"}])
+        self.assertTrue(calls)
+        self.assertIn("top_p", calls[0])
+        self.assertAlmostEqual(calls[0]["top_p"], 0.75)
 
 
 class EmbeddingSearchTests(unittest.TestCase):

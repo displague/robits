@@ -124,6 +124,10 @@ class SQLiteMemoryStore:
                 agent_id TEXT PRIMARY KEY,
                 role TEXT NOT NULL,
                 display_name TEXT,
+                username TEXT,
+                first_name TEXT,
+                last_name TEXT,
+                full_name TEXT,
                 lifecycle_state TEXT NOT NULL DEFAULT 'active',
                 created_at TEXT NOT NULL,
                 metadata_json TEXT NOT NULL DEFAULT '{}'
@@ -337,6 +341,7 @@ class SQLiteMemoryStore:
         )
         self._ensure_agent_phase_column()
         self._ensure_message_sender_phase_column()
+        self._ensure_agent_identity_columns()
         self.connection.execute(
             """
             CREATE INDEX IF NOT EXISTS idx_memory_digests_current
@@ -392,6 +397,15 @@ class SQLiteMemoryStore:
             self.connection.execute(
                 "ALTER TABLE messages ADD COLUMN sender_phase REAL"
             )
+
+    def _ensure_agent_identity_columns(self):
+        columns = {
+            row["name"]
+            for row in self.connection.execute("PRAGMA table_info(agents)").fetchall()
+        }
+        for col in ("username", "first_name", "last_name", "full_name"):
+            if col not in columns:
+                self.connection.execute(f"ALTER TABLE agents ADD COLUMN {col} TEXT")
 
     def get_agent_phase(self, agent_id) -> float | None:
         """Return the current circadian phase for an agent, or None if not found."""
@@ -473,17 +487,26 @@ class SQLiteMemoryStore:
         lifecycle_state="active",
         created_at=None,
         metadata=None,
+        username=None,
+        first_name=None,
+        last_name=None,
+        full_name=None,
     ):
         timestamp = created_at or _utc_now()
         self.connection.execute(
             """
             INSERT INTO agents(
-                agent_id, role, display_name, lifecycle_state, created_at, metadata_json
+                agent_id, role, display_name, username, first_name, last_name, full_name,
+                lifecycle_state, created_at, metadata_json
             )
-            VALUES (?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(agent_id) DO UPDATE SET
                 role = excluded.role,
                 display_name = excluded.display_name,
+                username = COALESCE(excluded.username, agents.username),
+                first_name = COALESCE(excluded.first_name, agents.first_name),
+                last_name = COALESCE(excluded.last_name, agents.last_name),
+                full_name = COALESCE(excluded.full_name, agents.full_name),
                 lifecycle_state = excluded.lifecycle_state,
                 metadata_json = excluded.metadata_json
             """,
@@ -491,6 +514,10 @@ class SQLiteMemoryStore:
                 agent_id,
                 role,
                 display_name,
+                username,
+                first_name,
+                last_name,
+                full_name,
                 lifecycle_state,
                 timestamp,
                 _json_dumps(metadata),
@@ -498,6 +525,25 @@ class SQLiteMemoryStore:
         )
         self.connection.commit()
         return agent_id
+
+    def get_agent_name_tokens(self) -> dict:
+        """Return a mapping of active agent_id → set of lowercase name tokens for mention detection.
+
+        Tokens include: agent_id, username, first_name, last_name, full_name.
+        """
+        rows = self.connection.execute(
+            "SELECT agent_id, username, first_name, last_name, full_name "
+            "FROM agents WHERE lifecycle_state = 'active'"
+        ).fetchall()
+        result = {}
+        for row in rows:
+            tokens = set()
+            for col in ("agent_id", "username", "first_name", "last_name", "full_name"):
+                val = row[col]
+                if val:
+                    tokens.add(val.lower())
+            result[row["agent_id"]] = tokens
+        return result
 
     def add_contact(
         self,
