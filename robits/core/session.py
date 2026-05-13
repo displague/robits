@@ -147,10 +147,15 @@ _CLOCK_TEMP_MULTIPLIER = {"on": 0.6, "break": 0.9, "off": 1.3}
 
 
 def _modulate_temperature(role, clock_state):
-    """Adjust role.temperature around its base_temperature for the given clock state."""
-    base = getattr(role, "base_temperature", getattr(role, "temperature", 0.7))
+    """Adjust role.temperature around its base_temperature for the given clock state.
+
+    Initialises base_temperature from the current temperature on first call so
+    that repeated calls always modulate from the same stable baseline.
+    """
+    if not hasattr(role, "base_temperature"):
+        role.base_temperature = getattr(role, "temperature", 0.7)
     multiplier = _CLOCK_TEMP_MULTIPLIER.get(clock_state, 1.0)
-    role.temperature = max(0.05, min(1.0, base * multiplier))
+    role.temperature = max(0.05, min(1.0, role.base_temperature * multiplier))
 
 
 class Session:

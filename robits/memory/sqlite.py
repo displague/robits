@@ -1750,7 +1750,14 @@ class SQLiteMemoryStore:
     def get_pending_embedding_records(
         self, model_name: str, limit: int = 50
     ) -> list[dict]:
-        """Return FTS records that have no embedding for model_name yet."""
+        """Return embeddable FTS records that have no embedding for model_name yet.
+
+        Only the embeddable kinds (message, thought, memory_digest, and
+        memory_entries variants) are returned; tool_call and other non-content
+        kinds are excluded.
+        """
+        if not self._vec_enabled:
+            return []
         return self._rows(
             """
             SELECT mf.rowid AS fts_rowid, mf.kind, mf.record_id,
@@ -1758,14 +1765,16 @@ class SQLiteMemoryStore:
             FROM memory_fts mf
             LEFT JOIN memory_embeddings me
                 ON me.source_table = CASE mf.kind
-                    WHEN 'message'      THEN 'messages'
-                    WHEN 'thought'      THEN 'thoughts'
+                    WHEN 'message'       THEN 'messages'
+                    WHEN 'thought'       THEN 'thoughts'
                     WHEN 'memory_digest' THEN 'memory_digests'
                     ELSE 'memory_entries'
                    END
                 AND me.source_id = mf.record_id
                 AND me.embedding_model = ?
             WHERE me.embedding_id IS NULL
+              AND mf.kind IN ('message', 'thought', 'memory_digest',
+                              'identity', 'episodic', 'goal_short_term', 'goal_long_term')
             LIMIT ?
             """,
             [model_name, limit],
@@ -1773,6 +1782,8 @@ class SQLiteMemoryStore:
 
     def embed_pending(self, model_name: str, limit: int = 50) -> int:
         """Generate and store embeddings for unembedded FTS records; return count written."""
+        if not self._vec_enabled:
+            return 0
         from robits.core.embeddings import get_embedding
         _kind_to_table = {
             "message": "messages",
@@ -1828,13 +1839,14 @@ class SQLiteMemoryStore:
             placeholders = ", ".join("?" * len(rowid_to_dist))
             meta_rows = self.connection.execute(
                 f"SELECT embedding_id, source_table, source_id FROM memory_embeddings "
-                f"WHERE embedding_id IN ({placeholders})",
-                list(rowid_to_dist.keys()),
+                f"WHERE embedding_id IN ({placeholders}) AND embedding_model = ?",
+                list(rowid_to_dist.keys()) + [model_name],
             ).fetchall()
             rows = [
                 {"rowid": r["embedding_id"], "distance": rowid_to_dist[r["embedding_id"]],
                  "source_table": r["source_table"], "source_id": r["source_id"]}
                 for r in meta_rows
+                if r["embedding_id"] in rowid_to_dist
             ]
             rows.sort(key=lambda r: r["distance"])
         except Exception:
@@ -1844,12 +1856,11 @@ class SQLiteMemoryStore:
             "messages": "message",
             "thoughts": "thought",
             "memory_digests": "memory_digest",
-            "memory_entries": "identity",
         }
         results = []
         seen_ids: set[str] = set()
         for row in rows:
-            source_table = row["source_table"]  # plain dict from our list comprehension
+            source_table = row["source_table"]
             source_id = row["source_id"]
             key = f"{source_table}:{source_id}"
             if key in seen_ids:
@@ -1861,9 +1872,14 @@ class SQLiteMemoryStore:
             if agent_id is not None and rec_agent != agent_id:
                 continue
             seen_ids.add(key)
+            # For memory_entries, use the row's own kind field rather than a fixed label.
+            kind = (
+                rec.get("kind") if source_table == "memory_entries"
+                else _table_to_kind.get(source_table, source_table)
+            )
             results.append(
                 MemorySearchResult(
-                    kind=_table_to_kind.get(source_table, "memory_entry"),
+                    kind=kind,
                     record_id=source_id,
                     content=rec.get("content", ""),
                     agent_id=rec_agent,
@@ -1886,14 +1902,15 @@ class SQLiteMemoryStore:
         limit: int = 20,
         **kwargs,
     ) -> list[MemorySearchResult]:
-        """Merge FTS cascade results with semantic results, deduplicating by record_id."""
+        """Merge FTS cascade results with semantic results, deduplicating by (kind, record_id)."""
         fts_results = self.search_cascade(query, agent_id=agent_id, limit=limit, **kwargs)
         if not self._vec_enabled:
             return fts_results
         sem_results = self.search_semantic(query, model_name, agent_id=agent_id, limit=limit)
-        seen = {r.record_id for r in fts_results}
+        seen = {(r.kind, r.record_id) for r in fts_results}
         for r in sem_results:
-            if r.record_id not in seen:
+            key = (r.kind, r.record_id)
+            if key not in seen:
                 fts_results.append(r)
-                seen.add(r.record_id)
+                seen.add(key)
         return fts_results[:limit]

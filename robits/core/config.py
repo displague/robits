@@ -90,6 +90,16 @@ class Config:
             0, int(env.get("ROBITS_ORG_DIGEST_INTERVAL", "0"))
         )
 
+        # --- embeddings ---
+        self.embedding_model = env.get("ROBITS_EMBEDDING_MODEL", "").strip()
+        self.embedding_base_url = (
+            env.get("ROBITS_EMBEDDING_BASE_URL")
+            or env.get("OPENAI_BASE_URL")
+            or env.get("OPENAI_API_BASE")
+            or ""
+        ).strip() or None
+        self.embedding_api_key = env.get("ROBITS_EMBEDDING_API_KEY", "").strip() or None
+
         # --- personas ---
         self.personas_file = env.get("ROBITS_PERSONAS_FILE", "").strip() or None
         from robits.core.persona import load_personas

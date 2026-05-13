@@ -42,6 +42,17 @@ def load_personas(path: str | None = None) -> dict[str, list[dict]]:
     return result
 
 
+def _resolve_channel_id(store: Any, channel: str | None) -> int | None:
+    """Resolve a channel name to its DB id, or return None."""
+    if not channel:
+        return None
+    try:
+        from robits.memory.sqlite import SOCIAL_PROFESSIONAL
+        return store.get_or_create_channel(channel, social_distance=SOCIAL_PROFESSIONAL)
+    except Exception:
+        return None
+
+
 def seed_persona(
     store: Any,
     agent_name: str,
@@ -55,28 +66,16 @@ def seed_persona(
     if not entries:
         return 0
 
-    # Ensure a session record exists for FK constraints; persona seeds use their own session.
+    # Ensure a session record exists for FK constraints.
     try:
         store.create_session(session_id)
     except Exception:
         pass  # session may already exist
 
-    # Idempotency: skip if the agent already has any memory
+    # Idempotency: skip if the agent already has *any* indexed memory record.
     try:
-        existing = store.list_memory_digests(
-            agent_id=agent_name, digest_type="identity", current_only=True, limit=1
-        )
-        if existing:
-            return 0
-        # Also check raw memory entries
         rows = store._rows(
-            "SELECT 1 FROM memory_entries WHERE agent_id = ? LIMIT 1",
-            [agent_name],
-        )
-        if rows:
-            return 0
-        rows = store._rows(
-            "SELECT 1 FROM thoughts WHERE agent_id = ? LIMIT 1",
+            "SELECT 1 FROM memory_fts WHERE agent_id = ? LIMIT 1",
             [agent_name],
         )
         if rows:
@@ -92,25 +91,17 @@ def seed_persona(
             continue
         try:
             if kind == "thought":
+                channel_id = _resolve_channel_id(store, entry.get("channel"))
                 store.append_thought(
                     agent_id=agent_name,
                     content=content,
                     session_id=session_id,
                     visibility=entry.get("visibility", "private"),
+                    channel_id=channel_id,
                 )
                 written += 1
             elif kind == "message":
-                channel = entry.get("channel")
-                channel_id = None
-                if channel:
-                    try:
-                        from robits.memory.sqlite import SOCIAL_PROFESSIONAL
-                        channel_id = store.get_or_create_channel(
-                            channel,
-                            social_distance=SOCIAL_PROFESSIONAL,
-                        )
-                    except Exception:
-                        pass
+                channel_id = _resolve_channel_id(store, entry.get("channel"))
                 store.append_message(
                     session_id=session_id,
                     sender_agent_id=agent_name,
