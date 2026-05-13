@@ -3438,6 +3438,179 @@ class ChannelScopedMemoryTests(unittest.TestCase):
         self.assertIn("Python", work[0]["content"])
 
 
+class PersonaRedesignTests(unittest.TestCase):
+    """Tests for #93 persona redesign: username/full_name schema and @mention detection."""
+
+    def setUp(self):
+        self.store_temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.store_temp.cleanup)
+        self.store = SQLiteMemoryStore(Path(self.store_temp.name) / "persona93.sqlite3")
+        self.addCleanup(self.store.close)
+
+    def test_load_personas_new_schema(self):
+        import tempfile as _tf, yaml as _yaml
+        from robits.core.persona import load_personas
+        content = [
+            {"username": "alex_chen", "full_name": "Alex Chen", "role": "SE",
+             "memories": [{"kind": "thought", "content": "I like Python."}]},
+            {"username": "jamie", "full_name": "Jamie Okonkwo", "role": "SE",
+             "memories": [{"kind": "thought", "content": "Distributed systems fan."}]},
+        ]
+        with _tf.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
+            _yaml.dump(content, f)
+            path = f.name
+        try:
+            result = load_personas(path)
+            self.assertIn("alex_chen", result)
+            self.assertIn("jamie", result)
+            self.assertEqual(result["alex_chen"]["role"], "SE")
+            self.assertEqual(result["alex_chen"]["full_name"], "Alex Chen")
+            self.assertEqual(len(result["alex_chen"]["entries"]), 1)
+        finally:
+            import os; os.unlink(path)
+
+    def test_load_personas_legacy_schema_still_works(self):
+        import tempfile as _tf, yaml as _yaml
+        from robits.core.persona import load_personas
+        content = [
+            {"agent": "SE", "memories": [{"kind": "thought", "content": "Old schema."}]},
+        ]
+        with _tf.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
+            _yaml.dump(content, f)
+            path = f.name
+        try:
+            result = load_personas(path)
+            self.assertIn("SE", result)
+            self.assertEqual(result["SE"]["role"], "SE")
+            self.assertEqual(len(result["SE"]["entries"]), 1)
+        finally:
+            import os; os.unlink(path)
+
+    def test_multiple_personas_same_role(self):
+        import tempfile as _tf, yaml as _yaml
+        from robits.core.persona import load_personas
+        content = [
+            {"username": "eng1", "full_name": "Alice Smith", "role": "SE",
+             "memories": [{"kind": "thought", "content": "Alice's memory."}]},
+            {"username": "eng2", "full_name": "Bob Jones", "role": "SE",
+             "memories": [{"kind": "thought", "content": "Bob's memory."}]},
+        ]
+        with _tf.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
+            _yaml.dump(content, f)
+            path = f.name
+        try:
+            result = load_personas(path)
+            self.assertIn("eng1", result)
+            self.assertIn("eng2", result)
+            self.assertEqual(result["eng1"]["full_name"], "Alice Smith")
+            self.assertEqual(result["eng2"]["full_name"], "Bob Jones")
+        finally:
+            import os; os.unlink(path)
+
+    def test_upsert_agent_stores_identity_fields(self):
+        self.store.upsert_agent(
+            "alex_chen", "SE", display_name="Alex Chen",
+            username="alex_chen", first_name="Alex", last_name="Chen", full_name="Alex Chen"
+        )
+        rows = self.store._rows("SELECT * FROM agents WHERE agent_id = 'alex_chen'")
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["username"], "alex_chen")
+        self.assertEqual(rows[0]["first_name"], "Alex")
+        self.assertEqual(rows[0]["last_name"], "Chen")
+        self.assertEqual(rows[0]["full_name"], "Alex Chen")
+
+    def test_get_agent_name_tokens_returns_all_forms(self):
+        self.store.upsert_agent(
+            "alex_chen", "SE", username="alex_chen",
+            first_name="Alex", last_name="Chen", full_name="Alex Chen"
+        )
+        tokens_map = self.store.get_agent_name_tokens()
+        self.assertIn("alex_chen", tokens_map)
+        tokens = tokens_map["alex_chen"]
+        self.assertIn("alex_chen", tokens)
+        self.assertIn("alex", tokens)
+        self.assertIn("chen", tokens)
+        self.assertIn("alex chen", tokens)
+
+    def test_build_employee_dict_uses_persona_usernames(self):
+        from robits.core.roles import build_employee_dict
+        persona_map = {
+            "alex_chen": {"role": "SE", "full_name": "Alex Chen", "entries": []},
+        }
+        d = build_employee_dict(persona_map)
+        self.assertIn("alex_chen", d)
+        self.assertNotIn("SE", d)
+        self.assertEqual(d["alex_chen"].name, "alex_chen")
+
+    def test_build_employee_dict_multiple_same_role(self):
+        from robits.core.roles import build_employee_dict
+        persona_map = {
+            "eng1": {"role": "SE", "full_name": "Alice Smith", "entries": []},
+            "eng2": {"role": "SE", "full_name": "Bob Jones", "entries": []},
+        }
+        d = build_employee_dict(persona_map)
+        self.assertIn("eng1", d)
+        self.assertIn("eng2", d)
+        self.assertNotIn("SE", d)
+
+    def test_mention_detection_at_username(self):
+        from robits.core.session import Session
+        self.store.upsert_agent("alex_chen", "SE", username="alex_chen",
+                                first_name="Alex", last_name="Chen", full_name="Alex Chen")
+        a = SimpleNamespace(name="CEO", lifecycle_state="active",
+                            interact=lambda *a, **kw: "",
+                            update_group_conversations=lambda m: None)
+        b_role = SimpleNamespace(name="alex_chen", lifecycle_state="active",
+                                 interact=lambda *a, **kw: "",
+                                 update_group_conversations=lambda m: None)
+        session = Session(participants={"CEO": a, "alex_chen": b_role})
+        old_store = main.memory_store
+        main.memory_store = self.store
+        try:
+            mentioned = session._detect_mentions("Hey @alex_chen can you review this?")
+            self.assertIn("alex_chen", mentioned)
+        finally:
+            main.memory_store = old_store
+
+    def test_mention_detection_by_first_name(self):
+        from robits.core.session import Session
+        self.store.upsert_agent("alex_chen", "SE", username="alex_chen",
+                                first_name="Alex", last_name="Chen", full_name="Alex Chen")
+        a = SimpleNamespace(name="CEO", lifecycle_state="active",
+                            interact=lambda *a, **kw: "",
+                            update_group_conversations=lambda m: None)
+        b_role = SimpleNamespace(name="alex_chen", lifecycle_state="active",
+                                 interact=lambda *a, **kw: "",
+                                 update_group_conversations=lambda m: None)
+        session = Session(participants={"CEO": a, "alex_chen": b_role})
+        old_store = main.memory_store
+        main.memory_store = self.store
+        try:
+            mentioned = session._detect_mentions("Alex, what do you think about this?")
+            self.assertIn("alex_chen", mentioned)
+        finally:
+            main.memory_store = old_store
+
+    def test_no_mention_when_no_match(self):
+        from robits.core.session import Session
+        self.store.upsert_agent("alex_chen", "SE", username="alex_chen",
+                                first_name="Alex", last_name="Chen", full_name="Alex Chen")
+        a = SimpleNamespace(name="CEO", lifecycle_state="active",
+                            interact=lambda *a, **kw: "",
+                            update_group_conversations=lambda m: None)
+        b_role = SimpleNamespace(name="alex_chen", lifecycle_state="active",
+                                 interact=lambda *a, **kw: "",
+                                 update_group_conversations=lambda m: None)
+        session = Session(participants={"CEO": a, "alex_chen": b_role})
+        old_store = main.memory_store
+        main.memory_store = self.store
+        try:
+            mentioned = session._detect_mentions("What does everyone think?")
+            self.assertNotIn("alex_chen", mentioned)
+        finally:
+            main.memory_store = old_store
+
+
 class PersonaSeedingTests(unittest.TestCase):
     """Tests for persona seeding into memory on first session."""
 

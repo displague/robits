@@ -259,14 +259,60 @@ class Human(Role):
         return text
 
 
-def build_employee_dict():
-    """Construct and return the default set of organisation participants."""
+_ROLE_CLASS_MAP = {
+    "SoftwareEngineer": SoftwareEngineer,
+    "SE": SoftwareEngineer,
+    "Ops": Ops,
+    "HR": HR,
+    "Angel": Angel,
+    "Samandriel": Angel,
+}
+
+
+def build_employee_dict(persona_map=None):
+    """Construct and return the default set of organisation participants.
+
+    If ``persona_map`` is provided ({username: {role, full_name, entries}}),
+    each persona is instantiated under its ``username`` key instead of the
+    default role-class name.  Personas override the default entry for their
+    role type when the role key is present in the default dict.
+    """
     employee_dict = {}
     employee_dict["CEO"] = Human()
     employee_dict["Ops"] = Ops(employee_dict)
     employee_dict["SE"] = SoftwareEngineer(employee_dict)
     employee_dict["HR"] = HR(employee_dict)
     employee_dict["Samandriel"] = Angel(employee_dict)
+
+    if persona_map:
+        # Track which pre-built default keys have been replaced by persona usernames
+        default_keys_replaced: set = set()
+        default_keys = set(employee_dict)
+        for username, info in persona_map.items():
+            if not isinstance(info, dict):
+                continue
+            role_key = info.get("role", username)
+            full_name = info.get("full_name", username)
+            RoleClass = _ROLE_CLASS_MAP.get(role_key)
+            if RoleClass is None:
+                continue
+            # Remove the pre-built default entry for this role type (once per role class)
+            default_key = next(
+                (k for k in default_keys if k not in default_keys_replaced
+                 and k in employee_dict and type(employee_dict[k]) is RoleClass),
+                None,
+            )
+            if default_key:
+                del employee_dict[default_key]
+                default_keys_replaced.add(default_key)
+            instance = RoleClass(employee_dict)
+            instance.name = username
+            instance.full_name = full_name
+            parts = full_name.split(None, 1)
+            instance.first_name = parts[0] if parts else username
+            instance.last_name = parts[1] if len(parts) > 1 else ""
+            employee_dict[username] = instance
+
     return employee_dict
 
 

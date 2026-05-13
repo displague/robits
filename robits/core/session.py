@@ -173,7 +173,10 @@ class Session:
         event_stream=None,
         clock_state=None,
     ):
-        self.participants = participants if participants is not None else build_employee_dict()
+        self.participants = (
+            participants if participants is not None
+            else build_employee_dict(_m.persona_entries or None)
+        )
         self.system = system if system is not None else System(self.participants)
         scheduler_names = list(self.participants)
         self.scheduler = scheduler if scheduler is not None else RoundRobinScheduler(scheduler_names)
@@ -213,9 +216,19 @@ class Session:
                 _m.memory_store.create_session(self.run_id)
                 for name, participant in self.participants.items():
                     role_type = type(participant).__name__
-                    _m.memory_store.upsert_agent(name, role_type, display_name=name)
-                    if _m.persona_entries.get(name):
-                        seed_persona(_m.memory_store, name, _m.persona_entries[name])
+                    persona = _m.persona_entries.get(name) or {}
+                    full_name = persona.get("full_name") if isinstance(persona, dict) else None
+                    _m.memory_store.upsert_agent(
+                        name, role_type,
+                        display_name=full_name or name,
+                        username=name,
+                        full_name=full_name,
+                        first_name=getattr(participant, "first_name", None),
+                        last_name=getattr(participant, "last_name", None),
+                    )
+                    entries = persona.get("entries") if isinstance(persona, dict) else persona
+                    if entries:
+                        seed_persona(_m.memory_store, name, entries)
                 self._org_chat_channel_id = _m.memory_store.get_or_create_channel(
                     CHANNEL_ORG_CHAT,
                     social_distance=SOCIAL_PROFESSIONAL,
@@ -709,6 +722,34 @@ class Session:
         """Resolve a role display name to its participant dict key for FK-safe storage."""
         return self._name_to_key.get(name, name)
 
+    def _detect_mentions(self, message: str) -> set:
+        """Return the set of participant keys mentioned in message (by @username or name token)."""
+        import re as _re
+        if not isinstance(message, str) or not message:
+            return set()
+        text_lower = message.lower()
+        # Normalise: replace non-alphanumeric (except @/_) with space for word-boundary matching
+        normalised = _re.sub(r"[^a-z0-9@_]+", " ", text_lower)
+        mentioned: set = set()
+        if _m.memory_store is not None:
+            try:
+                name_tokens = _m.memory_store.get_agent_name_tokens()
+                for agent_id, tokens in name_tokens.items():
+                    if agent_id not in self.participants:
+                        continue
+                    for token in tokens:
+                        if not token:
+                            continue
+                        norm_token = _re.sub(r"[^a-z0-9@_]+", " ", token.lower()).strip()
+                        if not norm_token:
+                            continue
+                        if f"@{norm_token}" in normalised or f" {norm_token} " in f" {normalised} ":
+                            mentioned.add(agent_id)
+                            break
+            except Exception:
+                pass
+        return mentioned
+
     def _effective_clock_state(self) -> str:
         """Return 'break' if current time falls within a configured break window, else clock_state."""
         schedule = getattr(_m, "break_schedule", [])
@@ -771,6 +812,10 @@ class Session:
         reminders = due_alarm_reminders(routed.receiver)
         if reminders:
             prompt = "\n".join(reminders + [prompt])
+        receiver_key = self._role_to_key.get(id(routed.receiver))
+        mentions = self._detect_mentions(message)
+        if receiver_key and receiver_key in mentions:
+            prompt = f"[Note: you were mentioned in this message]\n{prompt}"
         raw_prompt = prepend_verified_tool_results(
             prompt,
             self.recent_system_events() + system_events,

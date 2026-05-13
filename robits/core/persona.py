@@ -9,10 +9,12 @@ _VALID_KINDS = {"thought", "message", "entry", "digest"}
 _DEFAULT_PERSONAS_FILE = "personas.yaml"
 
 
-def load_personas(path: str | None = None) -> dict[str, list[dict]]:
-    """Load personas.yaml and return {agent_name: [entry_dicts]}.
+def load_personas(path: str | None = None) -> dict[str, dict]:
+    """Load personas.yaml and return {username: {role, full_name, entries}}.
 
-    Returns an empty dict if the file is absent or unparseable.
+    Supports both the new schema (username/role/full_name) and the legacy
+    schema (agent) for backwards compatibility.  Returns an empty dict if
+    the file is absent or unparseable.
     """
     try:
         import yaml
@@ -28,17 +30,35 @@ def load_personas(path: str | None = None) -> dict[str, list[dict]]:
         return {}
     if not isinstance(data, list):
         return {}
-    result: dict[str, list[dict]] = {}
+    result: dict[str, dict] = {}
     for item in data:
         if not isinstance(item, dict):
             continue
-        agent = item.get("agent")
         memories = item.get("memories")
-        if not agent or not isinstance(memories, list):
+        if not isinstance(memories, list):
             continue
-        result.setdefault(agent, []).extend(
-            m for m in memories if isinstance(m, dict) and m.get("kind") in _VALID_KINDS
-        )
+        valid_entries = [m for m in memories if isinstance(m, dict) and m.get("kind") in _VALID_KINDS]
+
+        # New schema: username + role + optional full_name
+        username = item.get("username")
+        role = item.get("role")
+        if username and role:
+            full_name = item.get("full_name", username)
+            result[username] = {
+                "role": role,
+                "full_name": full_name,
+                "entries": valid_entries,
+            }
+            continue
+
+        # Legacy schema: agent key
+        agent = item.get("agent")
+        if agent:
+            result[agent] = {
+                "role": agent,
+                "full_name": agent,
+                "entries": valid_entries,
+            }
     return result
 
 
