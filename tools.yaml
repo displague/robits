@@ -432,6 +432,9 @@
       cascade:
         type: boolean
         description: Also search inner source records of digests and surface parent digests for matches (default true).
+      channel_type:
+        type: string
+        description: "Restrict search to a specific conversation scope. Valid values: org_chat, agent_thought, agent_dm, therapist, family_member, family_group, work_peer, system. Omit to search across all channels."
     required:
       - agent_name
       - query
@@ -442,6 +445,7 @@
         query,
         limit=limit if limit is not None else 10,
         cascade=cascade if cascade is not None else True,
+        channel_type=channel_type if channel_type is not None else None,
     )
 - name: memory.list_digests
   system_tool: true
