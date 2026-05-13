@@ -7,6 +7,20 @@ import os
 import threading
 
 
+def _parse_break_schedule(raw: str) -> list:
+    """Parse 'HH:MM-HH:MM[,HH:MM-HH:MM...]' into a list of (start, end) string pairs."""
+    windows = []
+    for segment in (raw or "").split(","):
+        segment = segment.strip()
+        if not segment or "-" not in segment:
+            continue
+        parts = segment.split("-", 1)
+        start, end = parts[0].strip(), parts[1].strip()
+        if len(start) == 5 and len(end) == 5:
+            windows.append((start, end))
+    return windows
+
+
 class Config:
     """All env-derived settings and mutable runtime state in one injectable object.
 
@@ -104,6 +118,9 @@ class Config:
         self.personas_file = env.get("ROBITS_PERSONAS_FILE", "").strip() or None
         from robits.core.persona import load_personas
         self.persona_entries = load_personas(self.personas_file)
+
+        # --- schedule ---
+        self.break_schedule = _parse_break_schedule(env.get("ROBITS_BREAK_SCHEDULE", ""))
 
         # --- misc ---
         self.builtin_search_url = env.get("ROBITS_SEARCH_URL", "").strip()

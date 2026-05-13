@@ -3497,6 +3497,76 @@ class PersonaSeedingTests(unittest.TestCase):
         self.assertIn("honesty", rows[0]["content"])
 
 
+class BreakScheduleTests(unittest.TestCase):
+    """Tests for scheduled break windows and org.schedule tool."""
+
+    def test_parse_break_schedule_single_window(self):
+        from robits.core.config import _parse_break_schedule
+        result = _parse_break_schedule("12:00-13:00")
+        self.assertEqual(result, [("12:00", "13:00")])
+
+    def test_parse_break_schedule_multiple_windows(self):
+        from robits.core.config import _parse_break_schedule
+        result = _parse_break_schedule("12:00-13:00,15:00-15:30")
+        self.assertEqual(result, [("12:00", "13:00"), ("15:00", "15:30")])
+
+    def test_parse_break_schedule_empty(self):
+        from robits.core.config import _parse_break_schedule
+        self.assertEqual(_parse_break_schedule(""), [])
+        self.assertEqual(_parse_break_schedule(None), [])
+
+    def test_effective_clock_state_within_window(self):
+        from robits.core.session import Session
+        a = SimpleNamespace(name="A", lifecycle_state="active",
+                            interact=lambda *a, **kw: "hi",
+                            update_group_conversations=lambda m: None)
+        session = Session(participants={"A": a}, clock_state="on")
+        session.clock_state = "on"
+        old_schedule = main.break_schedule
+        main.break_schedule = [("00:00", "23:59")]
+        try:
+            self.assertEqual(session._effective_clock_state(), "break")
+        finally:
+            main.break_schedule = old_schedule
+
+    def test_effective_clock_state_outside_window(self):
+        from robits.core.session import Session
+        a = SimpleNamespace(name="A", lifecycle_state="active",
+                            interact=lambda *a, **kw: "hi",
+                            update_group_conversations=lambda m: None)
+        session = Session(participants={"A": a}, clock_state="on")
+        old_schedule = main.break_schedule
+        main.break_schedule = [("99:00", "99:30")]
+        try:
+            self.assertEqual(session._effective_clock_state(), "on")
+        finally:
+            main.break_schedule = old_schedule
+
+    def test_effective_clock_state_no_schedule(self):
+        from robits.core.session import Session
+        a = SimpleNamespace(name="A", lifecycle_state="active",
+                            interact=lambda *a, **kw: "hi",
+                            update_group_conversations=lambda m: None)
+        session = Session(participants={"A": a}, clock_state="off")
+        old_schedule = main.break_schedule
+        main.break_schedule = []
+        try:
+            self.assertEqual(session._effective_clock_state(), "off")
+        finally:
+            main.break_schedule = old_schedule
+
+    def test_break_schedule_in_agent_context(self):
+        from robits.core.context import agent_runtime_context
+        old_schedule = main.break_schedule
+        main.break_schedule = [("09:00", "09:30")]
+        try:
+            ctx = agent_runtime_context()
+            self.assertIn("break_schedule", ctx)
+            self.assertEqual(ctx["break_schedule"], [("09:00", "09:30")])
+        finally:
+            main.break_schedule = old_schedule
+
+
 class BreakClockStateTests(unittest.TestCase):
     """Tests for the 'break' clock state — transitional between on and off."""
 

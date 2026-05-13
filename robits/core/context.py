@@ -59,6 +59,10 @@ def agent_runtime_context(role=None):
     )
     canonical_id = role_name
     primary_id, secondary_id = _get_identity_digests(canonical_id)
+    effective_clock = (
+        getattr(role, "runtime_clock_state", None) or _m.clock_state
+    )
+    break_schedule = getattr(_m, "break_schedule", []) or None
     context = {
         "agent_name": role_name,
         "session_id": getattr(role, "runtime_session_id", None),
@@ -67,7 +71,8 @@ def agent_runtime_context(role=None):
         "current_date_local": now_local.date().isoformat(),
         "timezone": _runtime_timezone_name(local_tz),
         "location": _m.default_location or None,
-        "clock_state": _m.clock_state,
+        "clock_state": effective_clock,
+        "break_schedule": break_schedule,
         "identity_primary": primary_id,
         "identity_secondary": secondary_id,
     }

@@ -279,6 +279,31 @@
     required: []
   code: |
     return org_chat_read(employee_dict, limit=min(int(limit if limit is not None else 20), 100))
+- name: org.schedule
+  required_capabilities: []
+  owner_capability: basic
+  system_tool: false
+  grantable: true
+  description: >
+    Show the organisation's clock schedule: current clock state (on/break/off),
+    any configured break windows for today, and whether the org is currently in a
+    scheduled break.
+  parameters:
+    type: object
+    properties: {}
+    required: []
+  code: |
+    ctx = current_agent_context()
+    clock = ctx.get("clock_state", "on")
+    schedule = ctx.get("break_schedule", [])
+    lines = [f"Current clock state: {clock}"]
+    if schedule:
+        lines.append("Scheduled break windows:")
+        for start, end in schedule:
+            lines.append(f"  {start} – {end}")
+    else:
+        lines.append("No scheduled break windows configured.")
+    return "\n".join(lines)
 - name: work.todo
   required_capabilities: []
   owner_capability: basic

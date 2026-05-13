@@ -709,6 +709,16 @@ class Session:
         """Resolve a role display name to its participant dict key for FK-safe storage."""
         return self._name_to_key.get(name, name)
 
+    def _effective_clock_state(self) -> str:
+        """Return 'break' if current time falls within a configured break window, else clock_state."""
+        schedule = getattr(_m, "break_schedule", [])
+        if schedule:
+            now = datetime.now(timezone.utc).astimezone().strftime("%H:%M")
+            for start, end in schedule:
+                if start <= now < end:
+                    return "break"
+        return self.clock_state
+
     def sync_scheduler_participants(self):
         """Add active roles to and remove non-active roles from the scheduler."""
         for name, participant in self.participants.items():
@@ -722,8 +732,9 @@ class Session:
         role.runtime_event_stream = self.event_stream
         role.runtime_session_id = self.run_id
         role.runtime_tool_results = []
-        role.runtime_clock_state = self.clock_state
-        _modulate_temperature(role, self.clock_state)
+        effective_clock = self._effective_clock_state()
+        role.runtime_clock_state = effective_clock
+        _modulate_temperature(role, effective_clock)
         for name, participant in self.participants.items():
             if participant is role:
                 role.runtime_role_name = name
@@ -764,7 +775,7 @@ class Session:
             prompt,
             self.recent_system_events() + system_events,
         )
-        effective_org_lines = _m.org_chat_context_lines if self.clock_state == "on" else 0
+        effective_org_lines = _m.org_chat_context_lines if self._effective_clock_state() == "on" else 0
         org_context = format_org_chat_context(self.transcript, effective_org_lines)
         model_prompt = org_context + raw_prompt if org_context else raw_prompt
         self.prepare_agent_runtime(routed.receiver)
