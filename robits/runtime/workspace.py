@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import os
 from pathlib import Path, PurePosixPath
 
 MAX_READ_BYTES = 1024 * 1024
@@ -20,7 +19,7 @@ class AgentWorkspaceStore:
     """Private persistent filesystem roots for agents."""
 
     def __init__(self, root=None):
-        self.root = Path(root or os.environ.get("ROBITS_AGENT_WORKSPACE_ROOT", "var/agents"))
+        self.root = Path(root or "var/agents")
 
     def workspace_root(self, agent_name):
         return self.root / safe_agent_workspace_name(agent_name)

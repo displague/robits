@@ -91,7 +91,8 @@ class Config:
             0, int(env.get("ROBITS_GOAL_DIGEST_INTERVAL", "0"))
         )
 
-        self.agent_workspace_store = AgentWorkspaceStore()
+        self.agent_workspace_root = env.get("ROBITS_AGENT_WORKSPACE_ROOT", "var/agents")
+        self.agent_workspace_store = AgentWorkspaceStore(self.agent_workspace_root)
         self._org_workspace = (
             self.agent_workspace_store if self.memory_store is not None else None
         )
@@ -121,6 +122,7 @@ class Config:
 
         # --- schedule ---
         self.break_schedule = _parse_break_schedule(env.get("ROBITS_BREAK_SCHEDULE", ""))
+        self.tool_proposals_file = env.get("ROBITS_TOOL_PROPOSALS_FILE", "var/tool_proposals.json")
 
         # --- misc ---
         self.builtin_search_url = env.get("ROBITS_SEARCH_URL", "").strip()

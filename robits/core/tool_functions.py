@@ -1,7 +1,6 @@
 """Tool functions exposed to agents."""
 import ast
 import json
-import os
 from datetime import datetime, timezone
 from uuid import uuid4
 
@@ -181,9 +180,7 @@ def list_registered_tools(employee_dict, role_name=None, include_system=True, on
 def get_tool_proposal_store():
     """Return the global ToolProposalStore, initialising it on first access."""
     if _m.tool_proposal_store is None:
-        _m.tool_proposal_store = ToolProposalStore(
-            os.environ.get("ROBITS_TOOL_PROPOSALS_FILE", "var/tool_proposals.json")
-        )
+        _m.tool_proposal_store = ToolProposalStore(_m.tool_proposals_file)
     return _m.tool_proposal_store
 
 

@@ -1,7 +1,6 @@
 """Persona seeding: preload per-agent identity memories from a YAML configuration."""
 from __future__ import annotations
 
-import os
 from pathlib import Path
 from typing import Any
 
@@ -21,7 +20,7 @@ def load_personas(path: str | None = None) -> dict[str, dict]:
     except ImportError:
         return {}
 
-    resolved = Path(path or os.environ.get("ROBITS_PERSONAS_FILE", _DEFAULT_PERSONAS_FILE))
+    resolved = Path(path or _DEFAULT_PERSONAS_FILE)
     if not resolved.exists():
         return {}
     try:
