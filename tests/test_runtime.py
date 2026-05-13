@@ -3610,6 +3610,38 @@ class PersonaRedesignTests(unittest.TestCase):
         finally:
             main.memory_store = old_store
 
+    def test_mention_no_false_positive_common_word(self):
+        from robits.core.session import Session
+        self.store.upsert_agent("will_smith", "SE", username="will_smith",
+                                first_name="Will", last_name="Smith", full_name="Will Smith")
+        a = SimpleNamespace(name="CEO", lifecycle_state="active",
+                            interact=lambda *a, **kw: "",
+                            update_group_conversations=lambda m: None)
+        b_role = SimpleNamespace(name="will_smith", lifecycle_state="active",
+                                 interact=lambda *a, **kw: "",
+                                 update_group_conversations=lambda m: None)
+        session = Session(participants={"CEO": a, "will_smith": b_role})
+        old_store = main.memory_store
+        main.memory_store = self.store
+        try:
+            # lowercase "will" in a sentence should NOT trigger a mention
+            mentioned = session._detect_mentions("I will look into it, no worries.")
+            self.assertNotIn("will_smith", mentioned)
+            # Capitalised "Will" (addressing the agent) SHOULD trigger
+            mentioned2 = session._detect_mentions("Will, can you review the PR?")
+            self.assertIn("will_smith", mentioned2)
+        finally:
+            main.memory_store = old_store
+
+    def test_build_employee_dict_ceo_persona(self):
+        from robits.core.roles import build_employee_dict, Human
+        persona_map = {
+            "CEO": {"role": "CEO", "full_name": "CEO", "entries": []},
+        }
+        d = build_employee_dict(persona_map)
+        self.assertIn("CEO", d)
+        self.assertIsInstance(d["CEO"], Human)
+
 
 class PersonaSeedingTests(unittest.TestCase):
     """Tests for persona seeding into memory on first session."""
@@ -3687,6 +3719,34 @@ class BreakScheduleTests(unittest.TestCase):
         from robits.core.config import _parse_break_schedule
         self.assertEqual(_parse_break_schedule(""), [])
         self.assertEqual(_parse_break_schedule(None), [])
+
+    def test_parse_break_schedule_single_digit_hour(self):
+        from robits.core.config import _parse_break_schedule
+        result = _parse_break_schedule("9:00-9:30")
+        self.assertEqual(result, [("09:00", "09:30")])
+
+    def test_parse_break_schedule_rejects_midnight_wrap(self):
+        from robits.core.config import _parse_break_schedule
+        result = _parse_break_schedule("22:00-02:00")
+        self.assertEqual(result, [])
+
+    def test_parse_break_schedule_rejects_malformed(self):
+        from robits.core.config import _parse_break_schedule
+        result = _parse_break_schedule("notawindow,12:00-13:00")
+        self.assertEqual(result, [("12:00", "13:00")])
+
+    def test_effective_clock_state_off_not_promoted_to_break(self):
+        from robits.core.session import Session
+        a = SimpleNamespace(name="A", lifecycle_state="active",
+                            interact=lambda *a, **kw: "hi",
+                            update_group_conversations=lambda m: None)
+        session = Session(participants={"A": a}, clock_state="off")
+        old_schedule = main.break_schedule
+        main.break_schedule = [("00:00", "23:59")]
+        try:
+            self.assertEqual(session._effective_clock_state(), "off")
+        finally:
+            main.break_schedule = old_schedule
 
     def test_effective_clock_state_within_window(self):
         from robits.core.session import Session

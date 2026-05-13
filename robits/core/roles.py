@@ -217,7 +217,7 @@ class SoftwareEngineer(Role):
 class Human(Role):
     """CEO role — a human-in-the-loop participant that reads from stdin."""
 
-    def __init__(self):
+    def __init__(self, employee_dict=None):
         self.name = "CEO"
         self.template = "As CEO, you are responsible for making high-level decisions and setting the overall direction of the organization."
         self.lifecycle_state = "active"
@@ -266,6 +266,8 @@ _ROLE_CLASS_MAP = {
     "HR": HR,
     "Angel": Angel,
     "Samandriel": Angel,
+    "CEO": Human,
+    "Human": Human,
 }
 
 
@@ -295,6 +297,11 @@ def build_employee_dict(persona_map=None):
             full_name = info.get("full_name", username)
             RoleClass = _ROLE_CLASS_MAP.get(role_key)
             if RoleClass is None:
+                import logging
+                logging.warning(
+                    "robits: persona %r references unknown role %r — skipping",
+                    username, role_key,
+                )
                 continue
             # Remove the pre-built default entry for this role type (once per role class)
             default_key = next(

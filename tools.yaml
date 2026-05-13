@@ -285,9 +285,8 @@
   system_tool: false
   grantable: true
   description: >
-    Show the organisation's clock schedule: current clock state (on/break/off),
-    any configured break windows for today, and whether the org is currently in a
-    scheduled break.
+    Show the organisation's clock schedule: current effective clock state (on/break/off),
+    configured break windows, and whether a scheduled break is currently active.
   parameters:
     type: object
     properties: {}
@@ -296,7 +295,9 @@
     ctx = current_agent_context()
     clock = ctx.get("clock_state", "on")
     schedule = ctx.get("break_schedule", [])
+    in_scheduled_break = clock == "break" and bool(schedule)
     lines = [f"Current clock state: {clock}"]
+    lines.append(f"In scheduled break: {'yes' if in_scheduled_break else 'no'}")
     if schedule:
         lines.append("Scheduled break windows:")
         for start, end in schedule:

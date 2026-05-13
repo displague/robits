@@ -8,16 +8,35 @@ import threading
 
 
 def _parse_break_schedule(raw: str) -> list:
-    """Parse 'HH:MM-HH:MM[,HH:MM-HH:MM...]' into a list of (start, end) string pairs."""
+    """Parse 'HH:MM-HH:MM[,HH:MM-HH:MM...]' into a list of (start, end) string pairs.
+
+    Normalises single-digit hours (9:00 → 09:00). Rejects midnight-wrapping windows
+    (start >= end) and silently skips malformed segments.
+    """
+    import logging
     windows = []
     for segment in (raw or "").split(","):
         segment = segment.strip()
-        if not segment or "-" not in segment:
+        if not segment:
             continue
         parts = segment.split("-", 1)
-        start, end = parts[0].strip(), parts[1].strip()
-        if len(start) == 5 and len(end) == 5:
-            windows.append((start, end))
+        if len(parts) != 2:
+            logging.warning("robits: skipping malformed break schedule segment %r", segment)
+            continue
+        try:
+            from datetime import datetime as _dt
+            s = _dt.strptime(parts[0].strip(), "%H:%M").time()
+            e = _dt.strptime(parts[1].strip(), "%H:%M").time()
+        except ValueError:
+            logging.warning("robits: skipping unparseable break schedule segment %r", segment)
+            continue
+        if s >= e:
+            logging.warning(
+                "robits: skipping midnight-wrapping or zero-length break window %s-%s",
+                s.strftime("%H:%M"), e.strftime("%H:%M"),
+            )
+            continue
+        windows.append((s.strftime("%H:%M"), e.strftime("%H:%M")))
     return windows
 
 

@@ -723,13 +723,19 @@ class Session:
         return self._name_to_key.get(name, name)
 
     def _detect_mentions(self, message: str) -> set:
-        """Return the set of participant keys mentioned in message (by @username or name token)."""
+        """Return the set of participant keys mentioned in message.
+
+        Matching rules (in priority order):
+        - ``@username``: case-insensitive, always matched.
+        - Full name (multi-word): phrase match on normalised text, always matched.
+        - Single-word username / first / last name: only matched when the token
+          appears CAPITALISED in the original message, reducing false positives for
+          common English words (will, may, mark, grace, …).
+        """
         import re as _re
         if not isinstance(message, str) or not message:
             return set()
-        text_lower = message.lower()
-        # Normalise: replace non-alphanumeric (except @/_) with space for word-boundary matching
-        normalised = _re.sub(r"[^a-z0-9@_]+", " ", text_lower)
+        normalised = _re.sub(r"[^a-z0-9@_]+", " ", message.lower())
         mentioned: set = set()
         if _m.memory_store is not None:
             try:
@@ -743,7 +749,17 @@ class Session:
                         norm_token = _re.sub(r"[^a-z0-9@_]+", " ", token.lower()).strip()
                         if not norm_token:
                             continue
-                        if f"@{norm_token}" in normalised or f" {norm_token} " in f" {normalised} ":
+                        # @username — always match
+                        if f"@{norm_token}" in normalised:
+                            mentioned.add(agent_id)
+                            break
+                        # Multi-word full name — phrase match
+                        if " " in norm_token and f" {norm_token} " in f" {normalised} ":
+                            mentioned.add(agent_id)
+                            break
+                        # Single-word token — only if capitalised in original text
+                        cap = token[0].upper() + token[1:].lower() if len(token) > 1 else token.upper()
+                        if _re.search(r"\b" + _re.escape(cap) + r"\b", message):
                             mentioned.add(agent_id)
                             break
             except Exception:
@@ -751,13 +767,18 @@ class Session:
         return mentioned
 
     def _effective_clock_state(self) -> str:
-        """Return 'break' if current time falls within a configured break window, else clock_state."""
-        schedule = getattr(_m, "break_schedule", [])
-        if schedule:
-            now = datetime.now(timezone.utc).astimezone().strftime("%H:%M")
-            for start, end in schedule:
-                if start <= now < end:
-                    return "break"
+        """Return 'break' if inside a configured break window and base state is 'on', else clock_state.
+
+        Scheduled breaks only promote 'on' → 'break'; they never override 'off' (which
+        is more restrictive than 'break' and has a higher temperature multiplier).
+        """
+        if self.clock_state == "on":
+            schedule = getattr(_m, "break_schedule", [])
+            if schedule:
+                now = datetime.now(timezone.utc).astimezone().strftime("%H:%M")
+                for start, end in schedule:
+                    if start <= now < end:
+                        return "break"
         return self.clock_state
 
     def sync_scheduler_participants(self):
