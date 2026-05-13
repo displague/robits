@@ -191,7 +191,18 @@ class Session:
         self._last_identity_digest_meaningful_turn = 0
         self._last_goal_digest_meaningful_turn = 0
         self.last_receiver = self.participants.get("CEO") or next(iter(self.participants.values()))
-        self._name_to_key = {getattr(p, "name", k): k for k, p in self.participants.items()}
+        _name_map: dict = {}
+        for k, p in self.participants.items():
+            for form in (
+                k,
+                getattr(p, "name", None),
+                getattr(p, "runtime_role_name", None),
+                getattr(p, "full_name", None),
+                getattr(p, "first_name", None),
+            ):
+                if form and isinstance(form, str):
+                    _name_map.setdefault(form.lower(), k)
+        self._name_to_key = _name_map
         self._role_to_key = {id(p): k for k, p in self.participants.items()}
         _cs = clock_state or _m.clock_state
         self.clock_state = _cs if _cs in {"on", "off", "break"} else "on"
@@ -328,19 +339,20 @@ class Session:
         """Determine the next receiver for message; honour 'Name, prompt' directed syntax."""
         prompt_split = message.split(",", 1) if isinstance(message, str) else []
         if len(prompt_split) > 1:
-            receiver_name = prompt_split[0].strip()
-            if receiver_name in self.participants:
-                print(colored(f"// Directed to {receiver_name}", "grey"))
-                self.scheduler.observe(receiver_name)
+            receiver_token = prompt_split[0].strip()
+            resolved_key = self._name_to_key.get(receiver_token.lower())
+            if resolved_key is not None:
+                print(colored(f"// Directed to {resolved_key}", "grey"))
+                self.scheduler.observe(resolved_key)
                 self.event_stream.emit(
                     "message.routed",
                     self.run_id,
                     {
-                        "receiver": receiver_name,
+                        "receiver": resolved_key,
                         "directed": True,
                     },
                 )
-                return RoutedMessage(self.participants[receiver_name], prompt_split[1].strip(), True)
+                return RoutedMessage(self.participants[resolved_key], prompt_split[1].strip(), True)
 
         now = datetime.now(timezone.utc)
         tried: set = set()
@@ -720,7 +732,7 @@ class Session:
 
     def _canonical_agent_id(self, name):
         """Resolve a role display name to its participant dict key for FK-safe storage."""
-        return self._name_to_key.get(name, name)
+        return self._name_to_key.get(name.lower(), name) if isinstance(name, str) else name
 
     def _detect_mentions(self, message: str) -> set:
         """Return the set of participant keys mentioned in message.

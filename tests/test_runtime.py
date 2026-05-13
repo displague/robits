@@ -4029,5 +4029,85 @@ class EmbeddingSearchTests(unittest.TestCase):
         self.assertIn(256, self.store._vec_tables)
 
 
+class DirectedRoutingTests(unittest.TestCase):
+    """Tests for #96 — route_message resolves by username, full_name, role key, and first name."""
+
+    def _make_participants(self):
+        se = FakeRole("alex_chen", ["ok"])
+        se.runtime_role_name = "SE"
+        se.full_name = "Alex Chen"
+        se.first_name = "Alex"
+        hr = FakeRole("HR", ["ok"])
+        participants = {
+            "CEO": FakeRole("CEO", ["initial"]),
+            "Ops": FakeRole("Ops", ["ok"]),
+            "alex_chen": se,
+            "HR": hr,
+        }
+        return participants
+
+    def _route(self, participants, message, last="CEO"):
+        session = main.Session(participants=participants, run_id="routing-test")
+        with redirect_stdout(StringIO()):
+            return session.route_message(message, last)
+
+    def test_route_by_participant_key(self):
+        p = self._make_participants()
+        routed = self._route(p, "alex_chen, do this")
+        self.assertTrue(routed.directed)
+        self.assertIs(routed.receiver, p["alex_chen"])
+        self.assertEqual(routed.prompt, "do this")
+
+    def test_route_by_role_key_alias(self):
+        p = self._make_participants()
+        routed = self._route(p, "SE, do this")
+        self.assertTrue(routed.directed)
+        self.assertIs(routed.receiver, p["alex_chen"])
+        self.assertEqual(routed.prompt, "do this")
+
+    def test_route_by_full_name(self):
+        p = self._make_participants()
+        routed = self._route(p, "Alex Chen, do this")
+        self.assertTrue(routed.directed)
+        self.assertIs(routed.receiver, p["alex_chen"])
+
+    def test_route_by_first_name(self):
+        p = self._make_participants()
+        routed = self._route(p, "Alex, do this")
+        self.assertTrue(routed.directed)
+        self.assertIs(routed.receiver, p["alex_chen"])
+
+    def test_route_case_insensitive(self):
+        p = self._make_participants()
+        routed = self._route(p, "se, do this")
+        self.assertTrue(routed.directed)
+        self.assertIs(routed.receiver, p["alex_chen"])
+
+    def test_unknown_prefix_falls_through(self):
+        p = self._make_participants()
+        routed = self._route(p, "Finance, do this")
+        self.assertFalse(routed.directed)
+
+    def test_name_to_key_includes_role_alias(self):
+        p = self._make_participants()
+        session = main.Session(participants=p, run_id="routing-test")
+        self.assertEqual(session._name_to_key.get("se"), "alex_chen")
+
+    def test_name_to_key_includes_full_name(self):
+        p = self._make_participants()
+        session = main.Session(participants=p, run_id="routing-test")
+        self.assertEqual(session._name_to_key.get("alex chen"), "alex_chen")
+
+    def test_canonical_agent_id_resolves_role_alias(self):
+        p = self._make_participants()
+        session = main.Session(participants=p, run_id="routing-test")
+        self.assertEqual(session._canonical_agent_id("SE"), "alex_chen")
+
+    def test_canonical_agent_id_passthrough_for_unknown(self):
+        p = self._make_participants()
+        session = main.Session(participants=p, run_id="routing-test")
+        self.assertEqual(session._canonical_agent_id("Unknown"), "Unknown")
+
+
 if __name__ == "__main__":
     unittest.main()
