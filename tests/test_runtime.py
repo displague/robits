@@ -2801,6 +2801,13 @@ class OrgDigestTests(unittest.TestCase):
 class OrgChatReadToolFixTests(unittest.TestCase):
     """Tests for org_chat_read sandbox inclusion and kwargs fix."""
 
+    def setUp(self):
+        self._old_org_workspace = main._org_workspace
+        main._org_workspace = None
+
+    def tearDown(self):
+        main._org_workspace = self._old_org_workspace
+
     def test_org_chat_read_in_tool_exec_globals(self):
         """org_chat_read must be reachable from compiled tool code (not raise NameError)."""
         # Compile a tiny tool that calls org_chat_read and verify it doesn't NameError.

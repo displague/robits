@@ -82,7 +82,7 @@ def org_chat_read(employee_dict, limit=20):
         result = _m._org_workspace.read("org", "org_chat.jsonl")
     except Exception:
         return json.dumps({"lines": [], "note": "no org chat history yet"})
-    effective_limit = max(0, min(int(limit or 20), 100))
+    effective_limit = max(0, min(int(limit) if limit is not None else 20, 100))
     if effective_limit == 0:
         return json.dumps({"lines": [], "total": 0})
     all_lines = [ln for ln in result["content"].splitlines() if ln.strip()]

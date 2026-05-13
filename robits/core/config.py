@@ -5,6 +5,7 @@ sub-modules never need to import the top-level ``main`` entry point.
 """
 import os
 import threading
+from pathlib import Path
 
 
 def _parse_break_schedule(raw: str) -> list:
@@ -85,10 +86,9 @@ class Config:
         from robits.memory.sqlite import SQLiteMemoryStore
         from robits.runtime.workspace import AgentWorkspaceStore
 
-        self.memory_db_path = env.get("ROBITS_MEMORY_DB")
-        self.memory_store = (
-            SQLiteMemoryStore(self.memory_db_path) if self.memory_db_path else None
-        )
+        _default_db = Path.home() / ".local" / "share" / "robits" / "memory.db"
+        self.memory_db_path = env.get("ROBITS_MEMORY_DB") or str(_default_db)
+        self.memory_store = SQLiteMemoryStore(self.memory_db_path)
         self.memory_max_depth = max(0, int(env.get("ROBITS_MEMORY_MAX_DEPTH", "3")))
         self.memory_max_rows = max(1, int(env.get("ROBITS_MEMORY_MAX_ROWS", "100")))
         self.memory_cache_threshold = max(
