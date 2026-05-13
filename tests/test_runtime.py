@@ -3595,6 +3595,76 @@ class BreakClockStateTests(unittest.TestCase):
         self.assertIn("System note", result)
         self.assertIn("break", result)
 
+    def test_top_p_modulation_follows_clock_state(self):
+        from robits.core.session import _modulate_temperature
+        role = SimpleNamespace(temperature=0.7, base_temperature=0.7, top_p=0.9, base_top_p=0.9)
+        _modulate_temperature(role, "on")
+        on_top_p = role.top_p
+        role.top_p = 0.9
+        _modulate_temperature(role, "break")
+        break_top_p = role.top_p
+        role.top_p = 0.9
+        _modulate_temperature(role, "off")
+        off_top_p = role.top_p
+        self.assertLess(on_top_p, break_top_p)
+        self.assertLess(break_top_p, off_top_p)
+
+    def test_top_p_clamped_to_valid_range(self):
+        from robits.core.session import _modulate_temperature
+        role = SimpleNamespace(temperature=0.7, base_temperature=0.7, top_p=1.0, base_top_p=1.0)
+        _modulate_temperature(role, "off")
+        self.assertLessEqual(role.top_p, 1.0)
+        role2 = SimpleNamespace(temperature=0.7, base_temperature=0.7, top_p=0.1, base_top_p=0.1)
+        _modulate_temperature(role2, "on")
+        self.assertGreaterEqual(role2.top_p, 0.1)
+
+    def test_role_base_top_p_initialised(self):
+        from robits.core.roles import Role
+        role = Role("test_role", "template", {})
+        self.assertTrue(hasattr(role, "base_top_p"))
+        self.assertEqual(role.base_top_p, role.top_p)
+
+    def test_providers_pass_top_p(self):
+        from robits.core.providers import ChatCompletionsProvider
+        calls = []
+
+        class FakeClient:
+            class chat:
+                class completions:
+                    @staticmethod
+                    def create(**kwargs):
+                        calls.append(kwargs)
+                        msg = SimpleNamespace(
+                            tool_calls=None,
+                            content="done",
+                            model_dump=lambda: {"role": "assistant", "content": "done"},
+                        )
+                        return SimpleNamespace(choices=[SimpleNamespace(message=msg)])
+
+        role = SimpleNamespace(
+            name="tester",
+            runtime_role_name="tester",
+            max_tokens=100,
+            temperature=0.5,
+            top_p=0.75,
+            employee_dict={},
+            allowed_tools=set(),
+        )
+
+        class FakeRegistry:
+            def as_chat_completion_tools(self, role):
+                return []
+            def execute(self, *a, **kw):
+                return ""
+            def resolve_name(self, n):
+                return n
+
+        provider = ChatCompletionsProvider(FakeClient(), registry=FakeRegistry())
+        provider.generate(role, "model-x", "sender", [{"role": "user", "content": "hi"}])
+        self.assertTrue(calls)
+        self.assertIn("top_p", calls[0])
+        self.assertAlmostEqual(calls[0]["top_p"], 0.75)
+
 
 class EmbeddingSearchTests(unittest.TestCase):
     """Tests for embedding-based semantic search in SQLiteMemoryStore."""
