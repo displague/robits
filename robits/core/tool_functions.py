@@ -608,8 +608,11 @@ def builtin_url_fetch(employee_dict, url, max_chars=16000):
     url = url.strip()
     if not url.startswith(("http://", "https://")):
         return "Error: URL must start with http:// or https://"
+    try:
+        limit = max(1, min(int(max_chars if max_chars is not None else 16000), 128000))
+    except (TypeError, ValueError):
+        return "Error: max_chars must be an integer."
     import urllib.request
-    limit = max(256, min(int(max_chars or 16000), 128000))
     try:
         req = urllib.request.Request(url, headers={"User-Agent": "robits/1.0"})
         with urllib.request.urlopen(req, timeout=20) as resp:
@@ -619,6 +622,7 @@ def builtin_url_fetch(employee_dict, url, max_chars=16000):
         return f"Error: Failed to fetch URL: {exc}"
     if "html" in content_type.lower():
         import re as _re
+        raw = _re.sub(r"(?is)<(script|style)[^>]*>.*?</\1>", " ", raw)
         raw = _re.sub(r"<[^>]+>", " ", raw)
         raw = _re.sub(r"[ \t]{2,}", " ", raw)
     return raw[:limit]

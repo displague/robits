@@ -2038,6 +2038,85 @@ class BuiltinToolTests(unittest.TestCase):
             main.builtin_search_url = original
         self.assertTrue(result.startswith("Error:"))
 
+    # ── builtin.url_fetch ────────────────────────────────────────────────────
+
+    def test_url_fetch_validates_empty_url(self):
+        result = main.builtin_url_fetch({}, "")
+        self.assertTrue(result.startswith("Error:"))
+
+    def test_url_fetch_validates_non_http_scheme(self):
+        result = main.builtin_url_fetch({}, "ftp://example.com/file")
+        self.assertTrue(result.startswith("Error:"))
+
+    def test_url_fetch_validates_non_string_url(self):
+        result = main.builtin_url_fetch({}, None)
+        self.assertTrue(result.startswith("Error:"))
+
+    def test_url_fetch_validates_invalid_max_chars(self):
+        result = main.builtin_url_fetch({}, "https://example.com", max_chars="bad")
+        self.assertTrue(result.startswith("Error:"))
+
+    def test_url_fetch_returns_error_on_network_failure(self):
+        with patch("urllib.request.urlopen", side_effect=OSError("connection refused")):
+            result = main.builtin_url_fetch({}, "https://example.com")
+        self.assertTrue(result.startswith("Error:"))
+
+    def test_url_fetch_returns_plain_text_unchanged(self):
+        body = b"Hello, plain text world!"
+
+        class FakeResp:
+            headers = {"Content-Type": "text/plain"}
+            def read(self, n): return body
+            def __enter__(self): return self
+            def __exit__(self, *a): pass
+
+        with patch("urllib.request.urlopen", return_value=FakeResp()):
+            result = main.builtin_url_fetch({}, "https://example.com")
+        self.assertEqual(result, "Hello, plain text world!")
+
+    def test_url_fetch_strips_html_tags(self):
+        body = b"<html><body><p>Hello <b>world</b></p></body></html>"
+
+        class FakeResp:
+            headers = {"Content-Type": "text/html; charset=utf-8"}
+            def read(self, n): return body
+            def __enter__(self): return self
+            def __exit__(self, *a): pass
+
+        with patch("urllib.request.urlopen", return_value=FakeResp()):
+            result = main.builtin_url_fetch({}, "https://example.com")
+        self.assertNotIn("<b>", result)
+        self.assertIn("Hello", result)
+        self.assertIn("world", result)
+
+    def test_url_fetch_strips_script_and_style_content(self):
+        body = b"<html><head><style>body{color:red}</style><script>alert(1)</script></head><body>Content</body></html>"
+
+        class FakeResp:
+            headers = {"Content-Type": "text/html"}
+            def read(self, n): return body
+            def __enter__(self): return self
+            def __exit__(self, *a): pass
+
+        with patch("urllib.request.urlopen", return_value=FakeResp()):
+            result = main.builtin_url_fetch({}, "https://example.com")
+        self.assertNotIn("color:red", result)
+        self.assertNotIn("alert(1)", result)
+        self.assertIn("Content", result)
+
+    def test_url_fetch_respects_max_chars(self):
+        body = b"A" * 1000
+
+        class FakeResp:
+            headers = {"Content-Type": "text/plain"}
+            def read(self, n): return body[:n]
+            def __enter__(self): return self
+            def __exit__(self, *a): pass
+
+        with patch("urllib.request.urlopen", return_value=FakeResp()):
+            result = main.builtin_url_fetch({}, "https://example.com", max_chars=50)
+        self.assertEqual(len(result), 50)
+
     # ── builtin.file_search ──────────────────────────────────────────────────
 
     def test_file_search_finds_text_in_workspace_file(self):
