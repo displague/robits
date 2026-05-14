@@ -600,6 +600,34 @@ def builtin_web_search(employee_dict, query, num_results=5):
     return json.dumps(results[:n], sort_keys=True)
 
 
+def builtin_url_fetch(employee_dict, url, max_chars=16000):
+    """Fetch the text content of a URL and return it (truncated to max_chars)."""
+    del employee_dict
+    if not isinstance(url, str) or not url.strip():
+        return "Error: URL must be a non-empty string."
+    url = url.strip()
+    if not url.startswith(("http://", "https://")):
+        return "Error: URL must start with http:// or https://"
+    try:
+        limit = max(1, min(int(max_chars if max_chars is not None else 16000), 128000))
+    except (TypeError, ValueError):
+        return "Error: max_chars must be an integer."
+    import urllib.request
+    try:
+        req = urllib.request.Request(url, headers={"User-Agent": "robits/1.0"})
+        with urllib.request.urlopen(req, timeout=20) as resp:
+            content_type = resp.headers.get("Content-Type", "")
+            raw = resp.read(limit).decode("utf-8", errors="replace")
+    except Exception as exc:
+        return f"Error: Failed to fetch URL: {exc}"
+    if "html" in content_type.lower():
+        import re as _re
+        raw = _re.sub(r"(?is)<(script|style)[^>]*>.*?</\1>", " ", raw)
+        raw = _re.sub(r"<[^>]+>", " ", raw)
+        raw = _re.sub(r"[ \t]{2,}", " ", raw)
+    return raw[:limit]
+
+
 def builtin_file_search(employee_dict, agent_name, query, path="", max_results=10):
     """Search an agent's workspace files for lines matching query."""
     del employee_dict
@@ -816,6 +844,7 @@ SANDBOX_GLOBALS = {
     "rollout_tool_proposal": rollout_tool_proposal,
     "approve_and_rollout_proposal": approve_and_rollout_proposal,
     "builtin_web_search": builtin_web_search,
+    "builtin_url_fetch": builtin_url_fetch,
     "builtin_file_search": builtin_file_search,
     "builtin_shell_run": builtin_shell_run,
     "builtin_tool_search": builtin_tool_search,

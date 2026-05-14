@@ -80,6 +80,7 @@ from robits.core.tool_functions import (  # noqa: E402
     memory_list_digests,
     memory_expand_digest,
     builtin_web_search,
+    builtin_url_fetch,
     builtin_file_search,
     builtin_shell_run,
     builtin_tool_search,

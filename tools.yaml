@@ -829,6 +829,23 @@
       - query
   code: |
     return builtin_web_search(employee_dict, query, num_results=num_results if num_results is not None else 5)
+- name: builtin.url_fetch
+  grantable: true
+  owner_capability: agent
+  description: Fetch the text content of a URL (plain text or markdown preferred). Returns up to max_chars characters. Use for reading documentation, articles, or any public web page.
+  parameters:
+    type: object
+    properties:
+      url:
+        type: string
+        description: The URL to fetch (must start with http:// or https://).
+      max_chars:
+        type: integer
+        description: Maximum characters to return (default 16000, max 128000).
+    required:
+      - url
+  code: |
+    return builtin_url_fetch(employee_dict, url, max_chars=max_chars if max_chars is not None else 16000)
 - name: builtin.file_search
   grantable: true
   owner_capability: agent

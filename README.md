@@ -150,7 +150,7 @@ For local models with embedding support, `sqlite-vec` is included in `requiremen
 | `ROBITS_CHEAP_MODEL` | `ROBITS_MODEL` | Model for cheap interactions |
 | `ROBITS_COSTLY_MODEL` | `ROBITS_MODEL` | Model for SE and costly interactions |
 | `ROBITS_PROVIDER_API` | `responses` | `responses` or `chat` / `chat_completions` |
-| `ROBITS_MEMORY_DB` | — | SQLite path; memory tools disabled when unset |
+| `ROBITS_MEMORY_DB` | `~/.local/share/robits/memory.db` | SQLite path for memory storage |
 | `ROBITS_CLOCK_STATE` | `on` | Base clock state: `on`, `break`, or `off` |
 | `ROBITS_BREAK_SCHEDULE` | — | Scheduled break windows, e.g. `12:00-13:00,15:00-15:30` |
 | `ROBITS_PERSONAS_FILE` | `personas.yaml` | Path to persona seed file |
@@ -192,12 +192,15 @@ python main.py --prompt "Ops, say hello to HR" --turns 1 --log run.log
 
 `run_local.py` seeds a fresh memory database and delegates to `main.py`. It demonstrates persona recall with pre-seeded work and personal memories.
 
+### Ollama
+
+Ollama exposes an OpenAI-compatible Responses API at `/v1/responses` (since v0.13.3), but it is **non-stateful**: `previous_response_id` is silently ignored. This breaks the within-turn tool-call continuation in `ResponsesProvider`. Use `ROBITS_PROVIDER_API=chat` with Ollama:
+
 ```bash
 OPENAI_BASE_URL=http://127.0.0.1:11434/v1/ \
 OPENAI_API_KEY=ollama \
 OPENAI_MODEL=granite4.1:3b \
 ROBITS_PROVIDER_API=chat \
-ROBITS_MEMORY_DB=/tmp/robits_local.db \
 ROBITS_EMBEDDING_MODEL=granite-embedding:latest \
 ROBITS_EMBEDDING_BASE_URL=http://127.0.0.1:11434/v1/ \
 ROBITS_EMBEDDING_API_KEY=ollama \
@@ -205,6 +208,22 @@ python run_local.py --prompt "SE, do you have experience with Python or cooking?
 ```
 
 Tested with `granite4.1:3b` for tool calling; `granite-embedding:latest` and `embeddinggemma:latest` for embeddings. Models are pulled with `ollama pull <name>`.
+
+### LM Studio
+
+LM Studio's Responses API is stateful and honours `previous_response_id`, so the default `ROBITS_PROVIDER_API=responses` works correctly:
+
+```bash
+OPENAI_BASE_URL=http://127.0.0.1:1234/v1/ \
+OPENAI_API_KEY=lmstudio \
+OPENAI_MODEL=granite-4-micro \
+ROBITS_EMBEDDING_MODEL=text-embedding-nomic-embed-text-v1.5 \
+ROBITS_EMBEDDING_BASE_URL=http://127.0.0.1:1234/v1/ \
+ROBITS_EMBEDDING_API_KEY=lmstudio \
+python run_local.py --prompt "SE, do you have experience with Python or cooking?"
+```
+
+Note: tool calling and remote MCP must be enabled in LM Studio's Developer Settings.
 
 ## Testing
 
