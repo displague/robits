@@ -150,6 +150,7 @@ For local models with embedding support, `sqlite-vec` is included in `requiremen
 | `ROBITS_CHEAP_MODEL` | `ROBITS_MODEL` | Model for cheap interactions |
 | `ROBITS_COSTLY_MODEL` | `ROBITS_MODEL` | Model for SE and costly interactions |
 | `ROBITS_PROVIDER_API` | `responses` | `responses` or `chat` / `chat_completions` |
+| `ROBITS_MAX_CONTEXT_TOKENS` | `0` (unlimited) | Trim conversation history to this token budget before each model call (~4 chars/token). Useful for small-context local models (e.g. `3500` for 4k-context models) |
 | `ROBITS_MEMORY_DB` | `~/.local/share/robits/memory.db` | SQLite path for memory storage |
 | `ROBITS_CLOCK_STATE` | `on` | Base clock state: `on`, `break`, or `off` |
 | `ROBITS_BREAK_SCHEDULE` | — | Scheduled break windows, e.g. `12:00-13:00,15:00-15:30` |

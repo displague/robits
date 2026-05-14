@@ -69,6 +69,7 @@ class Config:
         self.costly_model = env.get("ROBITS_COSTLY_MODEL", _default)
         self.cheap_model = env.get("ROBITS_CHEAP_MODEL", _default)
         self.provider_api = env.get("ROBITS_PROVIDER_API", "responses").strip().lower()
+        self.max_context_tokens = max(0, int(env.get("ROBITS_MAX_CONTEXT_TOKENS", "0")))
 
         # --- concurrency / retry ---
         self.max_parallelism = max(1, int(env.get("ROBITS_MAX_PARALLELISM", "1")))

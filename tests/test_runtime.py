@@ -4110,6 +4110,54 @@ class EmbeddingSearchTests(unittest.TestCase):
         contents = [r.content for r in results]
         self.assertTrue(any("xyz99" in c for c in contents))
 
+    def test_search_semantic_cascades_parent_digest(self):
+        if not self.store._vec_enabled:
+            self.skipTest("sqlite-vec not available")
+        self.store.create_session("s_casc")
+        msg_id = self.store.append_message(
+            "s_casc", "zoe", "zoe", "semantic cascade unique_sem_kw"
+        )
+        digest_id = self.store.append_memory_digest(
+            "Semantic cascade digest summary.",
+            [{"source_table": "messages", "source_id": msg_id}],
+            agent_id="zoe",
+            session_id="s_casc",
+        )
+        vector = [0.5] * 768
+        self.store.store_embedding("messages", str(msg_id), vector, "test-model")
+        results = self.store.search_semantic(
+            "cascade", "test-model", agent_id="zoe", limit=10,
+            _query_vector=vector,
+        )
+        kinds = {r.kind for r in results}
+        record_ids = {r.record_id for r in results}
+        self.assertIn("memory_digest", kinds)
+        self.assertIn(str(digest_id), record_ids)
+
+    def test_search_semantic_cascade_deduplicates_existing_digest_hits(self):
+        if not self.store._vec_enabled:
+            self.skipTest("sqlite-vec not available")
+        self.store.create_session("s_dedup")
+        msg_id = self.store.append_message(
+            "s_dedup", "zoe", "zoe", "dedup cascade content"
+        )
+        digest_id = self.store.append_memory_digest(
+            "Digest already in semantic hits.",
+            [{"source_table": "messages", "source_id": msg_id}],
+            agent_id="zoe",
+            session_id="s_dedup",
+        )
+        msg_vector = [0.3] * 768
+        digest_vector = [0.3] * 768
+        self.store.store_embedding("messages", str(msg_id), msg_vector, "test-model")
+        self.store.store_embedding("memory_digests", str(digest_id), digest_vector, "test-model")
+        results = self.store.search_semantic(
+            "dedup", "test-model", agent_id="zoe", limit=10,
+            _query_vector=digest_vector,
+        )
+        digest_hits = [r for r in results if r.kind == "memory_digest" and r.record_id == str(digest_id)]
+        self.assertEqual(len(digest_hits), 1)
+
     def test_vec_table_created_per_dimension(self):
         if not self.store._vec_enabled:
             self.skipTest("sqlite-vec not available")
@@ -4210,6 +4258,117 @@ class DirectedRoutingTests(unittest.TestCase):
             routed = session.route_message("SE, implement the feature", "CEO")
         self.assertTrue(routed.directed)
         self.assertEqual(routed.receiver.name, "alex_chen")
+
+
+class ContextTrimTests(unittest.TestCase):
+    """Tests for #103 — ROBITS_MAX_CONTEXT_TOKENS trims conversation_history before generate()."""
+
+    def _fake_role(self, history):
+        """Build a minimal role-like object with the given conversation history."""
+        role = SimpleNamespace(
+            name="SE",
+            template="system prompt",
+            conversation_history={"SE": history},
+            max_tokens=200,
+            temperature=0.7,
+            top_p=0.9,
+            employee_dict={},
+        )
+        return role
+
+    def test_trimming_disabled_when_zero(self):
+        """No trimming when ROBITS_MAX_CONTEXT_TOKENS=0 (default)."""
+        captured = []
+
+        def fake_generate(role, model, sender, messages):
+            captured.append(list(messages))
+            return "ok"
+
+        history = [
+            {"role": "system", "content": "sys"},
+            {"role": "user", "content": "msg1", "name": "CEO"},
+            {"role": "assistant", "content": "rep1", "name": "SE"},
+            {"role": "user", "content": "msg2", "name": "CEO"},
+        ]
+        role = self._fake_role(history)
+        expected_len = len(history)
+        orig = main._config.max_context_tokens
+        orig_provider = main._config.model_provider
+        try:
+            main._config.max_context_tokens = 0
+            main._config.model_provider = SimpleNamespace(generate=fake_generate)
+            with redirect_stdout(StringIO()):
+                from robits.core.roles import interact
+                interact(role, "model", "CEO", None)
+        finally:
+            main._config.max_context_tokens = orig
+            main._config.model_provider = orig_provider
+        self.assertEqual(len(captured[0]), expected_len)
+
+    def test_trimming_drops_oldest_non_system_messages(self):
+        """Old turns are dropped to fit within the token budget; system + newest kept."""
+        captured = []
+
+        def fake_generate(role, model, sender, messages):
+            captured.append(list(messages))
+            return "ok"
+
+        long_content = "x" * 400
+        history = [
+            {"role": "system", "content": "sys"},
+            {"role": "user", "content": long_content, "name": "CEO"},
+            {"role": "assistant", "content": long_content, "name": "SE"},
+            {"role": "user", "content": "new msg", "name": "CEO"},
+        ]
+        role = self._fake_role(history)
+        orig = main._config.max_context_tokens
+        orig_provider = main._config.model_provider
+        try:
+            # Budget: 50 tokens * 4 chars = 200 chars — fits system + new msg but not the long history
+            main._config.max_context_tokens = 50
+            main._config.model_provider = SimpleNamespace(generate=fake_generate)
+            with redirect_stdout(StringIO()):
+                from robits.core.roles import interact
+                interact(role, "model", "CEO", None)
+        finally:
+            main._config.max_context_tokens = orig
+            main._config.model_provider = orig_provider
+        sent = captured[0]
+        self.assertEqual(sent[0]["role"], "system")
+        self.assertLess(len(sent), len(history))
+        # Most recent message must always be present
+        self.assertTrue(any(m.get("content") == "new msg" for m in sent))
+
+    def test_trimming_does_not_mutate_conversation_history(self):
+        """Trimming is applied only to the messages sent to generate(), not stored history."""
+        captured = []
+
+        def fake_generate(role, model, sender, messages):
+            captured.append(list(messages))
+            return "ok"
+
+        long_content = "y" * 400
+        history = [
+            {"role": "system", "content": "sys"},
+            {"role": "user", "content": long_content, "name": "CEO"},
+            {"role": "assistant", "content": long_content, "name": "SE"},
+            {"role": "user", "content": "check history", "name": "CEO"},
+        ]
+        role = self._fake_role(history)
+        orig_len = len(history)
+        orig = main._config.max_context_tokens
+        orig_provider = main._config.model_provider
+        try:
+            main._config.max_context_tokens = 50
+            main._config.model_provider = SimpleNamespace(generate=fake_generate)
+            with redirect_stdout(StringIO()):
+                from robits.core.roles import interact
+                interact(role, "model", "CEO", None)
+        finally:
+            main._config.max_context_tokens = orig
+            main._config.model_provider = orig_provider
+        # The stored history grows by one (the assistant reply), trimming must not shrink it
+        self.assertGreaterEqual(len(role.conversation_history["SE"]), orig_len)
 
 
 if __name__ == "__main__":

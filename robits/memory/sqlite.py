@@ -1905,6 +1905,8 @@ class SQLiteMemoryStore:
         }
         results = []
         seen_ids: set[str] = set()
+        cascade_ids: dict[str, list[str]] = {}
+        cascade_digest_ids: set[str] = set()
         for row in rows:
             source_table = row["source_table"]
             source_id = row["source_id"]
@@ -1936,9 +1938,63 @@ class SQLiteMemoryStore:
                     created_at=rec.get("created_at", ""),
                 )
             )
+            if source_table == "memory_digests":
+                cascade_digest_ids.add(source_id)
+            else:
+                cascade_ids.setdefault(source_table, []).append(source_id)
             if len(results) >= limit:
                 break
-        return results
+
+        # Cascade: surface parent digests for non-digest semantic hits,
+        # matching the behaviour of search_cascade for FTS results.
+        for source_table, source_ids in cascade_ids.items():
+            if not source_ids:
+                continue
+            placeholders = ", ".join("?" * len(source_ids))
+            params: list[Any] = [source_table] + source_ids
+            agent_filter = ""
+            if agent_id is not None:
+                agent_filter = "AND md.agent_id = ?"
+                params.append(agent_id)
+            params.append(limit)
+            try:
+                cascade_rows = self.connection.execute(
+                    f"""
+                    SELECT DISTINCT md.digest_id, md.agent_id, md.session_id,
+                           md.source, md.relationship_type, md.conversation_type,
+                           md.created_at, md.content
+                    FROM memory_digest_sources mds
+                    JOIN memory_digests md ON md.digest_id = mds.digest_id
+                    WHERE mds.source_table = ?
+                      AND mds.source_id IN ({placeholders})
+                      AND md.accessibility = 'agent'
+                      AND md.system_only = 0
+                      {agent_filter}
+                    LIMIT ?
+                    """,
+                    params,
+                ).fetchall()
+            except Exception:
+                continue
+            for crow in cascade_rows:
+                digest_id_str = str(crow["digest_id"])
+                if digest_id_str not in cascade_digest_ids:
+                    results.append(
+                        MemorySearchResult(
+                            kind="memory_digest",
+                            record_id=digest_id_str,
+                            content=crow["content"],
+                            agent_id=crow["agent_id"],
+                            session_id=crow["session_id"],
+                            source=crow["source"],
+                            relationship_type=crow["relationship_type"],
+                            conversation_type=crow["conversation_type"],
+                            created_at=crow["created_at"],
+                        )
+                    )
+                    cascade_digest_ids.add(digest_id_str)
+
+        return results[:limit]
 
     def search_hybrid(
         self,
