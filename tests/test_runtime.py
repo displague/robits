@@ -361,7 +361,8 @@ class RuntimeTests(unittest.TestCase):
         self.assertEqual(sre["capabilities"], ["kubeapi", "operator"])
         self.assertEqual(
             sre["tool_grants"],
-            ["agent.*", "memory.expand_digest", "memory.list_digests", "memory.search"],
+            ["agent.*", "builtin.url_fetch", "builtin.web_search",
+             "memory.expand_digest", "memory.list_digests", "memory.search"],
         )
 
     def test_archive_role_rejects_protected_roles_and_exits_eligible_role(self):
@@ -665,6 +666,8 @@ class RuntimeTests(unittest.TestCase):
 
         tool_names = {tool["name"] for tool in fake_client.responses.create.calls[0]["tools"]}
         self.assertIn("tools__propose", tool_names)
+        self.assertIn("builtin__web_search", tool_names)
+        self.assertIn("builtin__url_fetch", tool_names)
         self.assertNotIn("org__create_role", tool_names)
 
     def test_disallowed_tool_call_is_rejected_at_runtime(self):
@@ -2140,6 +2143,7 @@ class BuiltinToolTests(unittest.TestCase):
             sorted(builtin_names),
             sorted([
                 "builtin.web_search",
+                "builtin.url_fetch",
                 "builtin.file_search",
                 "builtin.shell_run",
                 "builtin.tool_search",
