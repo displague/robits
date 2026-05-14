@@ -82,7 +82,7 @@ def org_chat_read(employee_dict, limit=20):
         result = _m._org_workspace.read("org", "org_chat.jsonl")
     except Exception:
         return json.dumps({"lines": [], "note": "no org chat history yet"})
-    effective_limit = max(0, min(int(limit or 20), 100))
+    effective_limit = max(0, min(int(limit) if limit is not None else 20, 100))
     if effective_limit == 0:
         return json.dumps({"lines": [], "total": 0})
     all_lines = [ln for ln in result["content"].splitlines() if ln.strip()]
@@ -382,7 +382,7 @@ def approve_and_rollout_proposal(employee_dict, role_name, tool_name=None, propo
 def _require_memory_store():
     """Return (memory_store, None) or (None, error_string) if no store is configured."""
     if _m.memory_store is None:
-        return None, "Error: No SQLite memory store is configured."
+        return None, "Error: [runtime.config] memory tools unavailable — ROBITS_MEMORY_DB not set; skip memory calls this session"
     return _m.memory_store, None
 
 
