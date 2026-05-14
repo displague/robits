@@ -16,6 +16,8 @@ description: Work on the Robits Python organization-simulation runtime, includin
 7. Keep sandbox behavior optional and fakeable; unit tests must not require containers or a local cluster.
 8. Prefer focused tests around parsing, tool loading, lifecycle, observability, sandbox metadata, and execution before relying on a live model smoke test.
 9. For Responses API work, test function-call routing with fake response items before using a live endpoint.
+   - **LM Studio**: stateful Responses API — `previous_response_id` is honoured; use the default `ROBITS_PROVIDER_API=responses`.
+   - **Ollama**: non-stateful Responses API (since v0.13.3) — `previous_response_id` is silently ignored, breaking the within-turn tool-call continuation in `ResponsesProvider`. Use `ROBITS_PROVIDER_API=chat` with Ollama (tracked in #102).
 10. For scheduling work, keep `Session` and `RoundRobinScheduler` unit-testable with fake roles before adding parallel execution.
 
 ## Validation
