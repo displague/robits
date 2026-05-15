@@ -444,12 +444,12 @@
   description: >
     Spawn a stateless sub-agent to perform a focused task and return its result.
     The sub-agent has no conversation history and no memory tools — it receives only
-    the task description and a limited operational tool set. Use this to delegate
-    web research, URL fetching, or tool discovery without burdening your own context.
-    By default the sub-agent may call: agent.think, builtin.web_search,
-    builtin.url_fetch, builtin.tool_search. You may extend this by listing additional
-    tool names in the `tools` parameter; memory, org, lifecycle, proposal, and
-    agent.spawn tools are always blocked from sub-agents.
+    the task description and an operational tool set. Use this to delegate
+    web research, URL fetching, shell commands, or tool discovery without burdening
+    your own context. By default all builtin.* tools and agent.think are available.
+    Supplying `tools` replaces the defaults with that explicit list; memory, org,
+    lifecycle, proposal, and agent.spawn tools are always blocked from sub-agents.
+    Tool names must be explicit (no wildcards).
   parameters:
     type: object
     properties:
@@ -463,9 +463,9 @@
         items:
           type: string
         description: >
-          Optional list of tool names to grant beyond the defaults (e.g.
-          ["builtin.shell_run"] for compute tasks). Memory and org tools are
-          always excluded regardless of this list.
+          Optional explicit list of tool names to give the sub-agent instead of the
+          defaults (e.g. ["builtin.shell_run", "agent.think"]). Wildcards are not
+          accepted. Memory and org tools are always excluded regardless of this list.
       model:
         type: string
         description: >
@@ -473,7 +473,7 @@
     required:
       - task
   code: |
-    return agent_spawn(employee_dict, task, tools=tools if tools is not None else [], model=model if model is not None else "")
+    return agent_spawn(employee_dict, task, tools=tools, model=model if model is not None else "")
 - name: memory.search
   system_tool: true
   grantable: true

@@ -2186,6 +2186,26 @@ class BuiltinToolTests(unittest.TestCase):
         result = main.agent_spawn({}, "do something", tools=["memory.search"])
         self.assertTrue(result.startswith("Error:"))
 
+    def test_agent_spawn_rejects_wildcard_tools(self):
+        """Wildcard tool entries must be rejected before any filtering."""
+        result = main.agent_spawn({}, "do something", tools=["agent.*"])
+        self.assertTrue(result.startswith("Error:"), result)
+
+    def test_agent_spawn_rejects_non_string_tools(self):
+        """Non-string entries in tools must be rejected."""
+        result = main.agent_spawn({}, "do something", tools=[None, 42])
+        self.assertTrue(result.startswith("Error:"), result)
+
+    def test_agent_spawn_defaults_include_all_builtins(self):
+        """Default tool set should contain all builtin.* tools."""
+        from robits.core.tool_functions import _SUBAGENT_DEFAULT_TOOLS
+        expected = {
+            "builtin.web_search", "builtin.url_fetch", "builtin.file_search",
+            "builtin.shell_run", "builtin.tool_search", "builtin.mcp_call",
+            "builtin.computer_use", "builtin.image_generation",
+        }
+        self.assertTrue(expected.issubset(_SUBAGENT_DEFAULT_TOOLS), _SUBAGENT_DEFAULT_TOOLS)
+
     def test_agent_spawn_calls_chat_completions_provider(self):
         """agent_spawn should call ChatCompletionsProvider.generate() with the task."""
         captured = {}
@@ -2212,7 +2232,7 @@ class BuiltinToolTests(unittest.TestCase):
             )
 
     def test_agent_spawn_custom_tools_merged_and_filtered(self):
-        """Caller-supplied tools are added but blocked prefixes are still stripped."""
+        """Caller-supplied tools replace defaults; blocked prefixes are still stripped."""
         captured = {}
 
         def fake_generate(self_provider, sub_role, model, caller, messages):

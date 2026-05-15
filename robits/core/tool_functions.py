@@ -796,7 +796,12 @@ _SUBAGENT_DEFAULT_TOOLS = frozenset({
     "agent.think",
     "builtin.web_search",
     "builtin.url_fetch",
+    "builtin.file_search",
+    "builtin.shell_run",
     "builtin.tool_search",
+    "builtin.mcp_call",
+    "builtin.computer_use",
+    "builtin.image_generation",
 })
 
 _SUBAGENT_BLOCKED_PREFIXES = (
@@ -820,7 +825,13 @@ def agent_spawn(employee_dict, task, tools=None, model=None):
         return "Error: task must be a non-empty string."
 
     # Build the allowed tool set for the sub-agent.
-    requested = set(tools) if tools else set(_SUBAGENT_DEFAULT_TOOLS)
+    if tools is None or not tools:
+        requested = set(_SUBAGENT_DEFAULT_TOOLS)
+    else:
+        bad = [t for t in tools if not isinstance(t, str) or "*" in t]
+        if bad:
+            return f"Error: tools entries must be explicit string names (no wildcards): {bad!r}"
+        requested = set(tools)
     allowed = {
         t for t in requested
         if not any(t == b or t.startswith(b) for b in _SUBAGENT_BLOCKED_PREFIXES)
