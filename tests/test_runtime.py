@@ -2648,6 +2648,34 @@ class SessionMemoryCaptureTests(unittest.TestCase):
         self.assertEqual(rows[0]["content"], "my private thought")
         self.assertEqual(rows[0]["visibility"], "private")
 
+    def test_model_thinking_stored_as_thought_linked_to_response_message(self):
+        session = self._make_session()
+        session.record_turn("A", "SE", "what color?", "Green.", thinking="I considered blue but chose green.")
+        thought_rows = self.store.connection.execute(
+            "SELECT content, source, metadata_json FROM thoughts WHERE agent_id = 'SE'"
+        ).fetchall()
+        self.assertEqual(len(thought_rows), 1)
+        self.assertEqual(thought_rows[0]["content"], "I considered blue but chose green.")
+        self.assertEqual(thought_rows[0]["source"], "model_thinking")
+        import json as _json
+        meta = _json.loads(thought_rows[0]["metadata_json"])
+        # linked_message_id should point to the response message row
+        self.assertIn("linked_message_id", meta)
+        response_msg = self.store.connection.execute(
+            "SELECT content FROM messages WHERE message_id = ?",
+            (meta["linked_message_id"],),
+        ).fetchone()
+        self.assertIsNotNone(response_msg)
+        self.assertEqual(response_msg["content"], "Green.")
+
+    def test_model_thinking_not_stored_when_no_response(self):
+        session = self._make_session()
+        session.record_turn("A", "SE", "hello", "", thinking="silent thought")
+        thought_rows = self.store.connection.execute(
+            "SELECT COUNT(*) AS n FROM thoughts WHERE source = 'model_thinking'"
+        ).fetchone()
+        self.assertEqual(thought_rows["n"], 0)
+
     def test_session_ended_at_set_on_run_completion(self):
         session = self._make_session()
         session.turns_completed = 0
@@ -3177,6 +3205,128 @@ class ReasoningEffortTests(unittest.TestCase):
             main._reasoning_effort_env = old_effort
 
         self.assertEqual(captured.get("reasoning"), {"effort": "high"})
+
+
+class ThinkingExtractionTests(unittest.TestCase):
+    """Tests for _extract_thinking_chat and _extract_thinking_responses."""
+
+    def _make_role(self):
+        return SimpleNamespace(
+            name="SE",
+            max_tokens=100,
+            temperature=0.0,
+            employee_dict=None,
+            allowed_tools=set(),
+            runtime_thinking=None,
+        )
+
+    # --- _extract_thinking_chat ---
+
+    def test_reasoning_content_field(self):
+        msg = SimpleNamespace(content="Green.", reasoning_content="I like blue but green more.")
+        text, thinking = main._extract_thinking_chat(msg)
+        self.assertEqual(text, "Green.")
+        self.assertEqual(thinking, "I like blue but green more.")
+
+    def test_thinking_field(self):
+        msg = SimpleNamespace(content="Sure.", thinking="hidden reasoning", reasoning_content=None)
+        text, thinking = main._extract_thinking_chat(msg)
+        self.assertEqual(text, "Sure.")
+        self.assertEqual(thinking, "hidden reasoning")
+
+    def test_content_blocks_thinking_type(self):
+        blocks = [
+            {"type": "thinking", "thinking": "private thoughts"},
+            {"type": "text", "text": "public answer"},
+        ]
+        msg = SimpleNamespace(content=blocks, reasoning_content=None, thinking=None)
+        text, thinking = main._extract_thinking_chat(msg)
+        self.assertEqual(text, "public answer")
+        self.assertEqual(thinking, "private thoughts")
+
+    def test_inline_think_tags_stripped(self):
+        msg = SimpleNamespace(
+            content="<think>considered this</think>Final answer.",
+            reasoning_content=None,
+            thinking=None,
+        )
+        text, thinking = main._extract_thinking_chat(msg)
+        self.assertEqual(text, "Final answer.")
+        self.assertEqual(thinking, "considered this")
+
+    def test_inline_thinking_tags_stripped(self):
+        msg = SimpleNamespace(
+            content="<thinking>deep thoughts</thinking>Result.",
+            reasoning_content=None,
+            thinking=None,
+        )
+        text, thinking = main._extract_thinking_chat(msg)
+        self.assertEqual(text, "Result.")
+        self.assertEqual(thinking, "deep thoughts")
+
+    def test_no_thinking_returns_none(self):
+        msg = SimpleNamespace(content="plain answer", reasoning_content=None, thinking=None)
+        text, thinking = main._extract_thinking_chat(msg)
+        self.assertEqual(text, "plain answer")
+        self.assertIsNone(thinking)
+
+    # --- _extract_thinking_responses ---
+
+    def test_reasoning_output_item(self):
+        part = SimpleNamespace(text="reasoning text")
+        item = SimpleNamespace(type="reasoning", content=[part], text=None)
+        response = SimpleNamespace(output=[item])
+        thinking = main._extract_thinking_responses(response)
+        self.assertEqual(thinking, "reasoning text")
+
+    def test_no_reasoning_output_returns_none(self):
+        item = SimpleNamespace(type="message", content=[], text="hi")
+        response = SimpleNamespace(output=[item])
+        thinking = main._extract_thinking_responses(response)
+        self.assertIsNone(thinking)
+
+    # --- provider sets runtime_thinking ---
+
+    def test_chat_provider_sets_runtime_thinking(self):
+        role = self._make_role()
+        msg = SimpleNamespace(
+            content="<think>I deliberated</think>Answer.",
+            tool_calls=None,
+            reasoning_content=None,
+            thinking=None,
+            model_dump=lambda: {},
+        )
+        response = SimpleNamespace(choices=[SimpleNamespace(message=msg)])
+        registry = SimpleNamespace(
+            as_chat_completion_tools=lambda r: [],
+            resolve_name=lambda n: n,
+        )
+        provider = main.ChatCompletionsProvider.__new__(main.ChatCompletionsProvider)
+        provider.registry = registry
+        provider.client = SimpleNamespace(
+            chat=SimpleNamespace(
+                completions=SimpleNamespace(create=lambda **kw: response)
+            )
+        )
+        result = provider.generate(role, "model", "CEO", [])
+        self.assertEqual(result, "Answer.")
+        self.assertEqual(role.runtime_thinking, "I deliberated")
+
+    def test_responses_provider_sets_runtime_thinking(self):
+        role = self._make_role()
+        part = SimpleNamespace(text="thought about it")
+        reasoning_item = SimpleNamespace(type="reasoning", content=[part], text=None)
+        text_item = SimpleNamespace(type="message", content=[SimpleNamespace(type="output_text", text="Done.")])
+        response = SimpleNamespace(id="r1", output=[reasoning_item, text_item], output_text=None)
+        registry = SimpleNamespace(as_responses_tools=lambda r: [])
+        provider = main.ResponsesProvider.__new__(main.ResponsesProvider)
+        provider.registry = registry
+        provider.client = SimpleNamespace(
+            responses=SimpleNamespace(create=lambda **kw: response)
+        )
+        result = provider.generate(role, "model", "CEO", [])
+        self.assertEqual(result, "Done.")
+        self.assertEqual(role.runtime_thinking, "thought about it")
 
 
 class OrgChatReadToolTests(unittest.TestCase):
