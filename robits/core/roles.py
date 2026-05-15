@@ -36,10 +36,25 @@ def interact(self, model, sender, message):
         messages.insert(0, {"role": "system", "content": system_content})
     if message is not None and message != "":
         messages.append({"role": "user", "content": message, "name": sender})
-    from termcolor import colored
-    print(colored(f"\n---\n// {self.name}\n{json.dumps(messages)}\n---\n", "grey"))
 
-    content = _m.model_provider.generate(self, model, sender, messages)
+    send_messages = messages
+    if _m.max_context_tokens > 0 and len(messages) > 1:
+        budget = _m.max_context_tokens * 4  # ~4 chars per token
+        system_msg = messages[0]
+        kept = []
+        chars = len(json.dumps(system_msg))
+        for msg in reversed(messages[1:]):
+            msg_chars = len(json.dumps(msg))
+            if chars + msg_chars > budget and kept:
+                break
+            kept.insert(0, msg)
+            chars += msg_chars
+        send_messages = [system_msg] + kept
+
+    from termcolor import colored
+    print(colored(f"\n---\n// {self.name}\n{json.dumps(send_messages)}\n---\n", "grey"))
+
+    content = _m.model_provider.generate(self, model, sender, send_messages)
     message = {"role": "assistant", "content": content or "", "name": self.name}
 
     message["content"] = message["content"].strip()
