@@ -3290,6 +3290,29 @@ class ThinkingExtractionTests(unittest.TestCase):
         self.assertEqual(text, "plain answer")
         self.assertIsNone(thinking)
 
+    def test_multiple_think_blocks_all_collected(self):
+        msg = SimpleNamespace(
+            content="<think>block one</think>middle<think>block two</think>end.",
+            reasoning_content=None,
+            thinking=None,
+        )
+        text, thinking = main._extract_thinking_chat(msg)
+        self.assertEqual(text, "middleend.")
+        self.assertIn("block one", thinking)
+        self.assertIn("block two", thinking)
+
+    def test_reasoning_content_plus_inline_tag_stripped(self):
+        # Some providers populate both reasoning_content AND embed a tag in content.
+        msg = SimpleNamespace(
+            content="<think>leaked tag</think>Final answer.",
+            reasoning_content="structured reasoning",
+            thinking=None,
+        )
+        text, thinking = main._extract_thinking_chat(msg)
+        self.assertEqual(text, "Final answer.")
+        self.assertIn("structured reasoning", thinking)
+        self.assertIn("leaked tag", thinking)
+
     # --- _extract_thinking_responses ---
 
     def test_reasoning_output_item(self):
