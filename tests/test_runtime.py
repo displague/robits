@@ -3274,10 +3274,17 @@ class ThinkingExtractionTests(unittest.TestCase):
 
     def test_reasoning_output_item(self):
         part = SimpleNamespace(text="reasoning text")
-        item = SimpleNamespace(type="reasoning", content=[part], text=None)
+        item = SimpleNamespace(type="reasoning", content=[part], text=None, summary=[])
         response = SimpleNamespace(output=[item])
         thinking = main._extract_thinking_responses(response)
         self.assertEqual(thinking, "reasoning text")
+
+    def test_reasoning_summary_text_item(self):
+        summary_part = SimpleNamespace(type="summary_text", text="brief summary of thinking")
+        item = SimpleNamespace(type="reasoning", summary=[summary_part], content=[], text=None)
+        response = SimpleNamespace(output=[item])
+        thinking = main._extract_thinking_responses(response)
+        self.assertEqual(thinking, "brief summary of thinking")
 
     def test_no_reasoning_output_returns_none(self):
         item = SimpleNamespace(type="message", content=[], text="hi")
@@ -3315,7 +3322,7 @@ class ThinkingExtractionTests(unittest.TestCase):
     def test_responses_provider_sets_runtime_thinking(self):
         role = self._make_role()
         part = SimpleNamespace(text="thought about it")
-        reasoning_item = SimpleNamespace(type="reasoning", content=[part], text=None)
+        reasoning_item = SimpleNamespace(type="reasoning", content=[part], text=None, summary=[])
         text_item = SimpleNamespace(type="message", content=[SimpleNamespace(type="output_text", text="Done.")])
         response = SimpleNamespace(id="r1", output=[reasoning_item, text_item], output_text=None)
         registry = SimpleNamespace(as_responses_tools=lambda r: [])

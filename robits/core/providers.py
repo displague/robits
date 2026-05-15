@@ -117,16 +117,29 @@ def _extract_thinking_chat(message):
 
 
 def _extract_thinking_responses(response):
-    """Extract reasoning text from a Responses API response; return text or None."""
+    """Extract reasoning text from a Responses API response; return text or None.
+
+    Handles three shapes:
+    - item.summary[{type:"summary_text", text:...}]  (reasoning.summary:"auto")
+    - item.content[{text:...}]                        (raw content blocks)
+    - item.text                                        (direct text field)
+    """
     chunks = []
     for item in getattr(response, "output", []) or []:
         if getattr(item, "type", None) != "reasoning":
             continue
+        # OpenAI Responses API with reasoning.summary:"auto"
+        for part in getattr(item, "summary", []) or []:
+            if getattr(part, "type", None) == "summary_text":
+                text = getattr(part, "text", None)
+                if text:
+                    chunks.append(text)
+        # Raw content blocks
         for part in getattr(item, "content", []) or []:
             text = getattr(part, "text", None)
             if text:
                 chunks.append(text)
-        # Some providers surface text directly on the reasoning item
+        # Direct text field (some providers)
         text = getattr(item, "text", None)
         if text:
             chunks.append(text)
