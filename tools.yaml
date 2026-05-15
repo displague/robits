@@ -438,6 +438,42 @@
       - minutes
   code: |
     return agent_wait(employee_dict, minutes)
+- name: agent.spawn
+  grantable: true
+  owner_capability: agent
+  description: >
+    Spawn a stateless sub-agent to perform a focused task and return its result.
+    The sub-agent has no conversation history and no memory tools — it receives only
+    the task description and an operational tool set. Use this to delegate
+    web research, URL fetching, shell commands, or tool discovery without burdening
+    your own context. By default all builtin.* tools and agent.think are available.
+    Supplying `tools` replaces the defaults with that explicit list; memory, org,
+    lifecycle, proposal, and agent.spawn tools are always blocked from sub-agents.
+    Tool names must be explicit (no wildcards).
+  parameters:
+    type: object
+    properties:
+      task:
+        type: string
+        description: >
+          The task for the sub-agent to perform. Be specific: include what to look for,
+          what to return, and any relevant context the sub-agent will need.
+      tools:
+        type: array
+        items:
+          type: string
+        description: >
+          Optional explicit list of tool names to give the sub-agent instead of the
+          defaults (e.g. ["builtin.shell_run", "agent.think"]). Wildcards are not
+          accepted. Memory and org tools are always excluded regardless of this list.
+      model:
+        type: string
+        description: >
+          Optional model override. Defaults to the configured cheap model.
+    required:
+      - task
+  code: |
+    return agent_spawn(employee_dict, task, tools=tools, model=model if model is not None else "")
 - name: memory.search
   system_tool: true
   grantable: true

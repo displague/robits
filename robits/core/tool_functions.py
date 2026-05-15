@@ -792,6 +792,90 @@ def agent_wait(employee_dict, minutes):
     return ""
 
 
+_SUBAGENT_DEFAULT_TOOLS = frozenset({
+    "agent.think",
+    "builtin.web_search",
+    "builtin.url_fetch",
+    "builtin.file_search",
+    "builtin.shell_run",
+    "builtin.tool_search",
+    "builtin.mcp_call",
+    "builtin.computer_use",
+    "builtin.image_generation",
+})
+
+_SUBAGENT_BLOCKED_PREFIXES = (
+    "memory.",
+    "org.",
+    "tools.",
+    "agent.spawn",
+    "agent.wait",
+)
+
+
+def agent_spawn(employee_dict, task, tools=None, model=None):
+    """Spawn a stateless sub-agent to perform a focused task and return its response.
+
+    The sub-agent receives a minimal system prompt and the task only — no conversation
+    history and no memory tools.  It may call operational tools (web search, URL fetch,
+    etc.) before returning a final answer.
+    """
+    caller_name = _m.active_tool_caller_name or "unknown"
+    if not isinstance(task, str) or not task.strip():
+        return "Error: task must be a non-empty string."
+
+    # Build the allowed tool set for the sub-agent.
+    if tools is None or not tools:
+        requested = set(_SUBAGENT_DEFAULT_TOOLS)
+    else:
+        bad = [t for t in tools if not isinstance(t, str) or "*" in t]
+        if bad:
+            return f"Error: tools entries must be explicit string names (no wildcards): {bad!r}"
+        requested = set(tools)
+    allowed = {
+        t for t in requested
+        if not any(t == b or t.startswith(b) for b in _SUBAGENT_BLOCKED_PREFIXES)
+    }
+    if not allowed:
+        return "Error: no permitted tools remain after filtering blocked prefixes."
+
+    from types import SimpleNamespace
+    sub_role = SimpleNamespace(
+        name=f"{caller_name}:subtask",
+        allowed_tools=allowed,
+        capabilities=getattr(_m.active_tool_caller, "capabilities", set()),
+        employee_dict=employee_dict,
+        max_tokens=getattr(_m.active_tool_caller, "max_tokens", 400),
+        temperature=0.3,
+        top_p=0.9,
+        runtime_event_stream=None,
+        runtime_session_id=None,
+        runtime_role_name=f"{caller_name}:subtask",
+        runtime_tool_results=[],
+    )
+
+    use_model = model if isinstance(model, str) and model.strip() else _m.cheap_model
+    messages = [
+        {
+            "role": "system",
+            "content": (
+                f"You are a focused task executor working on behalf of {caller_name}. "
+                "Perform the given task using available tools and return a concise result. "
+                "Do not ask clarifying questions. Do not retain memory between calls."
+            ),
+        },
+        {"role": "user", "content": task.strip()},
+    ]
+
+    from robits.core.providers import ChatCompletionsProvider
+    provider = ChatCompletionsProvider(_m.client, _m.tool_registry)
+    try:
+        result = provider.generate(sub_role, use_model, caller_name, messages)
+    except Exception as exc:
+        return f"Error: sub-agent failed: {exc}"
+    return result or "Error: sub-agent returned no response."
+
+
 def _restore_wait_state(agent_name, role):
     """Check workspace for a persisted wait state and restore it on role if still active."""
     if _m.agent_workspace_store is None:
@@ -853,4 +937,5 @@ SANDBOX_GLOBALS = {
     "builtin_image_generation": builtin_image_generation,
     "agent_think": agent_think,
     "agent_wait": agent_wait,
+    "agent_spawn": agent_spawn,
 }
