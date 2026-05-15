@@ -437,7 +437,7 @@ class Session:
             return "", system_events
         return message, []
 
-    def record_turn(self, sender, receiver, prompt, response, directed=False, system_events=None):
+    def record_turn(self, sender, receiver, prompt, response, directed=False, system_events=None, thinking=None):
         """Append a TranscriptEntry, update memory, and trigger auto-digest if due."""
         meaningful_response = bool(str(response or "").strip())
         system_events = system_events or []
@@ -489,8 +489,9 @@ class Session:
                         channel_id=msg_channel_id,
                         sender_phase=sender_phase,
                     )
+                response_msg_id = None
                 if meaningful_response and response:
-                    _m.memory_store.append_message(
+                    response_msg_id = _m.memory_store.append_message(
                         session_id=self.run_id,
                         sender_agent_id=canonical_receiver,
                         receiver_agent_id=canonical_sender,
@@ -500,6 +501,24 @@ class Session:
                         channel_id=msg_channel_id,
                         sender_phase=receiver_phase,
                     )
+                if thinking and response_msg_id is not None:
+                    thought_channel_id = self._get_thought_channel_id(canonical_receiver)
+                    try:
+                        _m.memory_store.append_thought(
+                            agent_id=canonical_receiver,
+                            content=thinking,
+                            session_id=self.run_id,
+                            visibility="private",
+                            source="model_thinking",
+                            channel_id=thought_channel_id,
+                            metadata={"linked_message_id": response_msg_id},
+                        )
+                    except Exception as _e:
+                        self.event_stream.emit(
+                            "thought.store_failed",
+                            self.run_id,
+                            {"agent_id": canonical_receiver, "error": str(_e)},
+                        )
                 if msg_channel_id is not None and sender_phase is not None and receiver_phase is not None:
                     try:
                         social_distance = _m.memory_store.get_channel_social_distance(
@@ -806,6 +825,7 @@ class Session:
         role.runtime_event_stream = self.event_stream
         role.runtime_session_id = self.run_id
         role.runtime_tool_results = []
+        role.runtime_thinking = None
         effective_clock = self._effective_clock_state()
         role.runtime_clock_state = effective_clock
         _modulate_temperature(role, effective_clock)
@@ -859,6 +879,7 @@ class Session:
         self.prepare_agent_runtime(routed.receiver)
         response = routed.receiver.interact(sender.name, model_prompt)
         response = "" if response is None else response
+        model_thinking = getattr(routed.receiver, "runtime_thinking", None)
         native_tool_events = list(getattr(routed.receiver, "runtime_tool_results", []))
         if native_tool_events:
             system_events.extend(native_tool_events)
@@ -877,6 +898,7 @@ class Session:
             response=response,
             directed=routed.directed,
             system_events=system_events,
+            thinking=model_thinking,
         )
         self.last_receiver = routed.receiver
         return response

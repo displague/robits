@@ -61,6 +61,117 @@ def _with_model_retries(operation):
             attempt += 1
 
 
+def _extract_thinking_chat(message):
+    """Extract thinking/reasoning from a ChatCompletions message.
+
+    Returns (content_text, thinking_text | None). content_text has inline
+    thinking tags stripped so only the final expressed output is returned.
+    """
+    import re as _re
+
+    _inline_pattern = _re.compile(
+        r"<(?P<tag>think|thinking)>(?P<body>.*?)</(?P=tag)>",
+        flags=_re.DOTALL | _re.IGNORECASE,
+    )
+
+    def _strip_inline_thinking(text):
+        if not text:
+            return "", None
+        blocks = []
+        for match in _inline_pattern.finditer(text):
+            body = (match.group("body") or "").strip()
+            if body:
+                blocks.append(body)
+        clean = _inline_pattern.sub("", text).strip()
+        return clean, ("\n\n".join(blocks) if blocks else None)
+
+    def _join_thinking(*parts):
+        chunks = []
+        for part in parts:
+            if part and isinstance(part, str) and part.strip():
+                chunks.append(part.strip())
+        return "\n\n".join(chunks) if chunks else None
+
+    # Anthropic-compat via OpenAI endpoint: content is a list of typed blocks
+    content = getattr(message, "content", None)
+    if isinstance(content, list):
+        text_parts = []
+        thinking_parts = []
+        for block in content:
+            if hasattr(block, "type"):
+                btype, btext = block.type, getattr(block, "text", None)
+                bthink = getattr(block, "thinking", None)
+            elif isinstance(block, dict):
+                btype = block.get("type")
+                btext = block.get("text")
+                bthink = block.get("thinking")
+            else:
+                continue
+            if btype == "thinking":
+                if bthink:
+                    thinking_parts.append(bthink)
+                elif btext:
+                    thinking_parts.append(btext)
+            elif btext:
+                text_parts.append(btext)
+        content_text, inline_thinking = _strip_inline_thinking("".join(text_parts))
+        typed_thinking = "\n\n".join([str(t).strip() for t in thinking_parts if str(t).strip()]) or None
+        reasoning = getattr(message, "reasoning_content", None)
+        thinking_attr = getattr(message, "thinking", None)
+        provider_thinking = None
+        if reasoning and isinstance(reasoning, str):
+            provider_thinking = reasoning
+        elif thinking_attr and isinstance(thinking_attr, str):
+            provider_thinking = thinking_attr
+        return content_text, _join_thinking(provider_thinking, typed_thinking, inline_thinking)
+
+    # String content: always strip inline tags, then merge with any provider-specific fields.
+    content_str = str(content) if content is not None else ""
+    content_text, inline_thinking = _strip_inline_thinking(content_str)
+
+    # DeepSeek-R1 / QwQ via OpenAI-compat: dedicated reasoning_content field
+    reasoning = getattr(message, "reasoning_content", None)
+    # Some providers expose a top-level thinking field
+    thinking_attr = getattr(message, "thinking", None)
+    provider_thinking = None
+    if reasoning and isinstance(reasoning, str):
+        provider_thinking = reasoning
+    elif thinking_attr and isinstance(thinking_attr, str):
+        provider_thinking = thinking_attr
+
+    return content_text, _join_thinking(provider_thinking, inline_thinking)
+
+
+def _extract_thinking_responses(response):
+    """Extract reasoning text from a Responses API response; return text or None.
+
+    Handles three shapes:
+    - item.summary[{type:"summary_text", text:...}]  (reasoning.summary:"auto")
+    - item.content[{text:...}]                        (raw content blocks)
+    - item.text                                        (direct text field)
+    """
+    chunks = []
+    for item in getattr(response, "output", []) or []:
+        if getattr(item, "type", None) != "reasoning":
+            continue
+        # OpenAI Responses API with reasoning.summary:"auto"
+        for part in getattr(item, "summary", []) or []:
+            if getattr(part, "type", None) == "summary_text":
+                text = getattr(part, "text", None)
+                if text:
+                    chunks.append(text)
+        # Raw content blocks
+        for part in getattr(item, "content", []) or []:
+            text = getattr(part, "text", None)
+            if text:
+                chunks.append(text)
+        # Direct text field (some providers)
+        text = getattr(item, "text", None)
+        if text:
+            chunks.append(text)
+    return "\n\n".join(chunks) if chunks else None
+
+
 def _emit_role_tool_event(role, event_type, payload):
     """Emit a tool event to the role's event stream and persist it to the memory store."""
     event_stream = getattr(role, "runtime_event_stream", None)
@@ -134,8 +245,12 @@ class ChatCompletionsProvider(ModelProvider):
             response = _with_model_retries(lambda: self.client.chat.completions.create(**kwargs))
             message = response.choices[0].message
             tool_calls = getattr(message, "tool_calls", None) or []
+            content, thinking = _extract_thinking_chat(message)
+            if thinking:
+                current = getattr(role, "runtime_thinking", None)
+                role.runtime_thinking = (current + "\n\n" + thinking) if current else thinking
             if not tool_calls:
-                return message.content or ""
+                return content
             if employee_dict is None:
                 return "Error: Tool call requested but no employee dictionary is available."
             kwargs["messages"] = list(kwargs["messages"]) + [message.model_dump()]
@@ -209,6 +324,10 @@ class ResponsesProvider(ModelProvider):
         response = _with_model_retries(lambda: self.client.responses.create(**kwargs))
         for _ in range(8):
             function_calls = _response_function_calls(response)
+            thinking = _extract_thinking_responses(response)
+            if thinking:
+                current = getattr(role, "runtime_thinking", None)
+                role.runtime_thinking = (current + "\n\n" + thinking) if current else thinking
             if not function_calls:
                 return _response_text(response)
             if employee_dict is None:

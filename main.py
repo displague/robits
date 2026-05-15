@@ -116,6 +116,8 @@ from robits.core.providers import (  # noqa: E402
     make_model_provider,
     _emit_role_tool_event,
     _with_model_retries,
+    _extract_thinking_chat,
+    _extract_thinking_responses,
 )
 from robits.core.session import (  # noqa: E402
     TranscriptEntry,
