@@ -3378,6 +3378,103 @@ class ThinkingExtractionTests(unittest.TestCase):
         self.assertEqual(result, "Done.")
         self.assertEqual(role.runtime_thinking, "thought about it")
 
+    # --- thinking accumulated across agentic loop iterations ---
+
+    def test_chat_provider_accumulates_thinking_across_tool_iterations(self):
+        role = self._make_role()
+        role.employee_dict = {}
+        tool_call = SimpleNamespace(
+            id="call_1",
+            function=SimpleNamespace(name="noop", arguments="{}"),
+        )
+        msg1 = SimpleNamespace(
+            content="",
+            tool_calls=[tool_call],
+            reasoning_content="step 1 thinking",
+            thinking=None,
+            model_dump=lambda: {"role": "assistant", "content": "", "tool_calls": []},
+        )
+        msg2 = SimpleNamespace(
+            content="Final answer.",
+            tool_calls=None,
+            reasoning_content="step 2 thinking",
+            thinking=None,
+            model_dump=lambda: {},
+        )
+        responses_iter = iter([
+            SimpleNamespace(choices=[SimpleNamespace(message=msg1)]),
+            SimpleNamespace(choices=[SimpleNamespace(message=msg2)]),
+        ])
+        registry = SimpleNamespace(
+            as_chat_completion_tools=lambda r: [{"type": "function", "function": {"name": "noop"}}],
+            execute=lambda name, args, ed, caller=None: "ok",
+            resolve_name=lambda n: n,
+        )
+        provider = main.ChatCompletionsProvider.__new__(main.ChatCompletionsProvider)
+        provider.registry = registry
+        provider.client = SimpleNamespace(
+            chat=SimpleNamespace(
+                completions=SimpleNamespace(create=lambda **kw: next(responses_iter))
+            )
+        )
+        result = provider.generate(role, "model", "CEO", [])
+        self.assertEqual(result, "Final answer.")
+        self.assertIn("step 1 thinking", role.runtime_thinking)
+        self.assertIn("step 2 thinking", role.runtime_thinking)
+
+    def test_responses_provider_accumulates_thinking_across_tool_iterations(self):
+        role = self._make_role()
+        role.employee_dict = {}
+        # First response: reasoning item + function call
+        func_call = SimpleNamespace(type="function_call", call_id="c1", name="noop", arguments="{}")
+        r1_thinking = SimpleNamespace(type="reasoning", content=[], text="step 1 thinking", summary=[])
+        response1 = SimpleNamespace(id="r1", output=[r1_thinking, func_call], output_text=None)
+        # Second response: reasoning item + text message, no function calls
+        r2_thinking = SimpleNamespace(type="reasoning", content=[], text="step 2 thinking", summary=[])
+        text_item = SimpleNamespace(type="message", content=[SimpleNamespace(type="output_text", text="Done.")])
+        response2 = SimpleNamespace(id="r2", output=[r2_thinking, text_item], output_text=None)
+
+        call_count = [0]
+        def mock_create(**kw):
+            call_count[0] += 1
+            return response1 if call_count[0] == 1 else response2
+
+        registry = SimpleNamespace(
+            as_responses_tools=lambda r: [],
+            execute=lambda name, args, ed, caller=None: "ok",
+            resolve_name=lambda n: n,
+        )
+        provider = main.ResponsesProvider.__new__(main.ResponsesProvider)
+        provider.registry = registry
+        provider.client = SimpleNamespace(
+            responses=SimpleNamespace(create=mock_create)
+        )
+        result = provider.generate(role, "model", "CEO", [])
+        self.assertEqual(result, "Done.")
+        self.assertIn("step 1 thinking", role.runtime_thinking)
+        self.assertIn("step 2 thinking", role.runtime_thinking)
+
+    # --- P2: thinking block using text field instead of thinking field ---
+
+    def test_content_blocks_thinking_type_with_text_field(self):
+        blocks = [
+            {"type": "thinking", "text": "private via text field", "thinking": None},
+            {"type": "text", "text": "public answer"},
+        ]
+        msg = SimpleNamespace(content=blocks, reasoning_content=None, thinking=None)
+        text, thinking = main._extract_thinking_chat(msg)
+        self.assertEqual(text, "public answer")
+        self.assertEqual(thinking, "private via text field")
+
+    # --- MEDIUM: provider-specific attrs checked even when content is a list ---
+
+    def test_content_blocks_list_with_reasoning_content_attr(self):
+        blocks = [{"type": "text", "text": "visible"}]
+        msg = SimpleNamespace(content=blocks, reasoning_content="structured reasoning", thinking=None)
+        text, thinking = main._extract_thinking_chat(msg)
+        self.assertEqual(text, "visible")
+        self.assertEqual(thinking, "structured reasoning")
+
 
 class OrgChatReadToolTests(unittest.TestCase):
     """Tests for the org_chat_read function."""

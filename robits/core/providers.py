@@ -107,13 +107,23 @@ def _extract_thinking_chat(message):
                 bthink = block.get("thinking")
             else:
                 continue
-            if btype == "thinking" and bthink:
-                thinking_parts.append(bthink)
+            if btype == "thinking":
+                if bthink:
+                    thinking_parts.append(bthink)
+                elif btext:
+                    thinking_parts.append(btext)
             elif btext:
                 text_parts.append(btext)
         content_text, inline_thinking = _strip_inline_thinking("".join(text_parts))
         typed_thinking = "\n\n".join([str(t).strip() for t in thinking_parts if str(t).strip()]) or None
-        return content_text, _join_thinking(typed_thinking, inline_thinking)
+        reasoning = getattr(message, "reasoning_content", None)
+        thinking_attr = getattr(message, "thinking", None)
+        provider_thinking = None
+        if reasoning and isinstance(reasoning, str):
+            provider_thinking = reasoning
+        elif thinking_attr and isinstance(thinking_attr, str):
+            provider_thinking = thinking_attr
+        return content_text, _join_thinking(provider_thinking, typed_thinking, inline_thinking)
 
     # String content: always strip inline tags, then merge with any provider-specific fields.
     content_str = str(content) if content is not None else ""
@@ -235,10 +245,11 @@ class ChatCompletionsProvider(ModelProvider):
             response = _with_model_retries(lambda: self.client.chat.completions.create(**kwargs))
             message = response.choices[0].message
             tool_calls = getattr(message, "tool_calls", None) or []
+            content, thinking = _extract_thinking_chat(message)
+            if thinking:
+                current = getattr(role, "runtime_thinking", None)
+                role.runtime_thinking = (current + "\n\n" + thinking) if current else thinking
             if not tool_calls:
-                content, thinking = _extract_thinking_chat(message)
-                if thinking:
-                    role.runtime_thinking = thinking
                 return content
             if employee_dict is None:
                 return "Error: Tool call requested but no employee dictionary is available."
@@ -313,10 +324,11 @@ class ResponsesProvider(ModelProvider):
         response = _with_model_retries(lambda: self.client.responses.create(**kwargs))
         for _ in range(8):
             function_calls = _response_function_calls(response)
+            thinking = _extract_thinking_responses(response)
+            if thinking:
+                current = getattr(role, "runtime_thinking", None)
+                role.runtime_thinking = (current + "\n\n" + thinking) if current else thinking
             if not function_calls:
-                thinking = _extract_thinking_responses(response)
-                if thinking:
-                    role.runtime_thinking = thinking
                 return _response_text(response)
             if employee_dict is None:
                 return "Error: Tool call requested but no employee dictionary is available."

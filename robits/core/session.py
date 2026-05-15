@@ -513,8 +513,12 @@ class Session:
                             channel_id=thought_channel_id,
                             metadata={"linked_message_id": response_msg_id},
                         )
-                    except Exception:
-                        pass
+                    except Exception as _e:
+                        self.event_stream.emit(
+                            "thought.store_failed",
+                            self.run_id,
+                            {"agent_id": canonical_receiver, "error": str(_e)},
+                        )
                 if msg_channel_id is not None and sender_phase is not None and receiver_phase is not None:
                     try:
                         social_distance = _m.memory_store.get_channel_social_distance(
