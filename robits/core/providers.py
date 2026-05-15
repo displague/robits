@@ -69,17 +69,28 @@ def _extract_thinking_chat(message):
     """
     import re as _re
 
-    # DeepSeek-R1 / QwQ via OpenAI-compat: dedicated reasoning_content field
-    reasoning = getattr(message, "reasoning_content", None)
-    if reasoning and isinstance(reasoning, str) and reasoning.strip():
-        content = getattr(message, "content", "") or ""
-        return str(content), reasoning.strip()
+    _inline_pattern = _re.compile(
+        r"<(?P<tag>think|thinking)>(?P<body>.*?)</(?P=tag)>",
+        flags=_re.DOTALL | _re.IGNORECASE,
+    )
 
-    # Some providers expose a top-level thinking field
-    thinking_attr = getattr(message, "thinking", None)
-    if thinking_attr and isinstance(thinking_attr, str) and thinking_attr.strip():
-        content = getattr(message, "content", "") or ""
-        return str(content), thinking_attr.strip()
+    def _strip_inline_thinking(text):
+        if not text:
+            return "", None
+        blocks = []
+        for match in _inline_pattern.finditer(text):
+            body = (match.group("body") or "").strip()
+            if body:
+                blocks.append(body)
+        clean = _inline_pattern.sub("", text).strip()
+        return clean, ("\n\n".join(blocks) if blocks else None)
+
+    def _join_thinking(*parts):
+        chunks = []
+        for part in parts:
+            if part and isinstance(part, str) and part.strip():
+                chunks.append(part.strip())
+        return "\n\n".join(chunks) if chunks else None
 
     # Anthropic-compat via OpenAI endpoint: content is a list of typed blocks
     content = getattr(message, "content", None)
@@ -100,20 +111,25 @@ def _extract_thinking_chat(message):
                 thinking_parts.append(bthink)
             elif btext:
                 text_parts.append(btext)
-        if thinking_parts:
-            return "".join(text_parts), "\n\n".join(thinking_parts)
-        return "".join(text_parts), None
+        content_text, inline_thinking = _strip_inline_thinking("".join(text_parts))
+        typed_thinking = "\n\n".join([str(t).strip() for t in thinking_parts if str(t).strip()]) or None
+        return content_text, _join_thinking(typed_thinking, inline_thinking)
 
-    # Inline tags in string content: <think>…</think> or <thinking>…</thinking>
+    # String content: always strip inline tags, then merge with any provider-specific fields.
     content_str = str(content) if content is not None else ""
-    for pattern in (r"<thinking>(.*?)</thinking>", r"<think>(.*?)</think>"):
-        m = _re.search(pattern, content_str, _re.DOTALL)
-        if m:
-            thinking_text = m.group(1).strip()
-            clean = (content_str[: m.start()] + content_str[m.end() :]).strip()
-            return clean, thinking_text
+    content_text, inline_thinking = _strip_inline_thinking(content_str)
 
-    return content_str, None
+    # DeepSeek-R1 / QwQ via OpenAI-compat: dedicated reasoning_content field
+    reasoning = getattr(message, "reasoning_content", None)
+    # Some providers expose a top-level thinking field
+    thinking_attr = getattr(message, "thinking", None)
+    provider_thinking = None
+    if reasoning and isinstance(reasoning, str):
+        provider_thinking = reasoning
+    elif thinking_attr and isinstance(thinking_attr, str):
+        provider_thinking = thinking_attr
+
+    return content_text, _join_thinking(provider_thinking, inline_thinking)
 
 
 def _extract_thinking_responses(response):

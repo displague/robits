@@ -3264,6 +3264,26 @@ class ThinkingExtractionTests(unittest.TestCase):
         self.assertEqual(text, "Result.")
         self.assertEqual(thinking, "deep thoughts")
 
+    def test_inline_think_tags_multiple_blocks_stripped(self):
+        msg = SimpleNamespace(
+            content="A<think>t1</think>B<thinking>t2</thinking>C",
+            reasoning_content=None,
+            thinking=None,
+        )
+        text, thinking = main._extract_thinking_chat(msg)
+        self.assertEqual(text, "ABC")
+        self.assertEqual(thinking, "t1\n\nt2")
+
+    def test_reasoning_content_and_inline_tags_both_captured(self):
+        msg = SimpleNamespace(
+            content="<think>inline</think>Answer.",
+            reasoning_content="field reasoning",
+            thinking=None,
+        )
+        text, thinking = main._extract_thinking_chat(msg)
+        self.assertEqual(text, "Answer.")
+        self.assertEqual(thinking, "field reasoning\n\ninline")
+
     def test_no_thinking_returns_none(self):
         msg = SimpleNamespace(content="plain answer", reasoning_content=None, thinking=None)
         text, thinking = main._extract_thinking_chat(msg)
