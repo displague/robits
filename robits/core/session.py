@@ -871,7 +871,7 @@ class Session:
             prompt = f"[Note: you were mentioned in this message]\n{prompt}"
         raw_prompt = prepend_verified_tool_results(
             prompt,
-            self.recent_system_events() + system_events,
+            system_events,
         )
         effective_org_lines = _m.org_chat_context_lines if self._effective_clock_state() == "on" else 0
         org_context = format_org_chat_context(self.transcript, effective_org_lines)
@@ -914,9 +914,31 @@ class Session:
         if last_response is None:
             last_response = ""
 
+        _loop_window: list[str] = []
+        _loop_threshold = _m.loop_detect_threshold
         try:
             while effective_max_turns is None or self.turns_completed < effective_max_turns:
                 last_response = self.step(last_response)
+                _normalized = " ".join((last_response or "").lower().split())
+                _loop_window.append(_normalized)
+                if len(_loop_window) > _loop_threshold:
+                    _loop_window.pop(0)
+                if (
+                    len(_loop_window) >= _loop_threshold
+                    and len(set(_loop_window)) == 1
+                    and _normalized
+                ):
+                    print(colored(
+                        f"\n[Loop detector] {_loop_threshold} identical consecutive responses "
+                        f"detected — possible greeting loop. Halting.",
+                        "yellow",
+                    ))
+                    self.event_stream.emit(
+                        "session.loop_detected",
+                        self.run_id,
+                        {"response": last_response, "consecutive": _loop_threshold},
+                    )
+                    break
         except SystemExit:
             print(colored("\nSession ended by CEO.", "yellow"))
 

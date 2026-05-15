@@ -854,7 +854,11 @@ def agent_spawn(employee_dict, task, tools=None, model=None):
         runtime_tool_results=[],
     )
 
-    use_model = model if isinstance(model, str) and model.strip() else _m.cheap_model
+    use_model = (
+        model if isinstance(model, str) and model.strip()
+        else _m.spawn_model
+        or _m.cheap_model
+    )
     messages = [
         {
             "role": "system",

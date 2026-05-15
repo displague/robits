@@ -68,6 +68,8 @@ class Config:
         _default = env.get("ROBITS_MODEL") or env.get("OPENAI_MODEL") or "gpt-4o-mini"
         self.costly_model = env.get("ROBITS_COSTLY_MODEL", _default)
         self.cheap_model = env.get("ROBITS_CHEAP_MODEL", _default)
+        self.spawn_model = env.get("ROBITS_SPAWN_MODEL", "").strip() or None
+        self.loop_detect_threshold = max(2, int(env.get("ROBITS_LOOP_DETECT_THRESHOLD", "3")))
         self.provider_api = env.get("ROBITS_PROVIDER_API", "responses").strip().lower()
         self.max_context_tokens = max(0, int(env.get("ROBITS_MAX_CONTEXT_TOKENS", "0")))
 
