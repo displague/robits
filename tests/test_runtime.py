@@ -2162,6 +2162,74 @@ class BuiltinToolTests(unittest.TestCase):
         result = main.builtin_shell_run({}, "SE", "   ")
         self.assertTrue(result.startswith("Error:"))
 
+    # ── agent.spawn ─────────────────────────────────────────────────────────
+
+    def test_agent_spawn_validates_empty_task(self):
+        result = main.agent_spawn({}, "   ")
+        self.assertTrue(result.startswith("Error:"))
+
+    def test_agent_spawn_validates_non_string_task(self):
+        result = main.agent_spawn({}, None)
+        self.assertTrue(result.startswith("Error:"))
+
+    def test_agent_spawn_blocks_memory_tools(self):
+        """memory.* tools must be stripped even when explicitly requested."""
+        from robits.core.tool_functions import _SUBAGENT_BLOCKED_PREFIXES
+        self.assertIn("memory.", _SUBAGENT_BLOCKED_PREFIXES)
+
+    def test_agent_spawn_blocks_agent_spawn_recursion(self):
+        """agent.spawn must not be available to sub-agents."""
+        from robits.core.tool_functions import _SUBAGENT_BLOCKED_PREFIXES
+        self.assertIn("agent.spawn", _SUBAGENT_BLOCKED_PREFIXES)
+
+    def test_agent_spawn_returns_error_when_all_tools_blocked(self):
+        result = main.agent_spawn({}, "do something", tools=["memory.search"])
+        self.assertTrue(result.startswith("Error:"))
+
+    def test_agent_spawn_calls_chat_completions_provider(self):
+        """agent_spawn should call ChatCompletionsProvider.generate() with the task."""
+        captured = {}
+
+        def fake_generate(self_provider, sub_role, model, caller, messages):
+            captured["messages"] = messages
+            captured["allowed_tools"] = sub_role.allowed_tools
+            return "sub-agent result"
+
+        from unittest.mock import patch
+        with patch("robits.core.providers.ChatCompletionsProvider.generate", fake_generate):
+            result = main.agent_spawn({}, "fetch https://example.com and summarise it")
+        self.assertEqual(result, "sub-agent result")
+        user_msgs = [m for m in captured["messages"] if m["role"] == "user"]
+        self.assertTrue(any("fetch https://example.com" in m["content"] for m in user_msgs))
+
+    def test_agent_spawn_default_tools_exclude_memory_and_org(self):
+        """Default sub-agent tool set must not contain memory or org tools."""
+        from robits.core.tool_functions import _SUBAGENT_DEFAULT_TOOLS
+        for tool in _SUBAGENT_DEFAULT_TOOLS:
+            self.assertFalse(
+                tool.startswith("memory.") or tool.startswith("org."),
+                f"Default sub-agent tool {tool!r} should not be in memory or org namespace",
+            )
+
+    def test_agent_spawn_custom_tools_merged_and_filtered(self):
+        """Caller-supplied tools are added but blocked prefixes are still stripped."""
+        captured = {}
+
+        def fake_generate(self_provider, sub_role, model, caller, messages):
+            captured["allowed_tools"] = sub_role.allowed_tools
+            return "done"
+
+        from unittest.mock import patch
+        with patch("robits.core.providers.ChatCompletionsProvider.generate", fake_generate):
+            main.agent_spawn(
+                {},
+                "run a search",
+                tools=["builtin.web_search", "memory.search", "builtin.url_fetch"],
+            )
+        self.assertIn("builtin.web_search", captured["allowed_tools"])
+        self.assertIn("builtin.url_fetch", captured["allowed_tools"])
+        self.assertNotIn("memory.search", captured["allowed_tools"])
+
     # ── builtin.tool_search ──────────────────────────────────────────────────
 
     def test_tool_search_finds_tools_by_name_fragment(self):

@@ -89,6 +89,7 @@ from robits.core.tool_functions import (  # noqa: E402
     builtin_image_generation,
     agent_think,
     agent_wait,
+    agent_spawn,
     _condense_if_large,
     SANDBOX_GLOBALS,
 )
