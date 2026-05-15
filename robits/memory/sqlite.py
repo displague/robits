@@ -1903,6 +1903,8 @@ class SQLiteMemoryStore:
             "thoughts": "thought",
             "memory_digests": "memory_digest",
         }
+        # Collect up to limit*2 semantic hits so cascade digests have room within [:limit].
+        inner_limit = limit * 2
         results = []
         seen_ids: set[str] = set()
         cascade_ids: dict[str, list[str]] = {}
@@ -1942,11 +1944,12 @@ class SQLiteMemoryStore:
                 cascade_digest_ids.add(source_id)
             else:
                 cascade_ids.setdefault(source_table, []).append(source_id)
-            if len(results) >= limit:
+            if len(results) >= inner_limit:
                 break
 
         # Cascade: surface parent digests for non-digest semantic hits,
         # matching the behaviour of search_cascade for FTS results.
+        import sqlite3 as _sqlite3
         for source_table, source_ids in cascade_ids.items():
             if not source_ids:
                 continue
@@ -1974,7 +1977,7 @@ class SQLiteMemoryStore:
                     """,
                     params,
                 ).fetchall()
-            except Exception:
+            except _sqlite3.Error:
                 continue
             for crow in cascade_rows:
                 digest_id_str = str(crow["digest_id"])
