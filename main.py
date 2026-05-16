@@ -119,6 +119,7 @@ from robits.core.providers import (  # noqa: E402
     _with_model_retries,
     _extract_thinking_chat,
     _extract_thinking_responses,
+    _extract_xml_tool_calls,
 )
 from robits.core.session import (  # noqa: E402
     TranscriptEntry,

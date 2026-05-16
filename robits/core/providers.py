@@ -61,6 +61,86 @@ def _with_model_retries(operation):
             attempt += 1
 
 
+def _extract_xml_tool_calls(text):
+    """Extract <tool_call> blocks from model content and return (clean_text, tool_call_list).
+
+    Handles two sub-formats emitted by local models when LM Studio does not
+    translate them to the OpenAI tool_calls array:
+
+    Qwen XML:
+        <tool_call>
+        <function=NAME>
+        <parameter=KEY>VALUE</parameter>
+        </function>
+        </tool_call>
+
+    Granite / generic JSON-in-tag:
+        <tool_call>
+        {"name": "TOOL", "arguments": "{...}"}
+        </tool_call>
+
+    Returns a list of dicts: [{"name": str, "arguments": dict}, ...].
+    Unrecognised blocks are left in the cleaned text.
+    """
+    import re as _re
+
+    _block_pattern = _re.compile(
+        r"<tool_call>\s*(.*?)\s*</tool_call>",
+        flags=_re.DOTALL | _re.IGNORECASE,
+    )
+    _qwen_fn_pattern = _re.compile(
+        r"<function=(?P<name>[^>]+)>\s*(?P<body>.*?)\s*</function>",
+        flags=_re.DOTALL,
+    )
+    _qwen_param_pattern = _re.compile(
+        r"<parameter=(?P<key>[^>]+)>\s*(?P<val>.*?)\s*</parameter>",
+        flags=_re.DOTALL,
+    )
+
+    extracted = []
+    leftovers = []
+
+    def _handle_block(inner):
+        # Try Qwen XML format first
+        fn_match = _qwen_fn_pattern.search(inner)
+        if fn_match:
+            name = fn_match.group("name").strip()
+            body = fn_match.group("body")
+            args = {}
+            for pm in _qwen_param_pattern.finditer(body):
+                args[pm.group("key").strip()] = pm.group("val").strip()
+            extracted.append({"name": name, "arguments": args})
+            return True
+        # Try Granite / generic JSON format
+        inner_stripped = inner.strip()
+        if inner_stripped.startswith("{"):
+            try:
+                obj = json.loads(inner_stripped)
+                name = obj.get("name") or obj.get("function")
+                raw_args = obj.get("arguments") or obj.get("args") or {}
+                if isinstance(raw_args, str):
+                    try:
+                        raw_args = json.loads(raw_args)
+                    except json.JSONDecodeError:
+                        raw_args = {}
+                if name and isinstance(raw_args, dict):
+                    extracted.append({"name": name, "arguments": raw_args})
+                    return True
+            except json.JSONDecodeError:
+                pass
+        return False
+
+    def _replace(match):
+        inner = match.group(1)
+        if not _handle_block(inner):
+            leftovers.append(match.group(0))
+            return match.group(0)
+        return ""
+
+    clean = _block_pattern.sub(_replace, text).strip()
+    return clean, extracted
+
+
 def _extract_thinking_chat(message):
     """Extract thinking/reasoning from a ChatCompletions message.
 
@@ -250,6 +330,56 @@ class ChatCompletionsProvider(ModelProvider):
                 current = getattr(role, "runtime_thinking", None)
                 role.runtime_thinking = (current + "\n\n" + thinking) if current else thinking
             if not tool_calls:
+                # Check for XML-format tool calls emitted by Qwen/Granite when LM
+                # Studio doesn't translate them to the OpenAI tool_calls array.
+                if tools and "<tool_call>" in (content or ""):
+                    clean_content, xml_calls = _extract_xml_tool_calls(content or "")
+                    if xml_calls and employee_dict is not None:
+                        # Synthesise an assistant message with fabricated tool_calls so
+                        # the model sees proper tool results on the next round.
+                        synth_calls = []
+                        for xc in xml_calls:
+                            synth_calls.append({
+                                "id": f"call_{uuid4().hex[:16]}",
+                                "type": "function",
+                                "function": {
+                                    "name": xc["name"],
+                                    "arguments": json.dumps(xc["arguments"]),
+                                },
+                            })
+                        kwargs["messages"] = list(kwargs["messages"]) + [{
+                            "role": "assistant",
+                            "content": clean_content or None,
+                            "tool_calls": synth_calls,
+                        }]
+                        tool_results = []
+                        for call_dict, xc in zip(synth_calls, xml_calls):
+                            tool_name = xc["name"]
+                            call_id = call_dict["id"]
+                            payload = {
+                                "agent": getattr(role, "name", None),
+                                "role_name": getattr(role, "runtime_role_name", None),
+                                "call_id": call_id,
+                                "tool_name": tool_name,
+                                "arguments": xc["arguments"],
+                            }
+                            _emit_role_tool_event(role, "tool_call.requested", payload)
+                            result = self.registry.execute(tool_name, xc["arguments"], employee_dict, caller=role)
+                            event_type = "tool_call.failed" if _tool_result_is_error(result) else "tool_call.executed"
+                            _emit_role_tool_event(role, event_type, {**payload, "result": result})
+                            resolved_name = self.registry.resolve_name(tool_name)
+                            if resolved_name != "agent.think":
+                                _record_role_tool_result(
+                                    role,
+                                    f"{event_type}: {tool_name}({json.dumps(xc['arguments'], sort_keys=True)}) -> {result}",
+                                )
+                            tool_results.append({
+                                "role": "tool",
+                                "tool_call_id": call_id,
+                                "content": str(result),
+                            })
+                        kwargs["messages"] = kwargs["messages"] + tool_results
+                        continue
                 return content
             if employee_dict is None:
                 return "Error: Tool call requested but no employee dictionary is available."

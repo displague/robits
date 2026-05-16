@@ -913,6 +913,8 @@ class Session:
             system_events.extend(response_events)
             deliver_verified_tool_results(routed.receiver, response_events)
             self.sync_scheduler_participants()
+        if model_thinking and routed.receiver.name != "CEO":
+            print(colored(f"[{routed.receiver.name} \U0001f914 {len(model_thinking)} chars]", "dark_grey"))
         if routed.receiver.name != "CEO" and response != "":
             print(colored(f"{routed.receiver.name} responds: {response}", "cyan"))
             get_logger().write_event("agent_response", agent=routed.receiver.name, content=response)
