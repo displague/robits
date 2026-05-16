@@ -862,8 +862,8 @@ def agent_spawn(employee_dict, task, tools=None, model=None):
     )
     _task_stripped = task.strip()
     _shell_hint = (
-        " To run a shell command, call builtin.shell_run with the command string."
-        if any(_task_stripped.startswith(p) for p in ("python", "bash", "sh ", "node", "run ", "execute "))
+        f" To run a shell command, call builtin.shell_run with agent_name='{caller_name}' and the command string."
+        if any(_task_stripped.startswith(p) for p in ("python", "bash", "sh ", "sh", "node", "run ", "execute "))
         or any(op in _task_stripped for op in ("python3 -c", "python -c", "bash -c"))
         else ""
     )

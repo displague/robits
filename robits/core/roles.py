@@ -85,7 +85,7 @@ class Role:
         turn_action_template = """
 On your turn, choose one useful action. You do not need to reply to every message.
 Only say that you created, changed, or called a tool after the runtime has returned a verified tool result. Without a verified result, describe the work as a request, proposal, or plan instead of a completed fact.
-When recalling past events, experiences, or recent work — even if the answer seems available in context — call memory.list_digests first to retrieve the full picture, then use memory.expand_digest for any digest that sounds relevant before answering.
+When recalling past events, experiences, or recent work — even if the answer seems available in context — use memory.search (for specific queries), memory.list_digests, or memory.expand_digest to retrieve the full picture before answering.
 """
         self.template = template + group_template_additions + turn_action_template
         self.employee_dict = employee_dict
