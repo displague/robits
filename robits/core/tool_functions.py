@@ -860,6 +860,13 @@ def agent_spawn(employee_dict, task, tools=None, model=None):
         else _m.spawn_model
         or _m.cheap_model
     )
+    _task_stripped = task.strip()
+    _shell_hint = (
+        f" To run a shell command, call builtin.shell_run with agent_name='{caller_name}' and the command string."
+        if any(_task_stripped.startswith(p) for p in ("python", "bash", "sh ", "sh", "node", "run ", "execute "))
+        or any(op in _task_stripped for op in ("python3 -c", "python -c", "bash -c"))
+        else ""
+    )
     messages = [
         {
             "role": "system",
@@ -867,9 +874,10 @@ def agent_spawn(employee_dict, task, tools=None, model=None):
                 f"You are a focused task executor working on behalf of {caller_name}. "
                 "Perform the given task using available tools and return a concise result. "
                 "Do not ask clarifying questions. Do not retain memory between calls."
+                + _shell_hint
             ),
         },
-        {"role": "user", "content": task.strip()},
+        {"role": "user", "content": _task_stripped},
     ]
 
     from robits.core.providers import ChatCompletionsProvider

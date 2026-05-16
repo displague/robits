@@ -2315,6 +2315,33 @@ class BuiltinToolTests(unittest.TestCase):
         self.assertIn("builtin.url_fetch", captured["allowed_tools"])
         self.assertNotIn("memory.search", captured["allowed_tools"])
 
+    def test_agent_spawn_injects_shell_hint_for_shell_task(self):
+        """System prompt should mention builtin.shell_run when task starts with python/bash."""
+        captured = {}
+
+        def fake_generate(self_provider, sub_role, model, caller, messages):
+            captured["system"] = next(m["content"] for m in messages if m["role"] == "system")
+            return "42"
+
+        from unittest.mock import patch
+        with patch("robits.core.providers.ChatCompletionsProvider.generate", fake_generate):
+            main.agent_spawn({}, "python3 -c 'print(6*7)'")
+        self.assertIn("builtin.shell_run", captured["system"])
+        self.assertIn("agent_name=", captured["system"])
+
+    def test_agent_spawn_no_shell_hint_for_plain_task(self):
+        """System prompt should NOT add the shell hint for non-shell tasks."""
+        captured = {}
+
+        def fake_generate(self_provider, sub_role, model, caller, messages):
+            captured["system"] = next(m["content"] for m in messages if m["role"] == "system")
+            return "ok"
+
+        from unittest.mock import patch
+        with patch("robits.core.providers.ChatCompletionsProvider.generate", fake_generate):
+            main.agent_spawn({}, "summarise the readme")
+        self.assertNotIn("builtin.shell_run", captured["system"])
+
     # ── builtin.tool_search ──────────────────────────────────────────────────
 
     def test_tool_search_finds_tools_by_name_fragment(self):
@@ -4092,6 +4119,18 @@ class PersonaRedesignTests(unittest.TestCase):
         self.assertIn("eng1", d)
         self.assertIn("eng2", d)
         self.assertNotIn("SE", d)
+
+    def test_se_has_shell_capability(self):
+        """SoftwareEngineer must carry the 'shell' capability so sub-agents can call builtin.shell_run."""
+        from robits.core.roles import SoftwareEngineer
+        se = SoftwareEngineer({})
+        self.assertIn("shell", se.capabilities)
+
+    def test_se_has_shell_run_in_allowed_tools(self):
+        """SoftwareEngineer.allowed_tools must include builtin.shell_run explicitly."""
+        from robits.core.roles import SoftwareEngineer
+        se = SoftwareEngineer({})
+        self.assertIn("builtin.shell_run", se.allowed_tools)
 
     def test_mention_detection_at_username(self):
         from robits.core.session import Session
