@@ -1216,26 +1216,28 @@ class RuntimeTests(unittest.TestCase):
         self.assertEqual(args.turns, 1)
         self.assertEqual(args.log, "run.log")
 
-    def test_main_tees_console_output_to_log_file(self):
+    def test_main_creates_jsonl_log_file(self):
         with tempfile.TemporaryDirectory() as temp_dir:
-            log_path = os.path.join(temp_dir, "logs", "run.log")
+            log_path = os.path.join(temp_dir, "logs", "run.jsonl")
 
             def fake_run_simulation(initial_message=None, max_turns=None):
+                import main as _main
+                _main.get_logger().write_event("test_event", msg=f"prompt={initial_message}")
                 print(f"prompt={initial_message} turns={max_turns}")
-                print("warning stream", file=sys.stderr)
 
             with patch.object(main, "run_simulation", side_effect=fake_run_simulation):
                 stdout = StringIO()
-                stderr = StringIO()
-                with redirect_stdout(stdout), redirect_stderr(stderr):
+                with redirect_stdout(stdout):
                     main.main(["--prompt", "hello", "--turns", "2", "--log", log_path])
 
+            # Console output still appears on stdout, not captured in log file
             self.assertIn("prompt=hello turns=2", stdout.getvalue())
-            self.assertIn("warning stream", stderr.getvalue())
+            # Log file is created and contains JSONL events
+            self.assertTrue(os.path.exists(log_path))
             with open(log_path, "r", encoding="utf-8") as handle:
                 content = handle.read()
-            self.assertIn("prompt=hello turns=2", content)
-            self.assertIn("warning stream", content)
+            self.assertIn('"type": "test_event"', content)
+            self.assertNotIn("prompt=hello turns=2", content)
 
     def test_tee_stream_flushes_after_each_write(self):
         first = RecordingStream()

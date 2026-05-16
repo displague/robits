@@ -51,8 +51,11 @@ def interact(self, model, sender, message):
             chars += msg_chars
         send_messages = [system_msg] + kept
 
-    from termcolor import colored
-    print(colored(f"\n---\n// {self.name}\n{json.dumps(send_messages)}\n---\n", "grey"))
+    from robits.core.io import get_logger
+    import json as _json
+    _ctx_chars = sum(len(_json.dumps(m)) for m in send_messages)
+    _last_user = next((m["content"][:200] for m in reversed(send_messages) if m.get("role") == "user"), "")
+    get_logger().write_event("agent_prompt", agent=self.name, message_count=len(send_messages), context_chars=_ctx_chars, last_user=_last_user)
 
     content = _m.model_provider.generate(self, model, sender, send_messages)
     message = {"role": "assistant", "content": content or "", "name": self.name}
@@ -162,8 +165,8 @@ class System(Role):
 
     def interact(self, prompt, trusted=False, caller=None):
         """Parse a JSON prompt and execute or register the described instruction."""
-        from termcolor import colored
-        print(colored(f"\n---\n// {self.name}\n{prompt}\n---\n", "grey"))
+        from robits.core.io import get_logger
+        get_logger().write_event("system_instruction", agent=self.name, content=prompt)
 
         prompt_text = prompt.strip() if isinstance(prompt, str) else ""
         if prompt_text.startswith(("{", "[")):
@@ -265,6 +268,8 @@ class Human(Role):
             text = input(f"{self.name}: ")
         except EOFError:
             return ""
+        from robits.core.io import get_logger
+        get_logger().write_event("ceo_input", content=text)
         stripped = text.strip()
         if stripped.startswith("/"):
             cmd = stripped.split()[0].lower()
@@ -294,24 +299,16 @@ _ROLE_CLASS_MAP = {
 
 
 def build_employee_dict(persona_map=None):
-    """Construct and return the default set of organisation participants.
+    """Construct and return the set of organisation participants.
 
-    If ``persona_map`` is provided ({username: {role, full_name, entries}}),
-    each persona is instantiated under its ``username`` key instead of the
-    default role-class name.  Personas override the default entry for their
-    role type when the role key is present in the default dict.
+    When ``persona_map`` is provided ({username: {role, full_name, entries}}),
+    only the listed personas are instantiated — the persona file defines the
+    complete cast.  CEO (Human) is added automatically if not listed.
+    Without a persona_map the default cast (CEO, Ops, SE, HR, Samandriel) is used.
     """
     employee_dict = {}
-    employee_dict["CEO"] = Human()
-    employee_dict["Ops"] = Ops(employee_dict)
-    employee_dict["SE"] = SoftwareEngineer(employee_dict)
-    employee_dict["HR"] = HR(employee_dict)
-    employee_dict["Samandriel"] = Angel(employee_dict)
 
     if persona_map:
-        # Track which pre-built default keys have been replaced by persona usernames
-        default_keys_replaced: set = set()
-        default_keys = set(employee_dict)
         for username, info in persona_map.items():
             if not isinstance(info, dict):
                 continue
@@ -325,15 +322,6 @@ def build_employee_dict(persona_map=None):
                     username, role_key,
                 )
                 continue
-            # Remove the pre-built default entry for this role type (once per role class)
-            default_key = next(
-                (k for k in default_keys if k not in default_keys_replaced
-                 and k in employee_dict and type(employee_dict[k]) is RoleClass),
-                None,
-            )
-            if default_key:
-                del employee_dict[default_key]
-                default_keys_replaced.add(default_key)
             instance = RoleClass(employee_dict)
             instance.name = username
             instance.role_key = role_key
@@ -342,6 +330,22 @@ def build_employee_dict(persona_map=None):
             instance.first_name = parts[0] if parts else username
             instance.last_name = parts[1] if len(parts) > 1 else ""
             employee_dict[username] = instance
+        if not any(isinstance(v, Human) for v in employee_dict.values()):
+            employee_dict["CEO"] = Human()
+        # Backfill conversation_history so every role knows about every peer,
+        # regardless of instantiation order.
+        all_keys = set(employee_dict)
+        for role in employee_dict.values():
+            ch = getattr(role, "conversation_history", None)
+            if isinstance(ch, dict):
+                for key in all_keys:
+                    ch.setdefault(key, [])
+    else:
+        employee_dict["CEO"] = Human()
+        employee_dict["Ops"] = Ops(employee_dict)
+        employee_dict["SE"] = SoftwareEngineer(employee_dict)
+        employee_dict["HR"] = HR(employee_dict)
+        employee_dict["Samandriel"] = Angel(employee_dict)
 
     return employee_dict
 

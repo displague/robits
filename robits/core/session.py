@@ -25,6 +25,7 @@ from robits.core.context import (
 from robits.core.lifecycle import due_alarm_reminders
 from robits.core.tool_functions import _restore_wait_state, _WAIT_STATE_FILE
 from robits.core.persona import seed_persona
+from robits.core.io import get_logger
 
 
 @dataclass
@@ -393,6 +394,7 @@ class Session:
 
         system_response = self.system.interact(tool_instruction, caller=sender)
         print(colored(f"System: {system_response}", "blue"))
+        get_logger().write_event("system_result", content=system_response)
         self.event_stream.emit(
             "tool.executed",
             self.run_id,
@@ -635,6 +637,7 @@ class Session:
                 f" ({len(window)} turns, {chars} chars, trigger: {trigger})",
                 "dark_grey",
             ))
+            get_logger().write_event("memory_digest", kind="episodic", agents=len(agents), turn=self.turns_completed, window=len(window), chars=chars, trigger=trigger)
             self._last_digest_turn = self.turns_completed
             self._last_digest_at = time.monotonic()
         except Exception:
@@ -683,6 +686,7 @@ class Session:
             f"[memory] {digest_type} digest — {len(agents)} agent(s) turn {self.turns_completed}",
             "dark_grey",
         ))
+        get_logger().write_event("memory_digest", kind=digest_type, agents=len(agents), turn=self.turns_completed)
 
     def _write_org_chat_jsonl(self, entry):
         """Append a non-directed transcript entry as a JSONL line to the org workspace chat log."""
@@ -743,6 +747,7 @@ class Session:
             f" ({len(lines)} messages)",
             "dark_grey",
         ))
+        get_logger().write_event("memory_digest", kind="org_chat", agents=len(agents), turn=self.turns_completed, messages=len(lines))
 
     def record_thought(self, agent_name, content, visibility="private"):
         """Persist a private thought to memory and emit a thought.recorded event."""
@@ -910,6 +915,7 @@ class Session:
             self.sync_scheduler_participants()
         if routed.receiver.name != "CEO" and response != "":
             print(colored(f"{routed.receiver.name} responds: {response}", "cyan"))
+            get_logger().write_event("agent_response", agent=routed.receiver.name, content=response)
         self.record_turn(
             sender=sender.name,
             receiver=routed.receiver.name,
@@ -962,6 +968,7 @@ class Session:
                         f"detected with no tool calls or directed routing — possible greeting loop. Halting.",
                         "yellow",
                     ))
+                    get_logger().write_event("loop_detected", consecutive=_loop_threshold)
                     self.event_stream.emit(
                         "session.loop_detected",
                         self.run_id,
@@ -970,6 +977,7 @@ class Session:
                     break
         except SystemExit:
             print(colored("\nSession ended by CEO.", "yellow"))
+            get_logger().write_event("session_ended")
 
         self.event_stream.emit(
             "session.completed",
