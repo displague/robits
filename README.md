@@ -149,6 +149,8 @@ For local models with embedding support, `sqlite-vec` is included in `requiremen
 | `ROBITS_MODEL` / `OPENAI_MODEL` | `gpt-4o-mini` | Default chat model |
 | `ROBITS_CHEAP_MODEL` | `ROBITS_MODEL` | Model for cheap interactions |
 | `ROBITS_COSTLY_MODEL` | `ROBITS_MODEL` | Model for SE and costly interactions |
+| `ROBITS_SPAWN_MODEL` | `ROBITS_CHEAP_MODEL` | Default model for `agent.spawn` sub-agents; overrides `ROBITS_CHEAP_MODEL` for spawned executors (e.g. `functiongemma-270m-it`) |
+| `ROBITS_LOOP_DETECT_THRESHOLD` | `3` | Consecutive identical idle responses (no tool calls, no directed routing) before the session halts with `session.loop_detected`; must be an integer ≥ 2 |
 | `ROBITS_PROVIDER_API` | `responses` | `responses` or `chat` / `chat_completions` |
 | `ROBITS_MAX_CONTEXT_TOKENS` | `0` (unlimited) | Trim conversation history to this token budget before each model call (~4 chars/token). Useful for small-context local models (e.g. `3500` for 4k-context models) |
 | `ROBITS_MEMORY_DB` | `~/.local/share/robits/memory.db` | SQLite path for memory storage |

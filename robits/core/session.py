@@ -939,9 +939,19 @@ class Session:
             while effective_max_turns is None or self.turns_completed < effective_max_turns:
                 last_response = self.step(last_response)
                 _normalized = " ".join((last_response or "").lower().split())
-                _loop_window.append(_normalized)
-                if len(_loop_window) > _loop_threshold:
-                    _loop_window.pop(0)
+                # Only count idle turns — if this turn had tool calls or directed
+                # routing, useful work is happening, so reset the window.
+                _last_entry = self.transcript[-1] if self.transcript else None
+                _turn_was_active = _last_entry is not None and (
+                    bool(getattr(_last_entry, "system_events", None))
+                    or getattr(_last_entry, "directed", False)
+                )
+                if _turn_was_active:
+                    _loop_window.clear()
+                else:
+                    _loop_window.append(_normalized)
+                    if len(_loop_window) > _loop_threshold:
+                        _loop_window.pop(0)
                 if (
                     len(_loop_window) >= _loop_threshold
                     and len(set(_loop_window)) == 1
@@ -949,7 +959,7 @@ class Session:
                 ):
                     print(colored(
                         f"\n[Loop detector] {_loop_threshold} identical consecutive responses "
-                        f"detected — possible greeting loop. Halting.",
+                        f"detected with no tool calls or directed routing — possible greeting loop. Halting.",
                         "yellow",
                     ))
                     self.event_stream.emit(
