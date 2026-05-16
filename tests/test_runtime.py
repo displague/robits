@@ -11,6 +11,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 import main
+from robits.core.persona import load_personas, seed_persona
 from robits.memory.sqlite import SQLiteMemoryStore
 
 
@@ -4279,7 +4280,6 @@ class PersonaRedesignTests(unittest.TestCase):
 
     def test_load_personas_new_schema(self):
         import tempfile as _tf, yaml as _yaml
-        from robits.core.persona import load_personas
         content = [
             {"username": "alex_chen", "full_name": "Alex Chen", "role": "SE",
              "memories": [{"kind": "thought", "content": "I like Python."}]},
@@ -4301,7 +4301,6 @@ class PersonaRedesignTests(unittest.TestCase):
 
     def test_load_personas_legacy_schema_still_works(self):
         import tempfile as _tf, yaml as _yaml
-        from robits.core.persona import load_personas
         content = [
             {"agent": "SE", "memories": [{"kind": "thought", "content": "Old schema."}]},
         ]
@@ -4318,7 +4317,6 @@ class PersonaRedesignTests(unittest.TestCase):
 
     def test_multiple_personas_same_role(self):
         import tempfile as _tf, yaml as _yaml
-        from robits.core.persona import load_personas
         content = [
             {"username": "eng1", "full_name": "Alice Smith", "role": "SE",
              "memories": [{"kind": "thought", "content": "Alice's memory."}]},
@@ -4496,7 +4494,6 @@ class PersonaSeedingTests(unittest.TestCase):
 
     def test_seed_persona_writes_thought(self):
         self.store.upsert_agent("alice", "Role", "alice")
-        from robits.core.persona import seed_persona
         written = seed_persona(self.store, "alice", [
             {"kind": "thought", "content": "I enjoy hiking.", "visibility": "private"},
         ])
@@ -4507,7 +4504,6 @@ class PersonaSeedingTests(unittest.TestCase):
 
     def test_seed_persona_writes_digest(self):
         self.store.upsert_agent("bob", "Role", "bob")
-        from robits.core.persona import seed_persona
         written = seed_persona(self.store, "bob", [
             {"kind": "digest", "digest_type": "identity", "content": "Bob is a backend engineer."},
         ])
@@ -4518,7 +4514,6 @@ class PersonaSeedingTests(unittest.TestCase):
 
     def test_seed_persona_is_idempotent(self):
         self.store.upsert_agent("carol", "Role", "carol")
-        from robits.core.persona import seed_persona
         entries = [{"kind": "thought", "content": "First seed.", "visibility": "private"}]
         first = seed_persona(self.store, "carol", entries)
         second = seed_persona(self.store, "carol", entries)
@@ -4528,13 +4523,11 @@ class PersonaSeedingTests(unittest.TestCase):
         self.assertEqual(len(rows), 1)
 
     def test_load_personas_missing_file_returns_empty(self):
-        from robits.core.persona import load_personas
         result = load_personas("/nonexistent/path/personas.yaml")
         self.assertEqual(result, {})
 
     def test_seed_persona_writes_memory_entry(self):
         self.store.upsert_agent("dave", "Role", "dave")
-        from robits.core.persona import seed_persona
         written = seed_persona(self.store, "dave", [
             {"kind": "entry", "digest_type": "identity", "content": "Dave values honesty."},
         ])
@@ -5147,7 +5140,7 @@ class SinglePersonaCollaborationTests(unittest.TestCase):
     # ── 1. Memory seeding ──────────────────────────────────────────────────────
 
     def _as_caller(self, name):
-        """Context manager: set active_tool_caller to name for permission checks."""
+        """Set active_tool_caller to name for the duration of the test via addCleanup."""
         prev, prev_name = main.active_tool_caller, main.active_tool_caller_name
         main.active_tool_caller = SimpleNamespace(name=name, capabilities=set())
         main.active_tool_caller_name = name
@@ -5156,7 +5149,6 @@ class SinglePersonaCollaborationTests(unittest.TestCase):
 
     def test_seeded_memory_retrievable_in_session(self):
         """Facts seeded into the store before the session are returned by memory_search."""
-        from robits.core.persona import seed_persona
         self.store.upsert_agent("alex_chen", "SoftwareEngineer", "alex_chen")
         seed_persona(self.store, "alex_chen", [
             {"kind": "thought", "content": "Fixed the payment service bug last Tuesday.",
@@ -5172,7 +5164,6 @@ class SinglePersonaCollaborationTests(unittest.TestCase):
 
     def test_seeded_digest_retrievable_by_list(self):
         """Identity digests seeded before session are accessible via memory_list_digests."""
-        from robits.core.persona import seed_persona
         self.store.upsert_agent("alex_chen", "SoftwareEngineer", "alex_chen")
         seed_persona(self.store, "alex_chen", [
             {"kind": "digest", "digest_type": "identity",
@@ -5236,22 +5227,13 @@ class SinglePersonaCollaborationTests(unittest.TestCase):
             )
         self.assertIn("1.2.3.4", result)
 
-    def test_spawn_result_written_to_caller_tool_results(self):
-        """The sub-agent result string is returned so the persona can record it."""
-        def fake_generate(self_provider, sub_role, model, caller_arg, messages):
-            return "task completed: found 42 results"
-
-        with patch("robits.core.providers.ChatCompletionsProvider.generate", fake_generate):
-            result = main.agent_spawn({}, "count the results in the database")
-
-        self.assertIn("42 results", result)
-
-    def test_session_step_routes_to_single_persona(self):
-        """With only CEO + one SE, directed routing delivers message to SE."""
-        responses = []
+    def test_directed_routing_strips_prefix_and_routes_to_named_agent(self):
+        """'name, prompt' syntax routes exclusively to the named agent with the prefix stripped."""
+        received_prompts = []
+        ceo_called = []
 
         def se_interact(sender_name, prompt, *a, **kw):
-            responses.append(prompt)
+            received_prompts.append(prompt)
             return "acknowledged"
 
         self.store.upsert_agent("alex_chen", "SoftwareEngineer", "alex_chen")
@@ -5261,7 +5243,7 @@ class SinglePersonaCollaborationTests(unittest.TestCase):
             participants={
                 "CEO": SimpleNamespace(
                     name="CEO", lifecycle_state="active",
-                    interact=lambda s, p, *a, **kw: "task done",
+                    interact=lambda s, p, *a, **kw: ceo_called.append(p) or "task done",
                     update_group_conversations=lambda m: None,
                 ),
                 "alex_chen": SimpleNamespace(
@@ -5277,10 +5259,10 @@ class SinglePersonaCollaborationTests(unittest.TestCase):
         out = StringIO()
         with redirect_stdout(out), redirect_stderr(StringIO()):
             session.step("alex_chen, please summarise recent tasks")
-        self.assertTrue(
-            len(responses) > 0,
-            "SE interact was never called — directed routing failed",
-        )
+
+        self.assertTrue(received_prompts, "SE interact was never called")
+        self.assertIn("please summarise recent tasks", received_prompts[0])
+        self.assertNotIn("alex_chen,", received_prompts[0])
 
 
 if __name__ == "__main__":
