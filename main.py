@@ -10,7 +10,7 @@ this module's namespace (i.e. classes, functions, and CLI helpers).
 import sys
 import time  # kept for patch("main.time.sleep") compatibility in tests
 import types
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 from robits.core.config import _config, Config  # noqa: F401
@@ -193,7 +193,7 @@ def run_simulation(initial_message=None, max_turns=None):
 
 
 def _default_log_path():
-    ts = datetime.now().strftime("%Y-%m-%dT%H-%M-%S")
+    ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H-%M-%SZ")
     return Path("logs") / f"robits-{ts}.jsonl"
 
 
@@ -204,7 +204,7 @@ def parse_args(argv=None):
     parser.add_argument("--prompt", help="Initial message to start the simulation.")
     parser.add_argument("--turns", type=int, help="Maximum model turns to run.")
     parser.add_argument(
-        "--log", help="Path for the JSONL log file (default: logs/robits-<timestamp>.jsonl)."
+        "--log", help="Path for the JSONL log file (default: logs/robits-<timestamp>Z.jsonl relative to cwd)."
     )
     parser.add_argument(
         "--no-log", action="store_true", help="Disable log file creation."

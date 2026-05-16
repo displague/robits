@@ -46,6 +46,10 @@ class _NullLogger:
 
 
 _null = _NullLogger()
+# Module-level singleton — safe for single-process CLI use. Concurrent main()
+# invocations (e.g. parallel tests) would clobber each other; set_logger(None)
+# in a finally block could silence a still-running caller. Tests that exercise
+# logging should patch get_logger directly rather than calling set_logger.
 _logger = None
 
 

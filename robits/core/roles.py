@@ -52,7 +52,10 @@ def interact(self, model, sender, message):
         send_messages = [system_msg] + kept
 
     from robits.core.io import get_logger
-    get_logger().write_event("agent_prompt", agent=self.name, messages=send_messages)
+    import json as _json
+    _ctx_chars = sum(len(_json.dumps(m)) for m in send_messages)
+    _last_user = next((m["content"][:200] for m in reversed(send_messages) if m.get("role") == "user"), "")
+    get_logger().write_event("agent_prompt", agent=self.name, message_count=len(send_messages), context_chars=_ctx_chars, last_user=_last_user)
 
     content = _m.model_provider.generate(self, model, sender, send_messages)
     message = {"role": "assistant", "content": content or "", "name": self.name}
@@ -327,8 +330,16 @@ def build_employee_dict(persona_map=None):
             instance.first_name = parts[0] if parts else username
             instance.last_name = parts[1] if len(parts) > 1 else ""
             employee_dict[username] = instance
-        if "CEO" not in employee_dict:
+        if not any(isinstance(v, Human) for v in employee_dict.values()):
             employee_dict["CEO"] = Human()
+        # Backfill conversation_history so every role knows about every peer,
+        # regardless of instantiation order.
+        all_keys = set(employee_dict)
+        for role in employee_dict.values():
+            ch = getattr(role, "conversation_history", None)
+            if isinstance(ch, dict):
+                for key in all_keys:
+                    ch.setdefault(key, [])
     else:
         employee_dict["CEO"] = Human()
         employee_dict["Ops"] = Ops(employee_dict)
