@@ -2345,14 +2345,6 @@ class BuiltinToolTests(unittest.TestCase):
 
     def test_agent_spawn_sub_agent_can_call_shell_run(self):
         """Sub-agent spawned by an SE-like role with shell capability can execute builtin.shell_run."""
-        import tempfile as _tf
-
-        workspace_temp = _tf.TemporaryDirectory()
-        self.addCleanup(workspace_temp.cleanup)
-        original_workspace = main.agent_workspace_store
-        main.agent_workspace_store = main.AgentWorkspaceStore(workspace_temp.name)
-        self.addCleanup(lambda: setattr(main, "agent_workspace_store", original_workspace))
-
         # Simulate caller with SE capabilities so sub-agent inherits shell.
         prev_caller = main.active_tool_caller
         prev_caller_name = main.active_tool_caller_name
@@ -2379,11 +2371,9 @@ class BuiltinToolTests(unittest.TestCase):
             finally:
                 main.active_tool_caller = prev
                 main.active_tool_caller_name = prev_name
-            import json as _j
-            out = _j.loads(result).get("stdout", "").strip()
+            out = json.loads(result).get("stdout", "").strip()
             return f"shell output: {out}"
 
-        from unittest.mock import patch
         with patch("robits.core.providers.ChatCompletionsProvider.generate", fake_generate):
             result = main.agent_spawn(
                 {"alex_chen": main.active_tool_caller},
