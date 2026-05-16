@@ -1,10 +1,30 @@
 """Model provider implementations and API helpers."""
 import json
 import random
+import re
 import time
 from uuid import uuid4
 
 from robits.core.config import _config as _m
+
+# Compiled once at module load — used by _extract_xml_tool_calls
+_XML_BLOCK_RE = re.compile(
+    r"<tool_call>\s*(.*?)\s*</tool_call>",
+    flags=re.DOTALL | re.IGNORECASE,
+)
+_XML_QWEN_FN_RE = re.compile(
+    r"<function=(?P<name>[^>]+)>\s*(?P<body>.*?)\s*</function>",
+    flags=re.DOTALL,
+)
+_XML_QWEN_PARAM_RE = re.compile(
+    r"<parameter=(?P<key>[^>]+)>\s*(?P<val>.*?)\s*</parameter>",
+    flags=re.DOTALL,
+)
+# Used by _extract_thinking_chat
+_INLINE_THINK_RE = re.compile(
+    r"<(?P<tag>think|thinking)>(?P<body>.*?)</(?P=tag)>",
+    flags=re.DOTALL | re.IGNORECASE,
+)
 
 
 def _response_text(response):
@@ -61,28 +81,128 @@ def _with_model_retries(operation):
             attempt += 1
 
 
+def _normalize_xml_tool_name(registry, name):
+    """Map a local-model tool name to its registry canonical form.
+
+    Local models (Qwen, Granite) emit snake_case names such as
+    ``memory_list_digests`` while the registry stores dotted names
+    (``memory.list_digests``) with double-underscore OpenAI aliases
+    (``memory__list_digests``).  This function tries three lookups in order:
+
+    1. Direct resolve (handles dotted names and ``__`` aliases).
+    2. Dot-substitution scan: find a canonical name whose dots-replaced-by-
+       underscores form matches the input.
+    3. Fallback to the original name so ``execute`` can return a clear error.
+    """
+    resolved = registry.resolve_name(name)
+    if registry.has(resolved):
+        return resolved
+    for canonical in registry._tools:
+        if canonical.replace(".", "_") == name:
+            return canonical
+    return name
+
+
+def _extract_xml_tool_calls(text):
+    """Extract <tool_call> blocks from model content and return (clean_text, tool_call_list).
+
+    Handles two sub-formats emitted by local models when LM Studio does not
+    translate them to the OpenAI tool_calls array:
+
+    Qwen XML:
+        <tool_call>
+        <function=NAME>
+        <parameter=KEY>VALUE</parameter>
+        </function>
+        </tool_call>
+
+    Granite / generic JSON-in-tag:
+        <tool_call>
+        {"name": "TOOL", "arguments": "{...}"}
+        </tool_call>
+
+    Returns a list of dicts: [{"name": str, "arguments": dict}, ...].
+    Unrecognised blocks are left in the cleaned text.
+    """
+    extracted = []
+
+    def _handle_block(inner):
+        fn_match = _XML_QWEN_FN_RE.search(inner)
+        if fn_match:
+            name = fn_match.group("name").strip()
+            body = fn_match.group("body")
+            args = {}
+            for pm in _XML_QWEN_PARAM_RE.finditer(body):
+                args[pm.group("key").strip()] = pm.group("val").strip()
+            extracted.append({"name": name, "arguments": args})
+            return True
+        inner_stripped = inner.strip()
+        if inner_stripped.startswith("{"):
+            try:
+                obj = json.loads(inner_stripped)
+                name = obj.get("name") or obj.get("function")
+                raw_args = obj.get("arguments") or obj.get("args") or {}
+                if isinstance(raw_args, str):
+                    try:
+                        raw_args = json.loads(raw_args)
+                    except json.JSONDecodeError:
+                        raw_args = {}
+                if name and isinstance(raw_args, dict):
+                    extracted.append({"name": name, "arguments": raw_args})
+                    return True
+            except json.JSONDecodeError:
+                pass
+        return False
+
+    def _replace(match):
+        inner = match.group(1)
+        return "" if _handle_block(inner) else match.group(0)
+
+    clean = _XML_BLOCK_RE.sub(_replace, text).strip()
+    return clean, extracted
+
+
+def _execute_tool_call(registry, role, tool_name, call_id, args, employee_dict):
+    """Execute one tool call and return the tool-result message dict.
+
+    Handles event emission, result recording (skipped for agent.think), and
+    formats the OpenAI-style tool result message.  ``tool_name`` must already
+    be the registry canonical form.
+    """
+    payload = {
+        "agent": getattr(role, "name", None),
+        "role_name": getattr(role, "runtime_role_name", None),
+        "call_id": call_id,
+        "tool_name": tool_name,
+        "arguments": args,
+    }
+    _emit_role_tool_event(role, "tool_call.requested", payload)
+    result = registry.execute(tool_name, args, employee_dict, caller=role)
+    event_type = "tool_call.failed" if _tool_result_is_error(result) else "tool_call.executed"
+    _emit_role_tool_event(role, event_type, {**payload, "result": result})
+    if registry.resolve_name(tool_name) != "agent.think":
+        _record_role_tool_result(
+            role,
+            f"{event_type}: {tool_name}({json.dumps(args, sort_keys=True)}) -> {result}",
+        )
+    return {"role": "tool", "tool_call_id": call_id, "content": str(result)}
+
+
 def _extract_thinking_chat(message):
     """Extract thinking/reasoning from a ChatCompletions message.
 
     Returns (content_text, thinking_text | None). content_text has inline
     thinking tags stripped so only the final expressed output is returned.
     """
-    import re as _re
-
-    _inline_pattern = _re.compile(
-        r"<(?P<tag>think|thinking)>(?P<body>.*?)</(?P=tag)>",
-        flags=_re.DOTALL | _re.IGNORECASE,
-    )
-
     def _strip_inline_thinking(text):
         if not text:
             return "", None
         blocks = []
-        for match in _inline_pattern.finditer(text):
+        for match in _INLINE_THINK_RE.finditer(text):
             body = (match.group("body") or "").strip()
             if body:
                 blocks.append(body)
-        clean = _inline_pattern.sub("", text).strip()
+        clean = _INLINE_THINK_RE.sub("", text).strip()
         return clean, ("\n\n".join(blocks) if blocks else None)
 
     def _join_thinking(*parts):
@@ -250,6 +370,41 @@ class ChatCompletionsProvider(ModelProvider):
                 current = getattr(role, "runtime_thinking", None)
                 role.runtime_thinking = (current + "\n\n" + thinking) if current else thinking
             if not tool_calls:
+                # Check for XML-format tool calls emitted by Qwen/Granite when LM
+                # Studio doesn't translate them to the OpenAI tool_calls array.
+                if tools and "<tool_call>" in (content or ""):
+                    clean_content, xml_calls = _extract_xml_tool_calls(content or "")
+                    if xml_calls and employee_dict is not None:
+                        # Synthesise an assistant message with fabricated tool_calls so
+                        # the model sees proper tool results on the next round.
+                        synth_calls = []
+                        for xc in xml_calls:
+                            synth_calls.append({
+                                "id": f"call_{uuid4().hex[:16]}",
+                                "type": "function",
+                                "function": {
+                                    "name": xc["name"],
+                                    "arguments": json.dumps(xc["arguments"]),
+                                },
+                            })
+                        kwargs["messages"] = list(kwargs["messages"]) + [{
+                            "role": "assistant",
+                            "content": clean_content or None,
+                            "tool_calls": synth_calls,
+                        }]
+                        tool_results = [
+                            _execute_tool_call(
+                                self.registry,
+                                role,
+                                _normalize_xml_tool_name(self.registry, xc["name"]),
+                                call_dict["id"],
+                                xc["arguments"],
+                                employee_dict,
+                            )
+                            for call_dict, xc in zip(synth_calls, xml_calls)
+                        ]
+                        kwargs["messages"] = kwargs["messages"] + tool_results
+                        continue
                 return content
             if employee_dict is None:
                 return "Error: Tool call requested but no employee dictionary is available."
@@ -258,37 +413,27 @@ class ChatCompletionsProvider(ModelProvider):
             for call in tool_calls:
                 tool_name = call.function.name
                 call_id = call.id
-                payload = {
-                    "agent": getattr(role, "name", None),
-                    "role_name": getattr(role, "runtime_role_name", None),
-                    "call_id": call_id,
-                    "tool_name": tool_name,
-                }
                 try:
                     args = json.loads(call.function.arguments or "{}")
                 except json.JSONDecodeError as error:
-                    payload["arguments"] = call.function.arguments
-                    payload["error"] = f"Invalid tool arguments JSON: {error}"
+                    payload = {
+                        "agent": getattr(role, "name", None),
+                        "role_name": getattr(role, "runtime_role_name", None),
+                        "call_id": call_id,
+                        "tool_name": tool_name,
+                        "arguments": call.function.arguments,
+                        "error": f"Invalid tool arguments JSON: {error}",
+                    }
                     _emit_role_tool_event(role, "tool_call.requested", payload)
-                    result = f"Error: Invalid tool arguments JSON: {error}"
-                else:
-                    payload["arguments"] = args
-                    _emit_role_tool_event(role, "tool_call.requested", payload)
-                    result = self.registry.execute(tool_name, args, employee_dict, caller=role)
-                status_payload = {**payload, "result": result}
-                event_type = "tool_call.failed" if _tool_result_is_error(result) else "tool_call.executed"
-                _emit_role_tool_event(role, event_type, status_payload)
-                resolved_name = self.registry.resolve_name(tool_name)
-                if resolved_name != "agent.think":
-                    _record_role_tool_result(
-                        role,
-                        f"{event_type}: {tool_name}({json.dumps(payload.get('arguments'), sort_keys=True)}) -> {result}",
-                    )
-                tool_results.append({
-                    "role": "tool",
-                    "tool_call_id": call_id,
-                    "content": str(result),
-                })
+                    tool_results.append({
+                        "role": "tool",
+                        "tool_call_id": call_id,
+                        "content": f"Error: Invalid tool arguments JSON: {error}",
+                    })
+                    continue
+                tool_results.append(
+                    _execute_tool_call(self.registry, role, tool_name, call_id, args, employee_dict)
+                )
             kwargs["messages"] = kwargs["messages"] + tool_results
         return "Error: Too many consecutive tool-call rounds."
 
