@@ -872,11 +872,17 @@ def agent_spawn(employee_dict, task, tools=None, model=None):
     ]
 
     from robits.core.providers import ChatCompletionsProvider
+    from termcolor import colored
+    task_preview = task.strip()[:80]
+    print(colored(f"[spawn] {sub_role.name} ({use_model}) — \"{task_preview}\"", "dark_grey"))
     provider = ChatCompletionsProvider(_m.client, _m.tool_registry)
     try:
         result = provider.generate(sub_role, use_model, caller_name, messages)
     except Exception as exc:
+        print(colored(f"[spawn] {sub_role.name} -> error: {exc}", "dark_grey"))
         return f"Error: sub-agent failed: {exc}"
+    char_count = len(result or "")
+    print(colored(f"[spawn] {sub_role.name} -> {char_count} chars", "dark_grey"))
     return result or "Error: sub-agent returned no response."
 
 

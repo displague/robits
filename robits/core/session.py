@@ -616,7 +616,8 @@ class Session:
         if not source_refs:
             return
         try:
-            for agent_id in list(self.participants):
+            agents = list(self.participants)
+            for agent_id in agents:
                 _m.memory_store.append_memory_digest(
                     content=content,
                     source_refs=source_refs,
@@ -627,6 +628,13 @@ class Session:
                     system_only=False,
                     metadata={"trigger_reasons": list(reasons or ["turn_interval"])},
                 )
+            trigger = ",".join(reasons or ["turn_interval"])
+            chars = len(content)
+            print(colored(
+                f"[memory] episodic digest — {len(agents)} agent(s) turn {self.turns_completed}"
+                f" ({len(window)} turns, {chars} chars, trigger: {trigger})",
+                "dark_grey",
+            ))
             self._last_digest_turn = self.turns_completed
             self._last_digest_at = time.monotonic()
         except Exception:
@@ -656,7 +664,8 @@ class Session:
         ]
         if not content_lines:
             return
-        for agent_id in list(self.participants):
+        agents = list(self.participants)
+        for agent_id in agents:
             try:
                 _m.memory_store.append_memory_digest(
                     content=f"Automatic {label} checkpoint:\n" + "\n".join(content_lines),
@@ -670,6 +679,10 @@ class Session:
                 )
             except Exception:
                 pass
+        print(colored(
+            f"[memory] {digest_type} digest — {len(agents)} agent(s) turn {self.turns_completed}",
+            "dark_grey",
+        ))
 
     def _write_org_chat_jsonl(self, entry):
         """Append a non-directed transcript entry as a JSONL line to the org workspace chat log."""
@@ -710,7 +723,8 @@ class Session:
             pass
         if not source_refs:
             return
-        for agent_id in list(self.participants):
+        agents = list(self.participants)
+        for agent_id in agents:
             try:
                 _m.memory_store.append_memory_digest(
                     content=content,
@@ -724,6 +738,11 @@ class Session:
                 )
             except Exception:
                 pass
+        print(colored(
+            f"[memory] org chat digest — {len(agents)} agent(s) turn {self.turns_completed}"
+            f" ({len(lines)} messages)",
+            "dark_grey",
+        ))
 
     def record_thought(self, agent_name, content, visibility="private"):
         """Persist a private thought to memory and emit a thought.recorded event."""
