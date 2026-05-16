@@ -10,6 +10,7 @@ this module's namespace (i.e. classes, functions, and CLI helpers).
 import sys
 import time  # kept for patch("main.time.sleep") compatibility in tests
 import types
+from datetime import datetime
 from pathlib import Path
 
 from robits.core.config import _config, Config  # noqa: F401
@@ -19,7 +20,7 @@ from robits.core.config import _config, Config  # noqa: F401
 # Sub-module imports (order matters: config must be fully initialised first)
 # ---------------------------------------------------------------------------
 
-from robits.core.io import TeeStream  # noqa: E402
+from robits.core.io import TeeStream, JsonlLogger, get_logger, set_logger  # noqa: E402
 from robits.core.tools import (  # noqa: E402
     SAFE_TOOL_BUILTINS,
     ToolDefinition,
@@ -191,6 +192,11 @@ def run_simulation(initial_message=None, max_turns=None):
     return session.run(initial_message=initial_message, max_turns=max_turns)
 
 
+def _default_log_path():
+    ts = datetime.now().strftime("%Y-%m-%dT%H-%M-%S")
+    return Path("logs") / f"robits-{ts}.jsonl"
+
+
 def parse_args(argv=None):
     """Parse CLI arguments and return the namespace."""
     import argparse
@@ -198,29 +204,28 @@ def parse_args(argv=None):
     parser.add_argument("--prompt", help="Initial message to start the simulation.")
     parser.add_argument("--turns", type=int, help="Maximum model turns to run.")
     parser.add_argument(
-        "--log", help="Write the console transcript to this file while still printing it."
+        "--log", help="Path for the JSONL log file (default: logs/robits-<timestamp>.jsonl)."
+    )
+    parser.add_argument(
+        "--no-log", action="store_true", help="Disable log file creation."
     )
     return parser.parse_args(argv)
 
 
 def main(argv=None):
-    """CLI entry point: parse args, optionally tee stdout/stderr, run simulation."""
+    """CLI entry point: parse args, open JSONL log, run simulation."""
     args = parse_args(argv)
-    if args.log:
-        log_path = Path(args.log)
-        log_path.parent.mkdir(parents=True, exist_ok=True)
-        with open(log_path, "w", encoding="utf-8", buffering=1) as log_file:
-            original_stdout = sys.stdout
-            original_stderr = sys.stderr
-            sys.stdout = TeeStream(original_stdout, log_file)
-            sys.stderr = TeeStream(original_stderr, log_file)
-            try:
-                run_simulation(initial_message=args.prompt, max_turns=args.turns)
-            finally:
-                sys.stdout = original_stdout
-                sys.stderr = original_stderr
-    else:
+    if getattr(args, "no_log", False):
         run_simulation(initial_message=args.prompt, max_turns=args.turns)
+        return
+    log_path = Path(args.log) if args.log else _default_log_path()
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(log_path, "w", encoding="utf-8", buffering=1) as log_file:
+        set_logger(JsonlLogger(log_file))
+        try:
+            run_simulation(initial_message=args.prompt, max_turns=args.turns)
+        finally:
+            set_logger(None)
 
 
 if __name__ == "__main__":

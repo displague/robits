@@ -19,6 +19,7 @@ from robits.core.tools import (
     _validate_tool_code_ast,
 )
 from robits.runtime.tool_proposals import ToolProposalStore
+from robits.core.io import get_logger
 
 
 def workspace_list(employee_dict, agent_name, path=""):
@@ -875,14 +876,17 @@ def agent_spawn(employee_dict, task, tools=None, model=None):
     from termcolor import colored
     task_preview = task.strip()[:80]
     print(colored(f"[spawn] {sub_role.name} ({use_model}) — \"{task_preview}\"", "dark_grey"))
+    get_logger().write_event("spawn_start", agent=sub_role.name, model=use_model, task=task_preview)
     provider = ChatCompletionsProvider(_m.client, _m.tool_registry)
     try:
         result = provider.generate(sub_role, use_model, caller_name, messages)
     except Exception as exc:
         print(colored(f"[spawn] {sub_role.name} -> error: {exc}", "dark_grey"))
+        get_logger().write_event("spawn_error", agent=sub_role.name, error=str(exc))
         return f"Error: sub-agent failed: {exc}"
     char_count = len(result or "")
     print(colored(f"[spawn] {sub_role.name} -> {char_count} chars", "dark_grey"))
+    get_logger().write_event("spawn_result", agent=sub_role.name, chars=char_count)
     return result or "Error: sub-agent returned no response."
 
 
