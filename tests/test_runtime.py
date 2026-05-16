@@ -3686,12 +3686,13 @@ class XmlToolCallExtractionTests(unittest.TestCase):
             "</tool_call>"
         )
 
-        call_count = [0]
+        call_count = 0
         tool_called = []
 
         def mock_create(**kw):
-            call_count[0] += 1
-            if call_count[0] == 1:
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
                 return SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(
                     content=qwen_response_text,
                     tool_calls=None,
@@ -3711,13 +3712,14 @@ class XmlToolCallExtractionTests(unittest.TestCase):
             tool_called.append((name, args))
             return '{"results": []}'
 
-        registry = SimpleNamespace(
-            as_chat_completion_tools=lambda r: [{"type": "function", "function": {"name": "memory_search", "parameters": {}}}],
-            execute=mock_execute,
-            resolve_name=lambda n: n,
-            has=lambda n: n == "memory_search",
-            _tools={"memory_search": object()},
-        )
+        class _MockRegistry:
+            _tools = {"memory_search": object()}
+            as_chat_completion_tools = lambda self, r: [{"type": "function", "function": {"name": "memory_search", "parameters": {}}}]
+            execute = staticmethod(mock_execute)
+            resolve_name = staticmethod(lambda n: n)
+            def __contains__(self, name): return name in self._tools
+
+        registry = _MockRegistry()
         provider = main.ChatCompletionsProvider.__new__(main.ChatCompletionsProvider)
         provider.registry = registry
         provider.client = SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=mock_create)))
@@ -3730,33 +3732,39 @@ class XmlToolCallExtractionTests(unittest.TestCase):
 
     def test_normalize_xml_tool_name_snake_to_dotted(self):
         """Snake_case names from Qwen XML resolve to dotted registry canonical form."""
-        registry = SimpleNamespace(
-            resolve_name=lambda n: n,
-            has=lambda n: False,
-            _tools={"memory.list_digests": object(), "memory.search": object(), "agent.think": object()},
-        )
-        self.assertEqual(main._normalize_xml_tool_name(registry, "memory_list_digests"), "memory.list_digests")
-        self.assertEqual(main._normalize_xml_tool_name(registry, "memory_search"), "memory.search")
-        self.assertEqual(main._normalize_xml_tool_name(registry, "agent_think"), "agent.think")
+        tools = {"memory.list_digests": object(), "memory.search": object(), "agent.think": object()}
+
+        class R:
+            _tools = tools
+            resolve_name = staticmethod(lambda n: n)
+            def __contains__(self, n): return n in self._tools
+
+        r = R()
+        self.assertEqual(main._normalize_xml_tool_name(r, "memory_list_digests"), "memory.list_digests")
+        self.assertEqual(main._normalize_xml_tool_name(r, "memory_search"), "memory.search")
+        self.assertEqual(main._normalize_xml_tool_name(r, "agent_think"), "agent.think")
 
     def test_normalize_xml_tool_name_already_canonical(self):
         """Dotted or double-underscore names pass through resolve_name unchanged."""
-        registry = SimpleNamespace(
-            resolve_name=lambda n: "memory.search" if n in ("memory.search", "memory__search") else n,
-            has=lambda n: n == "memory.search",
-            _tools={"memory.search": object()},
-        )
-        self.assertEqual(main._normalize_xml_tool_name(registry, "memory.search"), "memory.search")
-        self.assertEqual(main._normalize_xml_tool_name(registry, "memory__search"), "memory.search")
+        tools = {"memory.search": object()}
+
+        class R:
+            _tools = tools
+            resolve_name = staticmethod(lambda n: "memory.search" if n in ("memory.search", "memory__search") else n)
+            def __contains__(self, n): return n in self._tools
+
+        r = R()
+        self.assertEqual(main._normalize_xml_tool_name(r, "memory.search"), "memory.search")
+        self.assertEqual(main._normalize_xml_tool_name(r, "memory__search"), "memory.search")
 
     def test_normalize_xml_tool_name_unknown_fallthrough(self):
         """Unknown names are returned as-is so execute can produce a clear error."""
-        registry = SimpleNamespace(
-            resolve_name=lambda n: n,
-            has=lambda n: False,
-            _tools={},
-        )
-        self.assertEqual(main._normalize_xml_tool_name(registry, "no_such_tool"), "no_such_tool")
+        class R:
+            _tools = {}
+            resolve_name = staticmethod(lambda n: n)
+            def __contains__(self, n): return False
+
+        self.assertEqual(main._normalize_xml_tool_name(R(), "no_such_tool"), "no_such_tool")
 
 
 class ThinkingConsoleDisplayTests(unittest.TestCase):
@@ -3768,12 +3776,11 @@ class ThinkingConsoleDisplayTests(unittest.TestCase):
         self.store = SQLiteMemoryStore(Path(self.store_temp.name) / "display.sqlite3")
         self.addCleanup(self.store.close)
 
-    def _make_session_pair(self, interact_fn, store):
-        """Return (session, printed_list) with CEO→SE pair; interact_fn is called on SE's turn."""
-        printed = []
-        sender = SimpleNamespace(name="CEO", lifecycle_state="active",
-                                 interact=lambda *a, **kw: "hello",
-                                 update_group_conversations=lambda m: None)
+    def _make_session(self, interact_fn):
+        """Build a CEO→SE session pair with memory_store set; returns (session, receiver)."""
+        old_store = main.memory_store
+        main.memory_store = self.store
+        self.addCleanup(lambda: setattr(main, "memory_store", old_store))
         receiver = SimpleNamespace(
             name="SE",
             lifecycle_state="active",
@@ -3783,42 +3790,28 @@ class ThinkingConsoleDisplayTests(unittest.TestCase):
             runtime_tool_results=[],
             waiting_until=None,
         )
-        old_store = main.memory_store
-        main.memory_store = store
+        sender = SimpleNamespace(
+            name="CEO",
+            lifecycle_state="active",
+            interact=lambda *a, **kw: "hello",
+            update_group_conversations=lambda m: None,
+        )
         session = main.Session(participants={"CEO": sender, "SE": receiver})
-        return session, printed, old_store
+        return session, receiver
 
     def test_thinking_header_printed_when_set(self):
         """A dim line showing char count should appear before the agent response."""
         printed = []
 
         def se_interact(sender_name, prompt, *a, **kw):
-            # Simulate provider setting runtime_thinking after prepare_agent_runtime cleared it.
             se_interact._role.runtime_thinking = "I reasoned carefully."
             return "my answer"
 
-        sender = SimpleNamespace(name="CEO", lifecycle_state="active",
-                                 interact=lambda *a, **kw: "hello",
-                                 update_group_conversations=lambda m: None)
-        receiver = SimpleNamespace(
-            name="SE",
-            lifecycle_state="active",
-            interact=se_interact,
-            update_group_conversations=lambda m: None,
-            runtime_thinking=None,
-            runtime_tool_results=[],
-            waiting_until=None,
-        )
+        session, receiver = self._make_session(se_interact)
         se_interact._role = receiver
 
-        old_store = main.memory_store
-        main.memory_store = self.store
-        try:
-            session = main.Session(participants={"CEO": sender, "SE": receiver})
-            with patch("builtins.print", side_effect=lambda *a, **kw: printed.append(str(a[0]))):
-                session.step("hello")
-        finally:
-            main.memory_store = old_store
+        with patch("builtins.print", side_effect=lambda *a, **kw: printed.append(str(a[0]))):
+            session.step("hello")
 
         thinking_lines = [l for l in printed if "\U0001f914" in l]
         self.assertTrue(thinking_lines, "Expected a thinking header line in console output")
@@ -3829,26 +3822,10 @@ class ThinkingConsoleDisplayTests(unittest.TestCase):
     def test_no_thinking_header_when_empty(self):
         """No thinking header when runtime_thinking is None."""
         printed = []
-        sender = SimpleNamespace(name="CEO", lifecycle_state="active",
-                                 interact=lambda *a, **kw: "hello",
-                                 update_group_conversations=lambda m: None)
-        receiver = SimpleNamespace(
-            name="SE",
-            lifecycle_state="active",
-            interact=lambda *a, **kw: "plain answer",
-            update_group_conversations=lambda m: None,
-            runtime_thinking=None,
-            runtime_tool_results=[],
-            waiting_until=None,
-        )
-        old_store = main.memory_store
-        main.memory_store = self.store
-        try:
-            session = main.Session(participants={"CEO": sender, "SE": receiver})
-            with patch("builtins.print", side_effect=lambda *a, **kw: printed.append(str(a[0]))):
-                session.step("hello")
-        finally:
-            main.memory_store = old_store
+        session, _ = self._make_session(lambda *a, **kw: "plain answer")
+
+        with patch("builtins.print", side_effect=lambda *a, **kw: printed.append(str(a[0]))):
+            session.step("hello")
 
         thinking_lines = [l for l in printed if "\U0001f914" in l]
         self.assertFalse(thinking_lines)

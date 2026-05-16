@@ -95,7 +95,7 @@ def _normalize_xml_tool_name(registry, name):
     3. Fallback to the original name so ``execute`` can return a clear error.
     """
     resolved = registry.resolve_name(name)
-    if registry.has(resolved):
+    if resolved in registry:
         return resolved
     for canonical in registry._tools:
         if canonical.replace(".", "_") == name:
@@ -387,12 +387,13 @@ class ChatCompletionsProvider(ModelProvider):
                                     "arguments": json.dumps(xc["arguments"]),
                                 },
                             })
-                        kwargs["messages"] = list(kwargs["messages"]) + [{
+                        msgs = list(kwargs["messages"])
+                        msgs.append({
                             "role": "assistant",
                             "content": clean_content or None,
                             "tool_calls": synth_calls,
-                        }]
-                        tool_results = [
+                        })
+                        msgs.extend(
                             _execute_tool_call(
                                 self.registry,
                                 role,
@@ -402,8 +403,8 @@ class ChatCompletionsProvider(ModelProvider):
                                 employee_dict,
                             )
                             for call_dict, xc in zip(synth_calls, xml_calls)
-                        ]
-                        kwargs["messages"] = kwargs["messages"] + tool_results
+                        )
+                        kwargs["messages"] = msgs
                         continue
                 return content
             if employee_dict is None:
