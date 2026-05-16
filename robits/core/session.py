@@ -616,7 +616,8 @@ class Session:
         if not source_refs:
             return
         try:
-            for agent_id in list(self.participants):
+            agents = list(self.participants)
+            for agent_id in agents:
                 _m.memory_store.append_memory_digest(
                     content=content,
                     source_refs=source_refs,
@@ -627,6 +628,13 @@ class Session:
                     system_only=False,
                     metadata={"trigger_reasons": list(reasons or ["turn_interval"])},
                 )
+            trigger = ",".join(reasons or ["turn_interval"])
+            chars = len(content)
+            print(colored(
+                f"[memory] episodic digest — {len(agents)} agent(s) turn {self.turns_completed}"
+                f" ({len(window)} turns, {chars} chars, trigger: {trigger})",
+                "dark_grey",
+            ))
             self._last_digest_turn = self.turns_completed
             self._last_digest_at = time.monotonic()
         except Exception:
@@ -656,7 +664,8 @@ class Session:
         ]
         if not content_lines:
             return
-        for agent_id in list(self.participants):
+        agents = list(self.participants)
+        for agent_id in agents:
             try:
                 _m.memory_store.append_memory_digest(
                     content=f"Automatic {label} checkpoint:\n" + "\n".join(content_lines),
@@ -670,6 +679,10 @@ class Session:
                 )
             except Exception:
                 pass
+        print(colored(
+            f"[memory] {digest_type} digest — {len(agents)} agent(s) turn {self.turns_completed}",
+            "dark_grey",
+        ))
 
     def _write_org_chat_jsonl(self, entry):
         """Append a non-directed transcript entry as a JSONL line to the org workspace chat log."""
@@ -710,7 +723,8 @@ class Session:
             pass
         if not source_refs:
             return
-        for agent_id in list(self.participants):
+        agents = list(self.participants)
+        for agent_id in agents:
             try:
                 _m.memory_store.append_memory_digest(
                     content=content,
@@ -724,6 +738,11 @@ class Session:
                 )
             except Exception:
                 pass
+        print(colored(
+            f"[memory] org chat digest — {len(agents)} agent(s) turn {self.turns_completed}"
+            f" ({len(lines)} messages)",
+            "dark_grey",
+        ))
 
     def record_thought(self, agent_name, content, visibility="private"):
         """Persist a private thought to memory and emit a thought.recorded event."""
@@ -871,7 +890,7 @@ class Session:
             prompt = f"[Note: you were mentioned in this message]\n{prompt}"
         raw_prompt = prepend_verified_tool_results(
             prompt,
-            self.recent_system_events() + system_events,
+            system_events,
         )
         effective_org_lines = _m.org_chat_context_lines if self._effective_clock_state() == "on" else 0
         org_context = format_org_chat_context(self.transcript, effective_org_lines)
@@ -914,9 +933,41 @@ class Session:
         if last_response is None:
             last_response = ""
 
+        _loop_window: list[str] = []
+        _loop_threshold = _m.loop_detect_threshold
         try:
             while effective_max_turns is None or self.turns_completed < effective_max_turns:
                 last_response = self.step(last_response)
+                _normalized = " ".join((last_response or "").lower().split())
+                # Only count idle turns — if this turn had tool calls or directed
+                # routing, useful work is happening, so reset the window.
+                _last_entry = self.transcript[-1] if self.transcript else None
+                _turn_was_active = _last_entry is not None and (
+                    bool(getattr(_last_entry, "system_events", None))
+                    or getattr(_last_entry, "directed", False)
+                )
+                if _turn_was_active:
+                    _loop_window.clear()
+                else:
+                    _loop_window.append(_normalized)
+                    if len(_loop_window) > _loop_threshold:
+                        _loop_window.pop(0)
+                if (
+                    len(_loop_window) >= _loop_threshold
+                    and len(set(_loop_window)) == 1
+                    and _normalized
+                ):
+                    print(colored(
+                        f"\n[Loop detector] {_loop_threshold} identical consecutive responses "
+                        f"detected with no tool calls or directed routing — possible greeting loop. Halting.",
+                        "yellow",
+                    ))
+                    self.event_stream.emit(
+                        "session.loop_detected",
+                        self.run_id,
+                        {"response": last_response, "consecutive": _loop_threshold},
+                    )
+                    break
         except SystemExit:
             print(colored("\nSession ended by CEO.", "yellow"))
 

@@ -1938,7 +1938,8 @@ class RuntimeTests(unittest.TestCase):
         self.assertEqual(session.transcript[0].response, "")
         self.assertIn("tool_call.executed: agent__context", session.transcript[0].system_events[0])
 
-    def test_recent_verified_events_are_included_in_next_agent_prompt(self):
+    def test_prior_turn_tool_results_not_injected_into_unrelated_agent_prompt(self):
+        # Tool results from HR→Ops in a prior turn must not pollute SE's prompt.
         participants = build_fake_participants()
         session = main.Session(participants=participants, run_id="session-1")
         session.transcript.append(
@@ -1956,8 +1957,70 @@ class RuntimeTests(unittest.TestCase):
         with redirect_stdout(StringIO()):
             session.step("SE, what changed?")
 
-        self.assertIn("Verified runtime results", participants["SE"].received[0][1])
-        self.assertIn("Created a new role: QA", participants["SE"].received[0][1])
+        self.assertNotIn("Verified runtime results", participants["SE"].received[0][1])
+        self.assertNotIn("Created a new role: QA", participants["SE"].received[0][1])
+
+    def test_loop_detector_halts_on_identical_consecutive_responses(self):
+        class GreetingRole:
+            """Always replies with the same greeting — simulates a stuck model."""
+            def __init__(self, name):
+                self.name = name
+                self.group_conversation_history = {}
+            def interact(self, sender=None, prompt=None):
+                return "Hi! How can I help you today?"
+            def update_group_conversations(self, msg):
+                pass
+
+        participants = {"CEO": GreetingRole("CEO"), "SE": GreetingRole("SE")}
+        with patch.object(main._config, "loop_detect_threshold", 3):
+            session = main.Session(participants=participants, run_id="loop-test")
+            with redirect_stdout(StringIO()):
+                session.run(initial_message="Hi!", max_turns=20)
+        # Loop detector should halt before max_turns.
+        self.assertLess(session.turns_completed, 20)
+        loop_events = [
+            e for e in session.event_stream._events
+            if getattr(e, "event_type", None) == "session.loop_detected"
+        ]
+        self.assertTrue(loop_events, "Expected session.loop_detected event")
+
+    def test_loop_detector_resets_on_turn_with_tool_calls(self):
+        """Loop window must clear when a turn produces system_events (tool calls)."""
+        turn = [0]
+
+        class MixedRole:
+            def __init__(self, name):
+                self.name = name
+                self.group_conversation_history = {}
+            def interact(self, sender=None, prompt=None):
+                turn[0] += 1
+                return "Hi! How can I help you today?"
+            def update_group_conversations(self, msg):
+                pass
+
+        participants = {"CEO": MixedRole("CEO"), "SE": MixedRole("SE")}
+        with patch.object(main._config, "loop_detect_threshold", 3):
+            session = main.Session(participants=participants, run_id="loop-reset-test")
+            # Inject a fake tool event into turn 2 to simulate a turn with tool activity.
+            original_step = session.step
+            call_count = [0]
+            def patched_step(msg):
+                call_count[0] += 1
+                resp = original_step(msg)
+                if call_count[0] == 2 and session.transcript:
+                    session.transcript[-1].system_events.append("tool_call.executed: fake({}) -> ok")
+                return resp
+            session.step = patched_step
+            with redirect_stdout(StringIO()):
+                session.run(initial_message="Hi!", max_turns=20)
+        loop_events = [
+            e for e in session.event_stream._events
+            if getattr(e, "event_type", None) == "session.loop_detected"
+        ]
+        # Turn 2 had a tool event so window resets — loop should not fire until
+        # 3 more idle turns, requiring more than 4 total turns.
+        self.assertGreater(session.turns_completed, 4)
+        self.assertTrue(loop_events, "Loop should still eventually be detected")
 
     def test_session_returns_native_tool_events_to_agent_context(self):
         class NativeToolEventProvider:
