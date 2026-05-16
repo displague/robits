@@ -894,7 +894,7 @@ def agent_spawn(employee_dict, task, tools=None, model=None):
         return f"Error: sub-agent failed: {exc}"
     char_count = len(result or "")
     print(colored(f"[spawn] {sub_role.name} -> {char_count} chars", "dark_grey"))
-    get_logger().write_event("spawn_result", agent=sub_role.name, chars=char_count)
+    get_logger().write_event("spawn_result", agent=sub_role.name, chars=char_count, preview=(result or "")[:200])
     return result or "Error: sub-agent returned no response."
 
 

@@ -2343,6 +2343,57 @@ class BuiltinToolTests(unittest.TestCase):
             main.agent_spawn({}, "summarise the readme")
         self.assertNotIn("builtin.shell_run", captured["system"])
 
+    def test_agent_spawn_sub_agent_can_call_shell_run(self):
+        """Sub-agent spawned by an SE-like role with shell capability can execute builtin.shell_run."""
+        import tempfile as _tf
+
+        workspace_temp = _tf.TemporaryDirectory()
+        self.addCleanup(workspace_temp.cleanup)
+        original_workspace = main.agent_workspace_store
+        main.agent_workspace_store = main.AgentWorkspaceStore(workspace_temp.name)
+        self.addCleanup(lambda: setattr(main, "agent_workspace_store", original_workspace))
+
+        # Simulate caller with SE capabilities so sub-agent inherits shell.
+        prev_caller = main.active_tool_caller
+        prev_caller_name = main.active_tool_caller_name
+        main.active_tool_caller = SimpleNamespace(
+            name="alex_chen", capabilities={"engineer", "shell"}, max_tokens=400
+        )
+        main.active_tool_caller_name = "alex_chen"
+        self.addCleanup(lambda: setattr(main, "active_tool_caller", prev_caller))
+        self.addCleanup(lambda: setattr(main, "active_tool_caller_name", prev_caller_name))
+
+        tool_calls_made = []
+
+        def fake_generate(self_provider, sub_role, model, caller, messages):
+            # Verify sub-agent inherits shell capability.
+            tool_calls_made.append(sub_role.capabilities)
+            # Simulate the sub-agent calling builtin.shell_run: temporarily set
+            # active_tool_caller to the sub-agent so workspace auth passes.
+            prev = main.active_tool_caller
+            prev_name = main.active_tool_caller_name
+            main.active_tool_caller = sub_role
+            main.active_tool_caller_name = sub_role.name
+            try:
+                result = main.builtin_shell_run({}, sub_role.name, "echo hello_from_subagent", timeout=5)
+            finally:
+                main.active_tool_caller = prev
+                main.active_tool_caller_name = prev_name
+            import json as _j
+            out = _j.loads(result).get("stdout", "").strip()
+            return f"shell output: {out}"
+
+        from unittest.mock import patch
+        with patch("robits.core.providers.ChatCompletionsProvider.generate", fake_generate):
+            result = main.agent_spawn(
+                {"alex_chen": main.active_tool_caller},
+                "python3 -c 'print(1+1)'",
+            )
+
+        self.assertEqual(len(tool_calls_made), 1)
+        self.assertIn("shell", tool_calls_made[0])
+        self.assertIn("hello_from_subagent", result)
+
     # ── builtin.tool_search ──────────────────────────────────────────────────
 
     def test_tool_search_finds_tools_by_name_fragment(self):
