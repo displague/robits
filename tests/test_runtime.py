@@ -3630,9 +3630,8 @@ class XmlToolCallExtractionTests(unittest.TestCase):
         self.assertEqual(clean, "")
 
     def test_granite_json_single_call(self):
-        import json as _json
-        args = _json.dumps({"agent_name": "alex_chen"})
-        text = f'<tool_call>\n{{"name": "memory.list_digests", "arguments": {_json.dumps(args)}}}\n</tool_call>'
+        args = json.dumps({"agent_name": "alex_chen"})
+        text = f'<tool_call>\n{json.dumps({"name": "memory.list_digests", "arguments": args})}\n</tool_call>'
         clean, calls = main._extract_xml_tool_calls(text)
         self.assertEqual(len(calls), 1)
         self.assertEqual(calls[0]["name"], "memory.list_digests")
@@ -3716,6 +3715,8 @@ class XmlToolCallExtractionTests(unittest.TestCase):
             as_chat_completion_tools=lambda r: [{"type": "function", "function": {"name": "memory_search", "parameters": {}}}],
             execute=mock_execute,
             resolve_name=lambda n: n,
+            has=lambda n: n == "memory_search",
+            _tools={"memory_search": object()},
         )
         provider = main.ChatCompletionsProvider.__new__(main.ChatCompletionsProvider)
         provider.registry = registry
@@ -3726,6 +3727,36 @@ class XmlToolCallExtractionTests(unittest.TestCase):
         self.assertEqual(len(tool_called), 1)
         self.assertEqual(tool_called[0][0], "memory_search")
         self.assertEqual(tool_called[0][1]["agent_name"], "alex_chen")
+
+    def test_normalize_xml_tool_name_snake_to_dotted(self):
+        """Snake_case names from Qwen XML resolve to dotted registry canonical form."""
+        registry = SimpleNamespace(
+            resolve_name=lambda n: n,
+            has=lambda n: False,
+            _tools={"memory.list_digests": object(), "memory.search": object(), "agent.think": object()},
+        )
+        self.assertEqual(main._normalize_xml_tool_name(registry, "memory_list_digests"), "memory.list_digests")
+        self.assertEqual(main._normalize_xml_tool_name(registry, "memory_search"), "memory.search")
+        self.assertEqual(main._normalize_xml_tool_name(registry, "agent_think"), "agent.think")
+
+    def test_normalize_xml_tool_name_already_canonical(self):
+        """Dotted or double-underscore names pass through resolve_name unchanged."""
+        registry = SimpleNamespace(
+            resolve_name=lambda n: "memory.search" if n in ("memory.search", "memory__search") else n,
+            has=lambda n: n == "memory.search",
+            _tools={"memory.search": object()},
+        )
+        self.assertEqual(main._normalize_xml_tool_name(registry, "memory.search"), "memory.search")
+        self.assertEqual(main._normalize_xml_tool_name(registry, "memory__search"), "memory.search")
+
+    def test_normalize_xml_tool_name_unknown_fallthrough(self):
+        """Unknown names are returned as-is so execute can produce a clear error."""
+        registry = SimpleNamespace(
+            resolve_name=lambda n: n,
+            has=lambda n: False,
+            _tools={},
+        )
+        self.assertEqual(main._normalize_xml_tool_name(registry, "no_such_tool"), "no_such_tool")
 
 
 class ThinkingConsoleDisplayTests(unittest.TestCase):

@@ -1,10 +1,30 @@
 """Model provider implementations and API helpers."""
 import json
 import random
+import re
 import time
 from uuid import uuid4
 
 from robits.core.config import _config as _m
+
+# Compiled once at module load — used by _extract_xml_tool_calls
+_XML_BLOCK_RE = re.compile(
+    r"<tool_call>\s*(.*?)\s*</tool_call>",
+    flags=re.DOTALL | re.IGNORECASE,
+)
+_XML_QWEN_FN_RE = re.compile(
+    r"<function=(?P<name>[^>]+)>\s*(?P<body>.*?)\s*</function>",
+    flags=re.DOTALL,
+)
+_XML_QWEN_PARAM_RE = re.compile(
+    r"<parameter=(?P<key>[^>]+)>\s*(?P<val>.*?)\s*</parameter>",
+    flags=re.DOTALL,
+)
+# Used by _extract_thinking_chat
+_INLINE_THINK_RE = re.compile(
+    r"<(?P<tag>think|thinking)>(?P<body>.*?)</(?P=tag)>",
+    flags=re.DOTALL | re.IGNORECASE,
+)
 
 
 def _response_text(response):
@@ -61,6 +81,28 @@ def _with_model_retries(operation):
             attempt += 1
 
 
+def _normalize_xml_tool_name(registry, name):
+    """Map a local-model tool name to its registry canonical form.
+
+    Local models (Qwen, Granite) emit snake_case names such as
+    ``memory_list_digests`` while the registry stores dotted names
+    (``memory.list_digests``) with double-underscore OpenAI aliases
+    (``memory__list_digests``).  This function tries three lookups in order:
+
+    1. Direct resolve (handles dotted names and ``__`` aliases).
+    2. Dot-substitution scan: find a canonical name whose dots-replaced-by-
+       underscores form matches the input.
+    3. Fallback to the original name so ``execute`` can return a clear error.
+    """
+    resolved = registry.resolve_name(name)
+    if registry.has(resolved):
+        return resolved
+    for canonical in registry._tools:
+        if canonical.replace(".", "_") == name:
+            return canonical
+    return name
+
+
 def _extract_xml_tool_calls(text):
     """Extract <tool_call> blocks from model content and return (clean_text, tool_call_list).
 
@@ -82,36 +124,18 @@ def _extract_xml_tool_calls(text):
     Returns a list of dicts: [{"name": str, "arguments": dict}, ...].
     Unrecognised blocks are left in the cleaned text.
     """
-    import re as _re
-
-    _block_pattern = _re.compile(
-        r"<tool_call>\s*(.*?)\s*</tool_call>",
-        flags=_re.DOTALL | _re.IGNORECASE,
-    )
-    _qwen_fn_pattern = _re.compile(
-        r"<function=(?P<name>[^>]+)>\s*(?P<body>.*?)\s*</function>",
-        flags=_re.DOTALL,
-    )
-    _qwen_param_pattern = _re.compile(
-        r"<parameter=(?P<key>[^>]+)>\s*(?P<val>.*?)\s*</parameter>",
-        flags=_re.DOTALL,
-    )
-
     extracted = []
-    leftovers = []
 
     def _handle_block(inner):
-        # Try Qwen XML format first
-        fn_match = _qwen_fn_pattern.search(inner)
+        fn_match = _XML_QWEN_FN_RE.search(inner)
         if fn_match:
             name = fn_match.group("name").strip()
             body = fn_match.group("body")
             args = {}
-            for pm in _qwen_param_pattern.finditer(body):
+            for pm in _XML_QWEN_PARAM_RE.finditer(body):
                 args[pm.group("key").strip()] = pm.group("val").strip()
             extracted.append({"name": name, "arguments": args})
             return True
-        # Try Granite / generic JSON format
         inner_stripped = inner.strip()
         if inner_stripped.startswith("{"):
             try:
@@ -132,13 +156,36 @@ def _extract_xml_tool_calls(text):
 
     def _replace(match):
         inner = match.group(1)
-        if not _handle_block(inner):
-            leftovers.append(match.group(0))
-            return match.group(0)
-        return ""
+        return "" if _handle_block(inner) else match.group(0)
 
-    clean = _block_pattern.sub(_replace, text).strip()
+    clean = _XML_BLOCK_RE.sub(_replace, text).strip()
     return clean, extracted
+
+
+def _execute_tool_call(registry, role, tool_name, call_id, args, employee_dict):
+    """Execute one tool call and return the tool-result message dict.
+
+    Handles event emission, result recording (skipped for agent.think), and
+    formats the OpenAI-style tool result message.  ``tool_name`` must already
+    be the registry canonical form.
+    """
+    payload = {
+        "agent": getattr(role, "name", None),
+        "role_name": getattr(role, "runtime_role_name", None),
+        "call_id": call_id,
+        "tool_name": tool_name,
+        "arguments": args,
+    }
+    _emit_role_tool_event(role, "tool_call.requested", payload)
+    result = registry.execute(tool_name, args, employee_dict, caller=role)
+    event_type = "tool_call.failed" if _tool_result_is_error(result) else "tool_call.executed"
+    _emit_role_tool_event(role, event_type, {**payload, "result": result})
+    if registry.resolve_name(tool_name) != "agent.think":
+        _record_role_tool_result(
+            role,
+            f"{event_type}: {tool_name}({json.dumps(args, sort_keys=True)}) -> {result}",
+        )
+    return {"role": "tool", "tool_call_id": call_id, "content": str(result)}
 
 
 def _extract_thinking_chat(message):
@@ -147,22 +194,15 @@ def _extract_thinking_chat(message):
     Returns (content_text, thinking_text | None). content_text has inline
     thinking tags stripped so only the final expressed output is returned.
     """
-    import re as _re
-
-    _inline_pattern = _re.compile(
-        r"<(?P<tag>think|thinking)>(?P<body>.*?)</(?P=tag)>",
-        flags=_re.DOTALL | _re.IGNORECASE,
-    )
-
     def _strip_inline_thinking(text):
         if not text:
             return "", None
         blocks = []
-        for match in _inline_pattern.finditer(text):
+        for match in _INLINE_THINK_RE.finditer(text):
             body = (match.group("body") or "").strip()
             if body:
                 blocks.append(body)
-        clean = _inline_pattern.sub("", text).strip()
+        clean = _INLINE_THINK_RE.sub("", text).strip()
         return clean, ("\n\n".join(blocks) if blocks else None)
 
     def _join_thinking(*parts):
@@ -352,32 +392,17 @@ class ChatCompletionsProvider(ModelProvider):
                             "content": clean_content or None,
                             "tool_calls": synth_calls,
                         }]
-                        tool_results = []
-                        for call_dict, xc in zip(synth_calls, xml_calls):
-                            tool_name = xc["name"]
-                            call_id = call_dict["id"]
-                            payload = {
-                                "agent": getattr(role, "name", None),
-                                "role_name": getattr(role, "runtime_role_name", None),
-                                "call_id": call_id,
-                                "tool_name": tool_name,
-                                "arguments": xc["arguments"],
-                            }
-                            _emit_role_tool_event(role, "tool_call.requested", payload)
-                            result = self.registry.execute(tool_name, xc["arguments"], employee_dict, caller=role)
-                            event_type = "tool_call.failed" if _tool_result_is_error(result) else "tool_call.executed"
-                            _emit_role_tool_event(role, event_type, {**payload, "result": result})
-                            resolved_name = self.registry.resolve_name(tool_name)
-                            if resolved_name != "agent.think":
-                                _record_role_tool_result(
-                                    role,
-                                    f"{event_type}: {tool_name}({json.dumps(xc['arguments'], sort_keys=True)}) -> {result}",
-                                )
-                            tool_results.append({
-                                "role": "tool",
-                                "tool_call_id": call_id,
-                                "content": str(result),
-                            })
+                        tool_results = [
+                            _execute_tool_call(
+                                self.registry,
+                                role,
+                                _normalize_xml_tool_name(self.registry, xc["name"]),
+                                call_dict["id"],
+                                xc["arguments"],
+                                employee_dict,
+                            )
+                            for call_dict, xc in zip(synth_calls, xml_calls)
+                        ]
                         kwargs["messages"] = kwargs["messages"] + tool_results
                         continue
                 return content
@@ -388,37 +413,27 @@ class ChatCompletionsProvider(ModelProvider):
             for call in tool_calls:
                 tool_name = call.function.name
                 call_id = call.id
-                payload = {
-                    "agent": getattr(role, "name", None),
-                    "role_name": getattr(role, "runtime_role_name", None),
-                    "call_id": call_id,
-                    "tool_name": tool_name,
-                }
                 try:
                     args = json.loads(call.function.arguments or "{}")
                 except json.JSONDecodeError as error:
-                    payload["arguments"] = call.function.arguments
-                    payload["error"] = f"Invalid tool arguments JSON: {error}"
+                    payload = {
+                        "agent": getattr(role, "name", None),
+                        "role_name": getattr(role, "runtime_role_name", None),
+                        "call_id": call_id,
+                        "tool_name": tool_name,
+                        "arguments": call.function.arguments,
+                        "error": f"Invalid tool arguments JSON: {error}",
+                    }
                     _emit_role_tool_event(role, "tool_call.requested", payload)
-                    result = f"Error: Invalid tool arguments JSON: {error}"
-                else:
-                    payload["arguments"] = args
-                    _emit_role_tool_event(role, "tool_call.requested", payload)
-                    result = self.registry.execute(tool_name, args, employee_dict, caller=role)
-                status_payload = {**payload, "result": result}
-                event_type = "tool_call.failed" if _tool_result_is_error(result) else "tool_call.executed"
-                _emit_role_tool_event(role, event_type, status_payload)
-                resolved_name = self.registry.resolve_name(tool_name)
-                if resolved_name != "agent.think":
-                    _record_role_tool_result(
-                        role,
-                        f"{event_type}: {tool_name}({json.dumps(payload.get('arguments'), sort_keys=True)}) -> {result}",
-                    )
-                tool_results.append({
-                    "role": "tool",
-                    "tool_call_id": call_id,
-                    "content": str(result),
-                })
+                    tool_results.append({
+                        "role": "tool",
+                        "tool_call_id": call_id,
+                        "content": f"Error: Invalid tool arguments JSON: {error}",
+                    })
+                    continue
+                tool_results.append(
+                    _execute_tool_call(self.registry, role, tool_name, call_id, args, employee_dict)
+                )
             kwargs["messages"] = kwargs["messages"] + tool_results
         return "Error: Too many consecutive tool-call rounds."
 
