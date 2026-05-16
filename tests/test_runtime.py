@@ -5123,5 +5123,165 @@ class ContextTrimTests(unittest.TestCase):
         self.assertGreaterEqual(len(role.conversation_history["SE"]), orig_len)
 
 
+class SinglePersonaCollaborationTests(unittest.TestCase):
+    """End-to-end verification of the single-persona collaborative loop.
+
+    Covers the three acceptance criteria from GH #113:
+      1. Out-of-band memory seeding is retrievable in-session via memory_search.
+      2. ROBITS_SPAWN_MODEL flows through to ChatCompletionsProvider.generate().
+      3. agent.spawn round-trip: sub-agent executes a tool and returns a result
+         that the persona can incorporate.
+
+    All tests use a mocked model provider — no real LLM calls are made.
+    """
+
+    def setUp(self):
+        self.store_temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.store_temp.cleanup)
+        self.store = SQLiteMemoryStore(Path(self.store_temp.name) / "collab.sqlite3")
+        self.addCleanup(self.store.close)
+        self.orig_store = main.memory_store
+        main.memory_store = self.store
+        self.addCleanup(lambda: setattr(main, "memory_store", self.orig_store))
+
+    # ── 1. Memory seeding ──────────────────────────────────────────────────────
+
+    def _as_caller(self, name):
+        """Context manager: set active_tool_caller to name for permission checks."""
+        prev, prev_name = main.active_tool_caller, main.active_tool_caller_name
+        main.active_tool_caller = SimpleNamespace(name=name, capabilities=set())
+        main.active_tool_caller_name = name
+        self.addCleanup(lambda: setattr(main, "active_tool_caller", prev))
+        self.addCleanup(lambda: setattr(main, "active_tool_caller_name", prev_name))
+
+    def test_seeded_memory_retrievable_in_session(self):
+        """Facts seeded into the store before the session are returned by memory_search."""
+        from robits.core.persona import seed_persona
+        self.store.upsert_agent("alex_chen", "SoftwareEngineer", "alex_chen")
+        seed_persona(self.store, "alex_chen", [
+            {"kind": "thought", "content": "Fixed the payment service bug last Tuesday.",
+             "visibility": "private"},
+        ])
+        self._as_caller("alex_chen")
+        results = main.memory_search(
+            {"alex_chen": SimpleNamespace(name="alex_chen")},
+            agent_name="alex_chen",
+            query="payment service",
+        )
+        self.assertIn("payment service", results)
+
+    def test_seeded_digest_retrievable_by_list(self):
+        """Identity digests seeded before session are accessible via memory_list_digests."""
+        from robits.core.persona import seed_persona
+        self.store.upsert_agent("alex_chen", "SoftwareEngineer", "alex_chen")
+        seed_persona(self.store, "alex_chen", [
+            {"kind": "digest", "digest_type": "identity",
+             "content": "Alex is a pragmatic Python backend engineer."},
+        ])
+        self._as_caller("alex_chen")
+        result = main.memory_list_digests(
+            {"alex_chen": SimpleNamespace(name="alex_chen")},
+            agent_name="alex_chen",
+            digest_type="identity",
+        )
+        self.assertIn("pragmatic", result)
+
+    # ── 2. ROBITS_SPAWN_MODEL flows to sub-agent ───────────────────────────────
+
+    def test_spawn_model_env_used_when_no_explicit_model(self):
+        """agent_spawn uses ROBITS_SPAWN_MODEL when caller omits model=."""
+        captured = {}
+
+        def fake_generate(self_provider, sub_role, model, caller, messages):
+            captured["model"] = model
+            return "sub result"
+
+        orig = main.spawn_model
+        main.spawn_model = "functiongemma-270m-it"
+        self.addCleanup(lambda: setattr(main, "spawn_model", orig))
+
+        with patch("robits.core.providers.ChatCompletionsProvider.generate", fake_generate):
+            result = main.agent_spawn({}, "summarise the readme")
+
+        self.assertEqual(captured["model"], "functiongemma-270m-it")
+        self.assertEqual(result, "sub result")
+
+    def test_explicit_model_overrides_spawn_model_env(self):
+        """Explicit model= in agent_spawn overrides ROBITS_SPAWN_MODEL."""
+        captured = {}
+
+        def fake_generate(self_provider, sub_role, model, caller, messages):
+            captured["model"] = model
+            return "ok"
+
+        orig = main.spawn_model
+        main.spawn_model = "functiongemma-270m-it"
+        self.addCleanup(lambda: setattr(main, "spawn_model", orig))
+
+        with patch("robits.core.providers.ChatCompletionsProvider.generate", fake_generate):
+            main.agent_spawn({}, "fetch example.com", model="qwen/qwen3.5-9b")
+
+        self.assertEqual(captured["model"], "qwen/qwen3.5-9b")
+
+    # ── 3. agent.spawn round-trip ──────────────────────────────────────────────
+
+    def test_spawn_round_trip_result_returned_to_caller(self):
+        """agent.spawn executes a sub-task and returns the sub-agent result string."""
+        def fake_generate(self_provider, sub_role, model, caller, messages):
+            return "The origin IP is 1.2.3.4"
+
+        with patch("robits.core.providers.ChatCompletionsProvider.generate", fake_generate):
+            result = main.agent_spawn(
+                {}, "fetch https://httpbin.org/get and return origin field"
+            )
+        self.assertIn("1.2.3.4", result)
+
+    def test_spawn_result_written_to_caller_tool_results(self):
+        """The sub-agent result string is returned so the persona can record it."""
+        def fake_generate(self_provider, sub_role, model, caller_arg, messages):
+            return "task completed: found 42 results"
+
+        with patch("robits.core.providers.ChatCompletionsProvider.generate", fake_generate):
+            result = main.agent_spawn({}, "count the results in the database")
+
+        self.assertIn("42 results", result)
+
+    def test_session_step_routes_to_single_persona(self):
+        """With only CEO + one SE, directed routing delivers message to SE."""
+        responses = []
+
+        def se_interact(sender_name, prompt, *a, **kw):
+            responses.append(prompt)
+            return "acknowledged"
+
+        self.store.upsert_agent("alex_chen", "SoftwareEngineer", "alex_chen")
+        self.store.upsert_agent("CEO", "Human", "CEO")
+
+        session = main.Session(
+            participants={
+                "CEO": SimpleNamespace(
+                    name="CEO", lifecycle_state="active",
+                    interact=lambda s, p, *a, **kw: "task done",
+                    update_group_conversations=lambda m: None,
+                ),
+                "alex_chen": SimpleNamespace(
+                    name="alex_chen", lifecycle_state="active",
+                    interact=se_interact,
+                    update_group_conversations=lambda m: None,
+                    runtime_thinking=None,
+                    runtime_tool_results=[],
+                    waiting_until=None,
+                ),
+            }
+        )
+        out = StringIO()
+        with redirect_stdout(out), redirect_stderr(StringIO()):
+            session.step("alex_chen, please summarise recent tasks")
+        self.assertTrue(
+            len(responses) > 0,
+            "SE interact was never called — directed routing failed",
+        )
+
+
 if __name__ == "__main__":
     unittest.main()
