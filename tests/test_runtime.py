@@ -2328,6 +2328,7 @@ class BuiltinToolTests(unittest.TestCase):
             main.agent_spawn({}, "python3 -c 'print(6*7)'")
         self.assertIn("builtin.shell_run", captured["system"])
         self.assertIn("agent_name=", captured["system"])
+        self.assertIn(":subtask", captured["system"])
 
     def test_agent_spawn_no_shell_hint_for_plain_task(self):
         """System prompt should NOT add the shell hint for non-shell tasks."""
