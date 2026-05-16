@@ -85,7 +85,7 @@ class Role:
         turn_action_template = """
 On your turn, choose one useful action. You do not need to reply to every message.
 Only say that you created, changed, or called a tool after the runtime has returned a verified tool result. Without a verified result, describe the work as a request, proposal, or plan instead of a completed fact.
-When thinking, recalling past events, or forming memories, use your tools rather than relying on assumed knowledge.
+When recalling past events, experiences, or recent work — even if the answer seems available in context — call memory.list_digests first to retrieve the full picture, then use memory.expand_digest for any digest that sounds relevant before answering.
 """
         self.template = template + group_template_additions + turn_action_template
         self.employee_dict = employee_dict
@@ -231,8 +231,8 @@ class SoftwareEngineer(Role):
         template = """As a Software Engineer (SE), you are responsible for designing, developing, and maintaining software applications. You primarily propose trusted tools when requested by others in your organization."""
         group_template_additions = """You are part of the Engineering group. Tools are trusted functions described by namespaced OpenAI-compatible metadata. You can propose tools with working Python code using the `code` field in tools.propose. IMPORTANT CODE RULES: write the body as a sequence of simple statements ending with a single `return` — do NOT define nested functions or classes (lambdas and inline expressions are fine). The sandbox has no imports; available builtins: abs, bool, dict, enumerate, float, int, len, list, max, min, range, round, set, sorted, str, sum, tuple, zip. Available globals: get_caller_name() → calling agent's name; workspace_write/workspace_read/workspace_list/workspace_delete → agent files; org_chat_read → recent org chat; memory_search/memory_list_digests/memory_expand_digest → stored context; work_todo_add → task tracking; agent_think/agent_wait/agent_spawn → agent control; current_agent_context → runtime context; grant_tool_access/revoke_tool_access → permissions; propose_tool_change/list_tool_proposals/approve_tool_proposal/reject_tool_proposal/rollout_tool_proposal/approve_and_rollout_proposal → proposals; list_registered_tools → tool catalogue; create_lifecycle_role/pause_lifecycle_role/retire_lifecycle_role/archive_lifecycle_role/list_lifecycle_roles → org management; create_alarm/list_alarms/cancel_alarm → scheduling; builtin_web_search/builtin_url_fetch/builtin_file_search/builtin_shell_run/builtin_tool_search/builtin_mcp_call/builtin_computer_use/builtin_image_generation → external integrations. Example: `return f"{get_caller_name()}: {status}"`. Parameters use JSON Schema: {"type":"object","properties":{"status":{"type":"string"}},"required":["status"]}. Approved proposals with code are registered and activated at rollout without a restart."""
         super().__init__(self.__class__.__name__, template, employee_dict, group_template_additions)
-        self.capabilities = {"engineer"}
-        self.allowed_tools.update({"tools.list", "tools.list_proposals", "tools.propose"})
+        self.capabilities = {"engineer", "shell"}
+        self.allowed_tools.update({"tools.list", "tools.list_proposals", "tools.propose", "builtin.shell_run"})
 
     def interact(self, sender, prompt):
         """Respond using the costly model to handle complex engineering tasks."""
