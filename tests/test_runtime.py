@@ -11,6 +11,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 import main
+from robits.core.persona import load_personas, seed_persona
 from robits.memory.sqlite import SQLiteMemoryStore
 
 
@@ -4279,7 +4280,6 @@ class PersonaRedesignTests(unittest.TestCase):
 
     def test_load_personas_new_schema(self):
         import tempfile as _tf, yaml as _yaml
-        from robits.core.persona import load_personas
         content = [
             {"username": "alex_chen", "full_name": "Alex Chen", "role": "SE",
              "memories": [{"kind": "thought", "content": "I like Python."}]},
@@ -4301,7 +4301,6 @@ class PersonaRedesignTests(unittest.TestCase):
 
     def test_load_personas_legacy_schema_still_works(self):
         import tempfile as _tf, yaml as _yaml
-        from robits.core.persona import load_personas
         content = [
             {"agent": "SE", "memories": [{"kind": "thought", "content": "Old schema."}]},
         ]
@@ -4318,7 +4317,6 @@ class PersonaRedesignTests(unittest.TestCase):
 
     def test_multiple_personas_same_role(self):
         import tempfile as _tf, yaml as _yaml
-        from robits.core.persona import load_personas
         content = [
             {"username": "eng1", "full_name": "Alice Smith", "role": "SE",
              "memories": [{"kind": "thought", "content": "Alice's memory."}]},
@@ -4496,7 +4494,6 @@ class PersonaSeedingTests(unittest.TestCase):
 
     def test_seed_persona_writes_thought(self):
         self.store.upsert_agent("alice", "Role", "alice")
-        from robits.core.persona import seed_persona
         written = seed_persona(self.store, "alice", [
             {"kind": "thought", "content": "I enjoy hiking.", "visibility": "private"},
         ])
@@ -4507,7 +4504,6 @@ class PersonaSeedingTests(unittest.TestCase):
 
     def test_seed_persona_writes_digest(self):
         self.store.upsert_agent("bob", "Role", "bob")
-        from robits.core.persona import seed_persona
         written = seed_persona(self.store, "bob", [
             {"kind": "digest", "digest_type": "identity", "content": "Bob is a backend engineer."},
         ])
@@ -4518,7 +4514,6 @@ class PersonaSeedingTests(unittest.TestCase):
 
     def test_seed_persona_is_idempotent(self):
         self.store.upsert_agent("carol", "Role", "carol")
-        from robits.core.persona import seed_persona
         entries = [{"kind": "thought", "content": "First seed.", "visibility": "private"}]
         first = seed_persona(self.store, "carol", entries)
         second = seed_persona(self.store, "carol", entries)
@@ -4528,13 +4523,11 @@ class PersonaSeedingTests(unittest.TestCase):
         self.assertEqual(len(rows), 1)
 
     def test_load_personas_missing_file_returns_empty(self):
-        from robits.core.persona import load_personas
         result = load_personas("/nonexistent/path/personas.yaml")
         self.assertEqual(result, {})
 
     def test_seed_persona_writes_memory_entry(self):
         self.store.upsert_agent("dave", "Role", "dave")
-        from robits.core.persona import seed_persona
         written = seed_persona(self.store, "dave", [
             {"kind": "entry", "digest_type": "identity", "content": "Dave values honesty."},
         ])
@@ -5121,6 +5114,155 @@ class ContextTrimTests(unittest.TestCase):
             main._config.model_provider = orig_provider
         # The stored history grows by one (the assistant reply), trimming must not shrink it
         self.assertGreaterEqual(len(role.conversation_history["SE"]), orig_len)
+
+
+class SinglePersonaCollaborationTests(unittest.TestCase):
+    """End-to-end verification of the single-persona collaborative loop.
+
+    Covers the three acceptance criteria from GH #113:
+      1. Out-of-band memory seeding is retrievable in-session via memory_search.
+      2. ROBITS_SPAWN_MODEL flows through to ChatCompletionsProvider.generate().
+      3. agent.spawn round-trip: sub-agent executes a tool and returns a result
+         that the persona can incorporate.
+
+    All tests use a mocked model provider — no real LLM calls are made.
+    """
+
+    def setUp(self):
+        self.store_temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.store_temp.cleanup)
+        self.store = SQLiteMemoryStore(Path(self.store_temp.name) / "collab.sqlite3")
+        self.addCleanup(self.store.close)
+        self.orig_store = main.memory_store
+        main.memory_store = self.store
+        self.addCleanup(lambda: setattr(main, "memory_store", self.orig_store))
+
+    # ── 1. Memory seeding ──────────────────────────────────────────────────────
+
+    def _as_caller(self, name):
+        """Set active_tool_caller to name for the duration of the test via addCleanup."""
+        prev, prev_name = main.active_tool_caller, main.active_tool_caller_name
+        main.active_tool_caller = SimpleNamespace(name=name, capabilities=set())
+        main.active_tool_caller_name = name
+        self.addCleanup(lambda: setattr(main, "active_tool_caller", prev))
+        self.addCleanup(lambda: setattr(main, "active_tool_caller_name", prev_name))
+
+    def test_seeded_memory_retrievable_in_session(self):
+        """Facts seeded into the store before the session are returned by memory_search."""
+        self.store.upsert_agent("alex_chen", "SoftwareEngineer", "alex_chen")
+        seed_persona(self.store, "alex_chen", [
+            {"kind": "thought", "content": "Fixed the payment service bug last Tuesday.",
+             "visibility": "private"},
+        ])
+        self._as_caller("alex_chen")
+        results = main.memory_search(
+            {"alex_chen": SimpleNamespace(name="alex_chen")},
+            agent_name="alex_chen",
+            query="payment service",
+        )
+        self.assertIn("payment service", results)
+
+    def test_seeded_digest_retrievable_by_list(self):
+        """Identity digests seeded before session are accessible via memory_list_digests."""
+        self.store.upsert_agent("alex_chen", "SoftwareEngineer", "alex_chen")
+        seed_persona(self.store, "alex_chen", [
+            {"kind": "digest", "digest_type": "identity",
+             "content": "Alex is a pragmatic Python backend engineer."},
+        ])
+        self._as_caller("alex_chen")
+        result = main.memory_list_digests(
+            {"alex_chen": SimpleNamespace(name="alex_chen")},
+            agent_name="alex_chen",
+            digest_type="identity",
+        )
+        self.assertIn("pragmatic", result)
+
+    # ── 2. ROBITS_SPAWN_MODEL flows to sub-agent ───────────────────────────────
+
+    def test_spawn_model_env_used_when_no_explicit_model(self):
+        """agent_spawn uses ROBITS_SPAWN_MODEL when caller omits model=."""
+        captured = {}
+
+        def fake_generate(self_provider, sub_role, model, caller, messages):
+            captured["model"] = model
+            return "sub result"
+
+        orig = main.spawn_model
+        main.spawn_model = "functiongemma-270m-it"
+        self.addCleanup(lambda: setattr(main, "spawn_model", orig))
+
+        with patch("robits.core.providers.ChatCompletionsProvider.generate", fake_generate):
+            result = main.agent_spawn({}, "summarise the readme")
+
+        self.assertEqual(captured["model"], "functiongemma-270m-it")
+        self.assertEqual(result, "sub result")
+
+    def test_explicit_model_overrides_spawn_model_env(self):
+        """Explicit model= in agent_spawn overrides ROBITS_SPAWN_MODEL."""
+        captured = {}
+
+        def fake_generate(self_provider, sub_role, model, caller, messages):
+            captured["model"] = model
+            return "ok"
+
+        orig = main.spawn_model
+        main.spawn_model = "functiongemma-270m-it"
+        self.addCleanup(lambda: setattr(main, "spawn_model", orig))
+
+        with patch("robits.core.providers.ChatCompletionsProvider.generate", fake_generate):
+            main.agent_spawn({}, "fetch example.com", model="qwen/qwen3.5-9b")
+
+        self.assertEqual(captured["model"], "qwen/qwen3.5-9b")
+
+    # ── 3. agent.spawn round-trip ──────────────────────────────────────────────
+
+    def test_spawn_round_trip_result_returned_to_caller(self):
+        """agent.spawn executes a sub-task and returns the sub-agent result string."""
+        def fake_generate(self_provider, sub_role, model, caller, messages):
+            return "The origin IP is 1.2.3.4"
+
+        with patch("robits.core.providers.ChatCompletionsProvider.generate", fake_generate):
+            result = main.agent_spawn(
+                {}, "fetch https://httpbin.org/get and return origin field"
+            )
+        self.assertIn("1.2.3.4", result)
+
+    def test_directed_routing_strips_prefix_and_routes_to_named_agent(self):
+        """'name, prompt' syntax routes exclusively to the named agent with the prefix stripped."""
+        received_prompts = []
+        ceo_called = []
+
+        def se_interact(sender_name, prompt, *a, **kw):
+            received_prompts.append(prompt)
+            return "acknowledged"
+
+        self.store.upsert_agent("alex_chen", "SoftwareEngineer", "alex_chen")
+        self.store.upsert_agent("CEO", "Human", "CEO")
+
+        session = main.Session(
+            participants={
+                "CEO": SimpleNamespace(
+                    name="CEO", lifecycle_state="active",
+                    interact=lambda s, p, *a, **kw: ceo_called.append(p) or "task done",
+                    update_group_conversations=lambda m: None,
+                ),
+                "alex_chen": SimpleNamespace(
+                    name="alex_chen", lifecycle_state="active",
+                    interact=se_interact,
+                    update_group_conversations=lambda m: None,
+                    runtime_thinking=None,
+                    runtime_tool_results=[],
+                    waiting_until=None,
+                ),
+            }
+        )
+        out = StringIO()
+        with redirect_stdout(out), redirect_stderr(StringIO()):
+            session.step("alex_chen, please summarise recent tasks")
+
+        self.assertTrue(received_prompts, "SE interact was never called")
+        self.assertIn("please summarise recent tasks", received_prompts[0])
+        self.assertNotIn("alex_chen,", received_prompts[0])
 
 
 if __name__ == "__main__":
