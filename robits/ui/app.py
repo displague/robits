@@ -3,6 +3,7 @@ import json
 import os
 import sqlite3
 from datetime import datetime
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from rich.pretty import Pretty
@@ -20,7 +21,8 @@ class RobitsDbReader:
 
     def _get_conn(self) -> sqlite3.Connection:
         # Open in read-only mode to prevent write locks during simulation execution
-        conn = sqlite3.connect(f"file:{self.db_path}?mode=ro", uri=True)
+        db_uri = Path(self.db_path).resolve().as_uri() + "?mode=ro"
+        conn = sqlite3.connect(db_uri, uri=True)
         conn.row_factory = sqlite3.Row
         return conn
 
@@ -89,7 +91,7 @@ class RobitsDbReader:
         conn = self._get_conn()
         try:
             cursor = conn.cursor()
-            if channel_type == "agent_thoughts":
+            if channel_type == "agent_thought":
                 cursor.execute(
                     """
                     SELECT 'thought' AS type, thought_id AS id, agent_id AS sender, 
@@ -313,6 +315,8 @@ class RobitsTuiApp(App):
         self.reload_channels_view()
         self.clear_transcript()
         self.load_channel_contents()
+        self.clear_events()
+        self.load_runtime_events()
 
     def refresh_data(self) -> None:
         # 1. Update session list
@@ -363,7 +367,7 @@ class RobitsTuiApp(App):
                 if ctype == "org_chat":
                     filtered.append(ch)
             elif self.policy == "restricted":
-                if ctype != "agent_thoughts":
+                if ctype != "agent_thought":
                     filtered.append(ch)
             else:
                 filtered.append(ch)
@@ -399,10 +403,10 @@ class RobitsTuiApp(App):
 
         if ctype == "org_chat":
             return "# org-chat"
-        elif ctype == "agent_thoughts":
+        elif ctype == "agent_thought":
             agent_name = parts[0] if parts else "unknown"
             return f"💭 thoughts ({agent_name})"
-        elif ctype == "agent_dms":
+        elif ctype == "agent_dm":
             names = " <-> ".join(parts)
             return f"✉️ dm ({names})"
         return f"| {ctype} ({ch['channel_id']})"
@@ -410,6 +414,12 @@ class RobitsTuiApp(App):
     def clear_transcript(self) -> None:
         self.query_one("#transcript_log", RichLog).clear()
         self.loaded_message_ids.clear()
+
+    def clear_events(self) -> None:
+        self.loaded_event_ids.clear()
+        self.events_cache.clear()
+        self.query_one("#event_list", ListView).clear()
+        self.query_one("#event_inspector", Static).update("")
 
     def load_channel_contents(self) -> None:
         if self.selected_session_id is None or self.selected_channel_id is None or self.selected_channel_type is None:
@@ -516,10 +526,7 @@ class RobitsTuiApp(App):
                     self.selected_channel_type = None
                     
                     self.clear_transcript()
-                    self.loaded_event_ids.clear()
-                    self.events_cache.clear()
-                    self.query_one("#event_list", ListView).clear()
-                    self.query_one("#event_inspector", Static).update("")
+                    self.clear_events()
                     self.refresh_data()
         
         elif list_id == "channel_list":

@@ -1,5 +1,6 @@
 """Role hierarchy and interaction functions."""
 import json
+import math
 import random
 import yaml
 from pathlib import Path
@@ -46,7 +47,6 @@ def interact(self, model, sender, message):
     personal_adjustment = metadata.get("personal_adjustment")
     personal_adjustment_turns = metadata.get("personal_adjustment_turns")
     
-    import math
     phase_val = max(0.0, min(1.0, float(phase)))
     phase_weight = math.sin(math.pi * phase_val)
     effective_clock = getattr(self, "runtime_clock_state", None) or _m.clock_state

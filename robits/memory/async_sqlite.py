@@ -166,8 +166,10 @@ class AsyncSQLiteMemoryStore:
             )
             row = await cursor.fetchone()
             await cursor.close()
+            if not row:
+                raise ValueError(f"Agent {agent_id} does not exist.")
             current = {}
-            if row and row["metadata_json"]:
+            if row["metadata_json"]:
                 try:
                     current = json.loads(row["metadata_json"])
                 except Exception:

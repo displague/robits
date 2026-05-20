@@ -1,5 +1,5 @@
-"""Unit and integration tests for the Robits TUI and observability components."""
 import json
+import os
 import sqlite3
 import tempfile
 import unittest
@@ -12,6 +12,7 @@ class TestRobitsTui(unittest.TestCase):
     def setUp(self):
         # Create a temporary database for testing DB reader methods
         self.db_fd, self.db_path = tempfile.mkstemp()
+        os.close(self.db_fd)
         self.conn = sqlite3.connect(self.db_path)
         self.cursor = self.conn.cursor()
 
@@ -104,8 +105,8 @@ class TestRobitsTui(unittest.TestCase):
         app = RobitsTuiApp(self.db_path, policy="full")
         channels = [
             {"channel_id": 1, "channel_type": "org_chat"},
-            {"channel_id": 2, "channel_type": "agent_dms"},
-            {"channel_id": 3, "channel_type": "agent_thoughts"},
+            {"channel_id": 2, "channel_type": "agent_dm"},
+            {"channel_id": 3, "channel_type": "agent_thought"},
         ]
 
         # full policy allows everything
@@ -116,7 +117,7 @@ class TestRobitsTui(unittest.TestCase):
         app.policy = "restricted"
         filtered = app.filter_channels_by_policy(channels)
         self.assertEqual(len(filtered), 2)
-        self.assertNotIn("agent_thoughts", [ch["channel_type"] for ch in filtered])
+        self.assertNotIn("agent_thought", [ch["channel_type"] for ch in filtered])
 
         # public-only policy only allows org_chat
         app.policy = "public-only"
@@ -128,8 +129,8 @@ class TestRobitsTui(unittest.TestCase):
         app = RobitsTuiApp(self.db_path)
         
         ch_org = {"channel_type": "org_chat", "participants_json": "[]", "channel_id": 1}
-        ch_thought = {"channel_type": "agent_thoughts", "participants_json": '["CEO"]', "channel_id": 2}
-        ch_dm = {"channel_type": "agent_dms", "participants_json": '["CEO", "Dev"]', "channel_id": 3}
+        ch_thought = {"channel_type": "agent_thought", "participants_json": '["CEO"]', "channel_id": 2}
+        ch_dm = {"channel_type": "agent_dm", "participants_json": '["CEO", "Dev"]', "channel_id": 3}
 
         self.assertEqual(app.format_channel_name(ch_org), "# org-chat")
         self.assertEqual(app.format_channel_name(ch_thought), "💭 thoughts (CEO)")

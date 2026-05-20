@@ -70,6 +70,11 @@ class RuntimeEventStream:
         self._subscribers.append(callback)
         return callback
 
+    def unsubscribe(self, callback):
+        """Unsubscribe a callback from the event stream."""
+        if callback in self._subscribers:
+            self._subscribers.remove(callback)
+
     def emit(self, event_type, session_id, payload=None, visibility="public"):
         """Create and store a RuntimeEvent, then notify all subscribers."""
         self._sequence += 1
@@ -192,10 +197,13 @@ class Session:
         self._db_ready = False
 
         def _handle_event(event):
+            if event.session_id != self.run_id:
+                return
+
             if event.event_type == "token_usage":
-                self.prompt_tokens += event.payload.get("prompt_tokens", 0)
-                self.completion_tokens += event.payload.get("completion_tokens", 0)
-                self.total_tokens += event.payload.get("total_tokens", 0)
+                self.prompt_tokens += event.payload.get("prompt_tokens", 0) or 0
+                self.completion_tokens += event.payload.get("completion_tokens", 0) or 0
+                self.total_tokens += event.payload.get("total_tokens", 0) or 0
 
             if self._db_ready and _m.memory_store is not None:
                 try:
@@ -203,7 +211,8 @@ class Session:
                 except Exception:
                     pass
 
-        self.event_stream.subscribe(_handle_event)
+        self._event_callback = _handle_event
+        self.event_stream.subscribe(self._event_callback)
 
         self.transcript = []
         self.turns_completed = 0
@@ -228,6 +237,15 @@ class Session:
         self._role_to_key = {id(p): k for k, p in self.participants.items()}
         _cs = clock_state or _m.clock_state
         self.clock_state = _cs if _cs in {"on", "off", "break"} else "on"
+
+        # Pre-create the database session before emitting "session.created" event
+        if _m.memory_store is not None:
+            try:
+                _m.memory_store.create_session(self.run_id)
+                self._db_ready = True
+            except Exception:
+                pass
+
         self.event_stream.emit(
             "session.created",
             self.run_id,
@@ -244,24 +262,9 @@ class Session:
         self._org_chat_channel_id = None
         self._thought_channel_ids: dict = {}
         self._dm_channel_ids: dict = {}
+
         if _m.memory_store is not None:
             try:
-                _m.memory_store.create_session(self.run_id)
-                self._db_ready = True
-                try:
-                    # Manually append the session.created event that was emitted before db was ready
-                    _m.memory_store.append_runtime_event(
-                        self.run_id,
-                        "session.created",
-                        payload={
-                            "participants": list(self.participants),
-                            "max_turns": self.max_turns,
-                            "clock_state": self.clock_state,
-                        },
-                        sequence=0,
-                    )
-                except Exception:
-                    pass
                 for name, participant in self.participants.items():
                     role_type = type(participant).__name__
                     persona = _m.persona_entries.get(name) or {}
@@ -1117,3 +1120,18 @@ class Session:
                 pass
         self._embed_pending()
         return self
+
+    def close(self):
+        """Unsubscribe from the event stream to prevent memory leaks."""
+        if hasattr(self, "_event_callback") and self._event_callback:
+            try:
+                self.event_stream.unsubscribe(self._event_callback)
+            except Exception:
+                pass
+            self._event_callback = None
+
+    def __del__(self):
+        try:
+            self.close()
+        except Exception:
+            pass
