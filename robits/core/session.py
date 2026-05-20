@@ -184,6 +184,27 @@ class Session:
         self.run_id = run_id or f"run-{uuid4()}"
         self.max_turns = max_turns
         self.event_stream = event_stream if event_stream is not None else RuntimeEventStream()
+        
+        # Initialize token usage tracking and DB event persistence
+        self.prompt_tokens = 0
+        self.completion_tokens = 0
+        self.total_tokens = 0
+        self._db_ready = False
+
+        def _handle_event(event):
+            if event.event_type == "token_usage":
+                self.prompt_tokens += event.payload.get("prompt_tokens", 0)
+                self.completion_tokens += event.payload.get("completion_tokens", 0)
+                self.total_tokens += event.payload.get("total_tokens", 0)
+
+            if self._db_ready and _m.memory_store is not None:
+                try:
+                    _m.memory_store.append_runtime_event_object(event)
+                except Exception:
+                    pass
+
+        self.event_stream.subscribe(_handle_event)
+
         self.transcript = []
         self.turns_completed = 0
         self._last_digest_turn = 0
@@ -226,6 +247,21 @@ class Session:
         if _m.memory_store is not None:
             try:
                 _m.memory_store.create_session(self.run_id)
+                self._db_ready = True
+                try:
+                    # Manually append the session.created event that was emitted before db was ready
+                    _m.memory_store.append_runtime_event(
+                        self.run_id,
+                        "session.created",
+                        payload={
+                            "participants": list(self.participants),
+                            "max_turns": self.max_turns,
+                            "clock_state": self.clock_state,
+                        },
+                        sequence=0,
+                    )
+                except Exception:
+                    pass
                 for name, participant in self.participants.items():
                     role_type = type(participant).__name__
                     persona = _m.persona_entries.get(name) or {}
@@ -901,6 +937,12 @@ class Session:
         org_context = format_org_chat_context(self.transcript, effective_org_lines)
         model_prompt = org_context + raw_prompt if org_context else raw_prompt
         self.prepare_agent_runtime(routed.receiver)
+        
+        # Track previous token totals to measure current step's usage
+        prev_p = self.prompt_tokens
+        prev_c = self.completion_tokens
+        prev_t = self.total_tokens
+
         response = routed.receiver.interact(sender.name, model_prompt)
         response = "" if response is None else response
         model_thinking = getattr(routed.receiver, "runtime_thinking", None)
@@ -918,6 +960,17 @@ class Session:
         if routed.receiver.name != "CEO" and response != "":
             print(colored(f"{routed.receiver.name} responds: {response}", "cyan"))
             get_logger().write_event("agent_response", agent=routed.receiver.name, content=response)
+        
+        # Display current turn token usage and session running totals
+        turn_p = self.prompt_tokens - prev_p
+        turn_c = self.completion_tokens - prev_c
+        turn_t = self.total_tokens - prev_t
+        if turn_t > 0:
+            token_str = f"[Tokens: {turn_p} in, {turn_c} out, {turn_t} total | running: {self.prompt_tokens} in, {self.completion_tokens} out, {self.total_tokens} total]"
+            import os
+            import sys
+            if os.environ.get("ROBITS_LOG_TOKENS") == "1" or (hasattr(sys.stdout, "isatty") and sys.stdout.isatty()):
+                print(colored(token_str, "dark_grey"))
         self.record_turn(
             sender=sender.name,
             receiver=routed.receiver.name,

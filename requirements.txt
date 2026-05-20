@@ -3,3 +3,4 @@ PyYaml
 termcolor
 aiosqlite
 sqlite-vec
+textual
