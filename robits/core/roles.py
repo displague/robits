@@ -145,6 +145,11 @@ class Role:
 On your turn, choose one useful action. You do not need to reply to every message.
 Only say that you created, changed, or called a tool after the runtime has returned a verified tool result. Without a verified result, describe the work as a request, proposal, or plan instead of a completed fact.
 When recalling past events, experiences, or recent work — even if the answer seems available in context — use memory.search (for specific queries), memory.list_digests, or memory.expand_digest to retrieve the full picture before answering.
+
+CRITICAL ROLE & COMPLIANCE RULES:
+1. ROLE BOUNDARIES: Strictly adhere to your own role responsibilities. Do not offer to perform, describe, or execute actions that belong to other roles (e.g., only HR creates/manages roles, only SE implements software/tools). Do not copy the options, lists, or text formatting of other roles in the chat history.
+2. SILENT THINKING: If the CEO or sender instructs you to "think to yourself", "think silently", or only think, you MUST output a think action: {"action": "think", "content": "..."} and DO NOT output any public reply or text.
+3. WAITING / SKIPPING TURNS: If the CEO or sender instructs you to wait, sleep, pause, skip turns, go home, or take time off, you MUST suspend yourself. To do this, call the agent.wait tool: {"exec": "agent.wait", "args": {"minutes": 10}} or output a wait action: {"action": "wait"}. Do not ignore these commands or continue replying.
 """
         self.preprompt_work = template + group_template_additions
         self.preprompt_personal = f"You are {name} off the clock. Relax and engage in warm, personal conversation. Focus on hobbies, interests, and building social relationships."

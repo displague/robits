@@ -419,6 +419,31 @@ class Session:
             )
             return RoutedMessage(self.participants[directed_receiver], remaining_prompt, True)
 
+        # If the last turn was directed and the last receiver was NOT the CEO (meaning an agent just responded to a DM),
+        # route the agent's response back to the sender of that DM.
+        if (
+            self.transcript
+            and self.transcript[-1].directed
+            and last_receiver_name != "CEO"
+        ):
+            last_entry = self.transcript[-1]
+            last_canonical_receiver = self._canonical_agent_id(last_entry.receiver)
+            current_canonical_last = self._canonical_agent_id(last_receiver_name)
+            if last_canonical_receiver == current_canonical_last:
+                original_sender = last_entry.sender
+                resolved_key = self._name_to_key.get(original_sender.lower())
+                if resolved_key is not None:
+                    self.scheduler.observe(resolved_key)
+                    self.event_stream.emit(
+                        "message.routed",
+                        self.run_id,
+                        {
+                            "receiver": resolved_key,
+                            "directed": True,
+                        },
+                    )
+                    return RoutedMessage(self.participants[resolved_key], message, True)
+
         now = datetime.now(timezone.utc)
         tried: set = set()
         receiver_name = self.scheduler.next(last_receiver_name)
@@ -482,6 +507,23 @@ class Session:
             return message, []
         action_type = action.get("action")
         if action_type == "wait":
+            from datetime import timedelta
+            now = datetime.now(timezone.utc)
+            if sender is not None:
+                sender.waiting_until = now + timedelta(minutes=10)
+                sender.wait_started_turn = self.turns_completed
+                sender.wait_clock_state = getattr(sender, "runtime_clock_state", self.clock_state)
+                agent_name = getattr(sender, "name", None)
+                if agent_name and _m.agent_workspace_store is not None:
+                    try:
+                        wait_data = {
+                            "waiting_until": sender.waiting_until.isoformat(),
+                            "wait_started_turn": sender.wait_started_turn,
+                            "wait_clock_state": sender.wait_clock_state,
+                        }
+                        _m.agent_workspace_store.write(agent_name, _WAIT_STATE_FILE, json.dumps(wait_data))
+                    except Exception:
+                        pass
             self.event_stream.emit(
                 "agent.waited",
                 self.run_id,
