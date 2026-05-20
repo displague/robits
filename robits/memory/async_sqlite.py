@@ -143,6 +143,42 @@ class AsyncSQLiteMemoryStore:
             await self.connection.commit()
         return session_id
 
+    async def get_agent_metadata(self, agent_id) -> dict:
+        async with self._db_lock:
+            cursor = await self.connection.execute(
+                "SELECT metadata_json FROM agents WHERE agent_id = ?",
+                (agent_id,),
+            )
+            row = await cursor.fetchone()
+            await cursor.close()
+            if row and row["metadata_json"]:
+                try:
+                    return json.loads(row["metadata_json"])
+                except Exception:
+                    pass
+            return {}
+
+    async def update_agent_metadata(self, agent_id, metadata: dict) -> None:
+        async with self._db_lock:
+            cursor = await self.connection.execute(
+                "SELECT metadata_json FROM agents WHERE agent_id = ?",
+                (agent_id,),
+            )
+            row = await cursor.fetchone()
+            await cursor.close()
+            current = {}
+            if row and row["metadata_json"]:
+                try:
+                    current = json.loads(row["metadata_json"])
+                except Exception:
+                    pass
+            current.update(metadata)
+            await self.connection.execute(
+                "UPDATE agents SET metadata_json = ? WHERE agent_id = ?",
+                (_json_dumps(current), agent_id),
+            )
+            await self.connection.commit()
+
     async def upsert_agent(
         self,
         agent_id,
@@ -158,6 +194,23 @@ class AsyncSQLiteMemoryStore:
     ):
         timestamp = created_at or _utc_now()
         async with self._db_lock:
+            cursor = await self.connection.execute(
+                "SELECT metadata_json FROM agents WHERE agent_id = ?",
+                (agent_id,),
+            )
+            row = await cursor.fetchone()
+            await cursor.close()
+            existing_metadata = {}
+            if row and row["metadata_json"]:
+                try:
+                    existing_metadata = json.loads(row["metadata_json"])
+                except Exception:
+                    pass
+            
+            merged_metadata = dict(existing_metadata)
+            if metadata:
+                merged_metadata.update(metadata)
+
             await self.connection.execute(
                 """
                 INSERT INTO agents(
@@ -185,7 +238,7 @@ class AsyncSQLiteMemoryStore:
                     full_name,
                     lifecycle_state,
                     timestamp,
-                    _json_dumps(metadata),
+                    _json_dumps(merged_metadata),
                 ),
             )
             await self.connection.commit()

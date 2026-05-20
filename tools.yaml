@@ -438,6 +438,30 @@
       - minutes
   code: |
     return agent_wait(employee_dict, minutes)
+- name: agent.adjust_preprompt
+  grantable: true
+  owner_capability: agent
+  description: >
+    Apply a temporary pre-prompt adjustment to this agent's persona.
+    Adjustments decay by 1 turn every step this agent takes, and expire when turns reaches 0.
+    Clock state transitions (e.g. going off-clock) clear the opposing mode's adjustments.
+  parameters:
+    type: object
+    properties:
+      adjustment:
+        type: string
+        description: The temporary instructions to append to the pre-prompt.
+      turns:
+        type: integer
+        description: Number of agent steps before the adjustment decays/expires. Default is 5. Max is 10.
+      mode:
+        type: string
+        description: The mode to adjust ('work' or 'personal'). Default is 'work'.
+        enum: [work, personal]
+    required:
+      - adjustment
+  code: |
+    return agent_adjust_preprompt(employee_dict, adjustment, turns=turns if 'turns' in locals() and turns is not None else 5, mode=mode if 'mode' in locals() and mode is not None else 'work')
 - name: agent.spawn
   grantable: true
   owner_capability: agent

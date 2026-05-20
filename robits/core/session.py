@@ -266,6 +266,19 @@ class Session:
                     role_type = type(participant).__name__
                     persona = _m.persona_entries.get(name) or {}
                     full_name = persona.get("full_name") if isinstance(persona, dict) else None
+                    
+                    metadata = {}
+                    if isinstance(persona, dict):
+                        if persona.get("preprompt_work"):
+                            metadata["preprompt_work"] = persona["preprompt_work"]
+                        if persona.get("preprompt_personal"):
+                            metadata["preprompt_personal"] = persona["preprompt_personal"]
+                    # Add fallbacks from participant if missing in persona
+                    if "preprompt_work" not in metadata and hasattr(participant, "preprompt_work"):
+                        metadata["preprompt_work"] = participant.preprompt_work
+                    if "preprompt_personal" not in metadata and hasattr(participant, "preprompt_personal"):
+                        metadata["preprompt_personal"] = participant.preprompt_personal
+
                     _m.memory_store.upsert_agent(
                         name, role_type,
                         display_name=full_name or name,
@@ -273,6 +286,7 @@ class Session:
                         full_name=full_name,
                         first_name=getattr(participant, "first_name", None),
                         last_name=getattr(participant, "last_name", None),
+                        metadata=metadata,
                     )
                     entries = persona.get("entries") if isinstance(persona, dict) else persona
                     if entries:
@@ -895,6 +909,60 @@ class Session:
                 return
         role.runtime_role_name = getattr(role, "name", None)
 
+    def _decay_agent_adjustments(self, agent_id):
+        """Decrement turn counter for active preprompt adjustments and clear them if expired."""
+        if _m.memory_store is None or not agent_id:
+            return
+        try:
+            if not hasattr(_m.memory_store, "get_agent_metadata") or not hasattr(_m.memory_store, "update_agent_metadata"):
+                return
+            metadata = _m.memory_store.get_agent_metadata(agent_id)
+            updated = False
+            
+            # If the clock state transitioned, clear the opposing mode's adjustments
+            effective_clock = self._effective_clock_state()
+            if effective_clock == "on" and (metadata.get("personal_adjustment") is not None):
+                metadata["personal_adjustment"] = None
+                metadata["personal_adjustment_turns"] = None
+                updated = True
+            elif effective_clock in ("off", "break") and (metadata.get("work_adjustment") is not None):
+                metadata["work_adjustment"] = None
+                metadata["work_adjustment_turns"] = None
+                updated = True
+                
+            # Decay work adjustment
+            w_turns = metadata.get("work_adjustment_turns")
+            if w_turns is not None:
+                try:
+                    w_turns = int(w_turns) - 1
+                    if w_turns <= 0:
+                        metadata["work_adjustment"] = None
+                        metadata["work_adjustment_turns"] = None
+                    else:
+                        metadata["work_adjustment_turns"] = w_turns
+                    updated = True
+                except Exception:
+                    pass
+                    
+            # Decay personal adjustment
+            p_turns = metadata.get("personal_adjustment_turns")
+            if p_turns is not None:
+                try:
+                    p_turns = int(p_turns) - 1
+                    if p_turns <= 0:
+                        metadata["personal_adjustment"] = None
+                        metadata["personal_adjustment_turns"] = None
+                    else:
+                        metadata["personal_adjustment_turns"] = p_turns
+                    updated = True
+                except Exception:
+                    pass
+                    
+            if updated:
+                _m.memory_store.update_agent_metadata(agent_id, metadata)
+        except Exception:
+            pass
+
     def recent_system_events(self, limit=5):
         """Return the most recent non-empty system event strings from the transcript."""
         events = []
@@ -944,6 +1012,7 @@ class Session:
         prev_t = self.total_tokens
 
         response = routed.receiver.interact(sender.name, model_prompt)
+        self._decay_agent_adjustments(routed.receiver.name)
         response = "" if response is None else response
         model_thinking = getattr(routed.receiver, "runtime_thinking", None)
         native_tool_events = list(getattr(routed.receiver, "runtime_tool_results", []))

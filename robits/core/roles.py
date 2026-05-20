@@ -22,17 +22,76 @@ _OFF_CLOCK_GUIDANCE = (
 
 def interact(self, model, sender, message):
     """Send message to the model and return the assistant's response text."""
-    if self.template != "" and self.name not in self.conversation_history:
+    preprompt_work = getattr(self, "preprompt_work", self.template)
+    preprompt_personal = getattr(self, "preprompt_personal", "")
+    
+    # Retrieve metadata and circadian phase from database
+    metadata = {}
+    phase = 0.5
+    if _m.memory_store is not None:
+        try:
+            if hasattr(_m.memory_store, "get_agent_metadata"):
+                metadata = _m.memory_store.get_agent_metadata(self.name)
+            db_phase = _m.memory_store.get_agent_phase(self.name)
+            if db_phase is not None:
+                phase = db_phase
+        except Exception:
+            pass
+
+    preprompt_work = metadata.get("preprompt_work") or preprompt_work
+    preprompt_personal = metadata.get("preprompt_personal") or preprompt_personal
+    
+    work_adjustment = metadata.get("work_adjustment")
+    work_adjustment_turns = metadata.get("work_adjustment_turns")
+    personal_adjustment = metadata.get("personal_adjustment")
+    personal_adjustment_turns = metadata.get("personal_adjustment_turns")
+    
+    import math
+    phase_val = max(0.0, min(1.0, float(phase)))
+    phase_weight = math.sin(math.pi * phase_val)
+    effective_clock = getattr(self, "runtime_clock_state", None) or _m.clock_state
+    
+    if effective_clock == "on":
+        work_weight = 0.5 + 0.5 * phase_weight
+    elif effective_clock == "off":
+        work_weight = 0.5 * (1.0 - phase_weight)
+    else:  # "break"
+        work_weight = 0.3 + 0.4 * phase_weight
+    personal_weight = 1.0 - work_weight
+    
+    preprompt_lines = []
+    preprompt_lines.append("=== Persona Circadian Rhythm & State ===")
+    preprompt_lines.append(f"Active clock state: {effective_clock}")
+    preprompt_lines.append(f"Circadian phase: {phase_val:.2f}")
+    preprompt_lines.append(f"Persona blend weighting: Work Mode = {work_weight * 100:.0f}%, Personal Mode = {personal_weight * 100:.0f}%")
+    preprompt_lines.append("")
+    
+    preprompt_lines.append(f"--- Work Persona Instructions (Weight: {work_weight * 100:.0f}%) ---")
+    preprompt_lines.append(preprompt_work or "")
+    if work_adjustment:
+        preprompt_lines.append(f"[Active Work Adjustment (Expires in {work_adjustment_turns} turns): {work_adjustment}]")
+    preprompt_lines.append("")
+    
+    preprompt_lines.append(f"--- Personal Persona Instructions (Weight: {personal_weight * 100:.0f}%) ---")
+    preprompt_lines.append(preprompt_personal or "")
+    if personal_adjustment:
+        preprompt_lines.append(f"[Active Personal Adjustment (Expires in {personal_adjustment_turns} turns): {personal_adjustment}]")
+    preprompt_lines.append("")
+    
+    dynamic_preprompt = "\n".join(preprompt_lines)
+    turn_action_template = getattr(self, "turn_action_template", "")
+    
+    guidance = _ON_CLOCK_GUIDANCE if effective_clock == "on" else _OFF_CLOCK_GUIDANCE
+    system_content = dynamic_preprompt + turn_action_template + guidance + format_agent_context(self)
+
+    if self.name not in self.conversation_history:
         self.conversation_history[self.name] = [
-            {"role": "system", "content": self.template},
+            {"role": "system", "content": system_content},
         ]
     messages = self.conversation_history.get(self.name, [])
-    effective_clock = getattr(self, "runtime_clock_state", _m.clock_state)
-    guidance = _ON_CLOCK_GUIDANCE if effective_clock == "on" else _OFF_CLOCK_GUIDANCE
-    system_content = self.template + guidance + format_agent_context(self)
     if messages and messages[0].get("role") == "system":
         messages[0]["content"] = system_content
-    elif self.template:
+    else:
         messages.insert(0, {"role": "system", "content": system_content})
     if message is not None and message != "":
         messages.append({"role": "user", "content": message, "name": sender})
@@ -82,12 +141,14 @@ class Role:
 
     def __init__(self, name, template, employee_dict, group_template_additions=""):
         self.name = name
-        turn_action_template = """
+        self.turn_action_template = """
 On your turn, choose one useful action. You do not need to reply to every message.
 Only say that you created, changed, or called a tool after the runtime has returned a verified tool result. Without a verified result, describe the work as a request, proposal, or plan instead of a completed fact.
 When recalling past events, experiences, or recent work — even if the answer seems available in context — use memory.search (for specific queries), memory.list_digests, or memory.expand_digest to retrieve the full picture before answering.
 """
-        self.template = template + group_template_additions + turn_action_template
+        self.preprompt_work = template + group_template_additions
+        self.preprompt_personal = f"You are {name} off the clock. Relax and engage in warm, personal conversation. Focus on hobbies, interests, and building social relationships."
+        self.template = self.preprompt_work + self.turn_action_template
         self.employee_dict = employee_dict
         self.conversation_history = {name: [] for name in employee_dict}
         self.group_conversation_history = {}
@@ -329,6 +390,10 @@ def build_employee_dict(persona_map=None):
             parts = full_name.split(None, 1)
             instance.first_name = parts[0] if parts else username
             instance.last_name = parts[1] if len(parts) > 1 else ""
+            if info.get("preprompt_work"):
+                instance.preprompt_work = info["preprompt_work"]
+            if info.get("preprompt_personal"):
+                instance.preprompt_personal = info["preprompt_personal"]
             employee_dict[username] = instance
         if not any(isinstance(v, Human) for v in employee_dict.values()):
             employee_dict["CEO"] = Human()
