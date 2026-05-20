@@ -4966,6 +4966,27 @@ class DirectedRoutingTests(unittest.TestCase):
         self.assertTrue(routed.directed)
         self.assertIs(routed.receiver, p["alex_chen"])
 
+    def test_route_by_colon_separator(self):
+        p = self._make_participants()
+        routed = self._route(p, "alex_chen: do this")
+        self.assertTrue(routed.directed)
+        self.assertIs(routed.receiver, p["alex_chen"])
+        self.assertEqual(routed.prompt, "do this")
+
+    def test_route_by_at_prefix(self):
+        p = self._make_participants()
+        routed = self._route(p, "@alex_chen do this")
+        self.assertTrue(routed.directed)
+        self.assertIs(routed.receiver, p["alex_chen"])
+        self.assertEqual(routed.prompt, "do this")
+
+    def test_route_by_at_prefix_with_colon(self):
+        p = self._make_participants()
+        routed = self._route(p, "@alex_chen: do this")
+        self.assertTrue(routed.directed)
+        self.assertIs(routed.receiver, p["alex_chen"])
+        self.assertEqual(routed.prompt, "do this")
+
     def test_unknown_prefix_falls_through(self):
         p = self._make_participants()
         routed = self._route(p, "Finance, do this")

@@ -390,23 +390,34 @@ class Session:
         return False
 
     def route_message(self, message, last_receiver_name=None):
-        """Determine the next receiver for message; honour 'Name, prompt' directed syntax."""
-        prompt_split = message.split(",", 1) if isinstance(message, str) else []
-        if len(prompt_split) > 1:
-            receiver_token = prompt_split[0].strip()
-            resolved_key = self._name_to_key.get(receiver_token.lower())
-            if resolved_key is not None:
-                print(colored(f"// Directed to {resolved_key}", "grey"))
-                self.scheduler.observe(resolved_key)
-                self.event_stream.emit(
-                    "message.routed",
-                    self.run_id,
-                    {
-                        "receiver": resolved_key,
-                        "directed": True,
-                    },
-                )
-                return RoutedMessage(self.participants[resolved_key], prompt_split[1].strip(), True)
+        """Determine the next receiver for message; honour 'Name, prompt', 'Name: prompt', and '@Name prompt' directed syntax."""
+        directed_receiver = None
+        remaining_prompt = message
+
+        if isinstance(message, str) and message:
+            import re as _re
+            m = _re.match(r"^@?([a-zA-Z0-9_\s]+?)\s*[:,]\s*(.*)$", message)
+            if not m:
+                m = _re.match(r"^@([a-zA-Z0-9_]+?)\s+(.*)$", message)
+            if m:
+                receiver_token = m.group(1).strip()
+                resolved_key = self._name_to_key.get(receiver_token.lower())
+                if resolved_key is not None:
+                    directed_receiver = resolved_key
+                    remaining_prompt = m.group(2).strip()
+
+        if directed_receiver is not None:
+            print(colored(f"// Directed to {directed_receiver}", "grey"))
+            self.scheduler.observe(directed_receiver)
+            self.event_stream.emit(
+                "message.routed",
+                self.run_id,
+                {
+                    "receiver": directed_receiver,
+                    "directed": True,
+                },
+            )
+            return RoutedMessage(self.participants[directed_receiver], remaining_prompt, True)
 
         now = datetime.now(timezone.utc)
         tried: set = set()
