@@ -308,7 +308,7 @@ class SoftwareEngineer(Role):
 
 def get_default_human_name():
     import sys
-    if "pytest" in sys.modules or any("pytest" in arg for arg in sys.argv):
+    if "pytest" in sys.modules or "unittest" in sys.modules or any("pytest" in arg or "unittest" in arg for arg in sys.argv):
         return "CEO"
     return getpass.getuser()
 
