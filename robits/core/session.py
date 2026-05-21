@@ -221,7 +221,7 @@ class Session:
         self._meaningful_turns_completed = 0
         self._last_identity_digest_meaningful_turn = 0
         self._last_goal_digest_meaningful_turn = 0
-        self.last_receiver = self.participants.get("CEO") or next(iter(self.participants.values()))
+        self.last_receiver = next((p for p in self.participants.values() if p.__class__.__name__ == "Human"), None) or next(iter(self.participants.values()))
         _name_map: dict = {}
         for k, p in self.participants.items():
             for form in (
@@ -421,10 +421,12 @@ class Session:
 
         # If the last turn was directed and the last receiver was NOT the CEO (meaning an agent just responded to a DM),
         # route the agent's response back to the sender of that DM.
+        last_rec_obj = self.participants.get(last_receiver_name) if last_receiver_name else None
+        last_is_human = last_rec_obj.__class__.__name__ == "Human" if last_rec_obj else False
         if (
             self.transcript
             and self.transcript[-1].directed
-            and last_receiver_name != "CEO"
+            and not last_is_human
         ):
             last_entry = self.transcript[-1]
             last_canonical_receiver = self._canonical_agent_id(last_entry.receiver)
@@ -1080,9 +1082,9 @@ class Session:
             system_events.extend(response_events)
             deliver_verified_tool_results(routed.receiver, response_events)
             self.sync_scheduler_participants()
-        if model_thinking and routed.receiver.name != "CEO":
+        if model_thinking and routed.receiver.__class__.__name__ != "Human":
             print(colored(f"[{routed.receiver.name} \U0001f914 {len(model_thinking)} chars]", "dark_grey"))
-        if routed.receiver.name != "CEO" and response != "":
+        if routed.receiver.__class__.__name__ != "Human" and response != "":
             print(colored(f"{routed.receiver.name} responds: {response}", "cyan"))
             get_logger().write_event("agent_response", agent=routed.receiver.name, content=response)
         

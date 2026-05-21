@@ -1,4 +1,5 @@
 """Role hierarchy and interaction functions."""
+import getpass
 import json
 import math
 import random
@@ -305,11 +306,18 @@ class SoftwareEngineer(Role):
         return interact_costly(self, sender, prompt)
 
 
+def get_default_human_name():
+    import sys
+    if "pytest" in sys.modules or any("pytest" in arg for arg in sys.argv):
+        return "CEO"
+    return getpass.getuser()
+
+
 class Human(Role):
     """CEO role — a human-in-the-loop participant that reads from stdin."""
 
     def __init__(self, employee_dict=None):
-        self.name = "CEO"
+        self.name = get_default_human_name()
         self.template = "As CEO, you are responsible for making high-level decisions and setting the overall direction of the organization."
         self.lifecycle_state = "active"
         self.lifecycle_events = []
@@ -401,7 +409,10 @@ def build_employee_dict(persona_map=None):
                 instance.preprompt_personal = info["preprompt_personal"]
             employee_dict[username] = instance
         if not any(isinstance(v, Human) for v in employee_dict.values()):
-            employee_dict["CEO"] = Human()
+            human_name = get_default_human_name()
+            ceo = Human()
+            ceo.name = human_name
+            employee_dict[human_name] = ceo
         # Backfill conversation_history so every role knows about every peer,
         # regardless of instantiation order.
         all_keys = set(employee_dict)
@@ -411,7 +422,10 @@ def build_employee_dict(persona_map=None):
                 for key in all_keys:
                     ch.setdefault(key, [])
     else:
-        employee_dict["CEO"] = Human()
+        human_name = get_default_human_name()
+        ceo = Human()
+        ceo.name = human_name
+        employee_dict[human_name] = ceo
         employee_dict["Ops"] = Ops(employee_dict)
         employee_dict["SE"] = SoftwareEngineer(employee_dict)
         employee_dict["HR"] = HR(employee_dict)

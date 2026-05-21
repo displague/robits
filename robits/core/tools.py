@@ -108,8 +108,17 @@ def _validate_tool_code_ast(tree):
 
 def role_can_use_tool(role, tool):
     """Return True if role has the required capabilities and a matching tool grant."""
-    if getattr(role, "name", None) == "CEO":
+    if role.__class__.__name__ == "Human":
         return True
+    role_name = getattr(role, "name", None)
+    if role_name == "CEO":
+        return True
+    try:
+        from robits.core.roles import get_default_human_name
+        if role_name == get_default_human_name():
+            return True
+    except Exception:
+        pass
     capabilities = getattr(role, "capabilities", set())
     if tool.required_capabilities and not set(tool.required_capabilities).issubset(capabilities):
         return False

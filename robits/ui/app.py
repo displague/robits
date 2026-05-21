@@ -312,6 +312,8 @@ class RobitsTuiApp(App):
 
     def __init__(self, db_path: str, session_id: Optional[str] = None, policy: str = "full", interactive: bool = False):
         super().__init__()
+        import getpass
+        self.human_name = getpass.getuser()
         self.reader = RobitsDbReader(db_path)
         self.selected_session_id = session_id
         self.policy = policy
@@ -348,8 +350,8 @@ class RobitsTuiApp(App):
                 yield RichLog(id="transcript_log", max_lines=1000)
                 
                 # Dynamic status indicator and message input area
-                placeholder_text = "CEO: Enter message or /command..." if self.interactive else "[Read-Only Mode] Refresh: r, Cycle Policy: p"
-                yield Label(placeholder_text, id="status_indicator")
+                placeholder_text = f"{self.human_name} > " if self.interactive else "[Read-Only Mode] Refresh: r, Cycle Policy: p"
+                yield Label("Idle" if self.interactive else placeholder_text, id="status_indicator")
                 yield Input(placeholder=placeholder_text, id="message_input", disabled=not self.interactive)
                 
             with Vertical(id="event_panel"):
@@ -388,7 +390,7 @@ class RobitsTuiApp(App):
         self.run_simulation_worker()
 
     def patch_ceo_interact(self) -> None:
-        ceo = self.session.participants.get("CEO")
+        ceo = next((p for p in self.session.participants.values() if p.__class__.__name__ == "Human"), None)
         if not ceo:
             return
 
@@ -407,7 +409,7 @@ class RobitsTuiApp(App):
     def notify_ceo_turn(self) -> None:
         self.is_ceo_turn = True
         status_lbl = self.query_one("#status_indicator", Label)
-        status_lbl.update("🟢 CEO turn: Enter message or /command...")
+        status_lbl.update(f"🟢 {self.human_name}'s turn: Enter message or /command...")
 
         inp = self.query_one("#message_input", Input)
         inp.disabled = False
@@ -540,14 +542,41 @@ class RobitsTuiApp(App):
         # 6. Load incremental events
         self.load_runtime_events()
 
-        # 7. Update status indicator if running interactive and agents are thinking
-        if self.interactive and not self.is_ceo_turn:
-            active_caller = getattr(_config, "active_tool_caller_name", None)
+        # 7. Update status indicator if running interactive
+        if self.interactive and self.session:
             status_lbl = self.query_one("#status_indicator", Label)
-            if active_caller:
-                status_lbl.update(f"⏳ {active_caller} is acting/executing tools...")
-            else:
-                status_lbl.update("⏳ Agents are thinking/planning...")
+            status_parts = []
+            for name, role in self.session.participants.items():
+                if role.__class__.__name__ == "Human":
+                    if self.is_ceo_turn:
+                        status_parts.append(f"🟢 [bold green]{name}[/]")
+                    else:
+                        status_parts.append(f"👤 {name}")
+                    continue
+
+                # Check suspension
+                wu = getattr(role, "waiting_until", None)
+                if wu:
+                    now = datetime.now(timezone.utc)
+                    rem = (wu - now).total_seconds()
+                    if rem > 0:
+                        status_parts.append(f"💤 {name} ({int(rem//60)}m)")
+                        continue
+
+                # Check active tool caller
+                active_caller = getattr(_config, "active_tool_caller_name", None)
+                if active_caller == name:
+                    status_parts.append(f"⚙️ [yellow]{name}[/] (acting)")
+                    continue
+
+                # Check if currently thinking in session step
+                if not self.is_ceo_turn and self.session.last_receiver and self.session.last_receiver.name == name:
+                    status_parts.append(f"⏳ [cyan]{name}[/] (thinking)")
+                    continue
+
+                status_parts.append(f"⚪ {name}")
+
+            status_lbl.update(" | ".join(status_parts))
 
     def filter_channels_by_policy(self, channels: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         filtered = []
@@ -821,10 +850,10 @@ class RobitsTuiApp(App):
             log_pane.write(Text("\n=== TUI SLASH COMMANDS ===", style="bold yellow"))
             log_pane.write(Text("  /help, /?              - Show this help message", style="cyan"))
             log_pane.write(Text("  /personas, /agents     - List all loaded agent personas and details", style="cyan"))
-            log_pane.write(Text("  /clock                 - Show current circadian clock and schedule", style="cyan"))
+            log_pane.write(Text("  /clock [@nick]         - Show global circadian clock or details for @nick", style="cyan"))
             log_pane.write(Text("  /session               - Show session ID and token usage statistics", style="cyan"))
             log_pane.write(Text("  /clear                 - Clear the transcript view log", style="cyan"))
-            log_pane.write(Text("  /wait <minutes>        - Manually set wait suspension for the active agent", style="cyan"))
+            log_pane.write(Text("  /wait <mins> [@nick]   - Suspend/nap @nick or last active agent for <mins>", style="cyan"))
             log_pane.write(Text("  /quit, /exit           - Exit the application", style="cyan"))
             log_pane.write(Text("==========================\n", style="bold yellow"))
 
@@ -853,10 +882,38 @@ class RobitsTuiApp(App):
 
         elif cmd == "/clock":
             log_pane.write(Text("\n=== CLOCK STATE ===", style="bold yellow"))
-            effective_clock = getattr(_config, "clock_state", "on")
-            break_sched = getattr(_config, "break_schedule", [])
-            log_pane.write(Text(f"  Current clock state: {effective_clock.upper()}", style="cyan"))
-            log_pane.write(Text(f"  Break schedule: {break_sched}", style="cyan"))
+            target_agent = args.strip().lstrip("@")
+            if target_agent:
+                # Find details for a specific agent
+                if self.interactive and self.session:
+                    role = self.session.participants.get(target_agent)
+                    if role:
+                        clock_state = getattr(role, "runtime_clock_state", None) or getattr(_config, "clock_state", "on")
+                        log_pane.write(Text(f"  Agent: {target_agent}", style="bold green"))
+                        log_pane.write(Text(f"  Clock state: {clock_state.upper()}", style="cyan"))
+                        log_pane.write(Text(f"  Status: {getattr(role, 'lifecycle_state', 'active')}", style="cyan"))
+                    else:
+                        log_pane.write(Text(f"  Agent '{target_agent}' not found in active session.", style="red"))
+                else:
+                    agents = self.reader.get_agents()
+                    a = next((x for x in agents if x["agent_id"] == target_agent), None)
+                    if a:
+                        log_pane.write(Text(f"  Agent: {target_agent}", style="bold green"))
+                        log_pane.write(Text(f"  Lifecycle state: {a['lifecycle_state']}", style="cyan"))
+                    else:
+                        log_pane.write(Text(f"  Agent '{target_agent}' not found in database.", style="red"))
+            else:
+                # Global clock and all participants' current states
+                effective_clock = getattr(_config, "clock_state", "on")
+                break_sched = getattr(_config, "break_schedule", [])
+                log_pane.write(Text(f"  Global clock state: {effective_clock.upper()}", style="cyan"))
+                log_pane.write(Text(f"  Break schedule: {break_sched}", style="cyan"))
+                if self.interactive and self.session:
+                    log_pane.write(Text("\n  Agent clock states:", style="dim"))
+                    for name, role in self.session.participants.items():
+                        if role.__class__.__name__ != "Human":
+                            clock_state = getattr(role, "runtime_clock_state", None) or getattr(_config, "clock_state", "on")
+                            log_pane.write(Text(f"    - {name}: {clock_state.upper()}", style="cyan"))
             log_pane.write(Text("====================\n", style="bold yellow"))
 
         elif cmd == "/session":
@@ -871,18 +928,33 @@ class RobitsTuiApp(App):
             if not self.interactive or not self.session:
                 log_pane.write(Text("[System] Wait command only supported in interactive mode.", style="red"))
                 return
-            try:
-                mins = int(args) if args else 10
-            except ValueError:
-                log_pane.write(Text("[System] Usage: /wait <minutes>", style="red"))
-                return
-            receiver = self.session.last_receiver
+
+            arg_parts = args.strip().split(maxsplit=1)
+            mins = 10
+            target_agent = None
+            if arg_parts:
+                try:
+                    mins = int(arg_parts[0])
+                    if len(arg_parts) > 1:
+                        target_agent = arg_parts[1].lstrip("@")
+                except ValueError:
+                    target_agent = arg_parts[0].lstrip("@")
+
+            if target_agent:
+                receiver = self.session.participants.get(target_agent)
+                if not receiver:
+                    log_pane.write(Text(f"[System] Agent '{target_agent}' not found in active session.", style="red"))
+                    return
+            else:
+                receiver = self.session.last_receiver
+
             if receiver:
                 from datetime import timedelta
                 receiver.waiting_until = datetime.now(timezone.utc) + timedelta(minutes=mins)
                 log_pane.write(Text(f"[System] Manually suspended {receiver.name} for {mins} minutes.", style="yellow"))
+                self.refresh_data()
             else:
-                log_pane.write(Text("[System] No active receiver found to suspend.", style="red"))
+                log_pane.write(Text("[System] No active receiver found to suspend. Usage: /wait <minutes> [@nick]", style="red"))
 
         else:
             log_pane.write(Text(f"[System] Unknown command: {cmd}. Type /help for commands.", style="red"))

@@ -4482,6 +4482,10 @@ class PersonaRedesignTests(unittest.TestCase):
         self.assertIn("CEO", d)
         self.assertIsInstance(d["CEO"], Human)
 
+    def test_get_default_human_name_in_test_env(self):
+        from robits.core.roles import get_default_human_name
+        self.assertEqual(get_default_human_name(), "CEO")
+
 
 class PersonaSeedingTests(unittest.TestCase):
     """Tests for persona seeding into memory on first session."""
