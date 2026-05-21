@@ -15,6 +15,7 @@ from textual.app import App, ComposeResult
 from textual.containers import Container, Horizontal, Vertical
 from textual.widgets import Footer, Header, Label, ListItem, ListView, RichLog, Static, Input
 
+import main
 from robits.core.config import _config
 from robits.core.session import Session
 from robits.core.roles import load_tools
