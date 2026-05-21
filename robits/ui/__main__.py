@@ -40,17 +40,33 @@ def main():
         help="Observer policy for private thoughts and DMs (default: full)."
     )
 
+    parser.add_argument(
+        "-i",
+        "--interactive",
+        action="store_true",
+        help="Run in interactive mode (start a live session with chat and agent execution)."
+    )
+
     args = parser.parse_args()
 
     # Expand user/relative paths for the DB
     db_path = os.path.abspath(os.path.expanduser(args.db))
 
     if not os.path.exists(db_path):
-        print(f"Error: Database file not found at '{db_path}'.", file=sys.stderr)
-        print("Please run a simulation first to initialize the database.", file=sys.stderr)
-        sys.exit(1)
+        if args.interactive:
+            # Create directories so SQLite can initialize it
+            os.makedirs(os.path.dirname(db_path), exist_ok=True)
+        else:
+            print(f"Error: Database file not found at '{db_path}'.", file=sys.stderr)
+            print("Please run a simulation first to initialize the database or use --interactive.", file=sys.stderr)
+            sys.exit(1)
 
-    app = RobitsTuiApp(db_path=db_path, session_id=args.session_id, policy=args.policy)
+    app = RobitsTuiApp(
+        db_path=db_path,
+        session_id=args.session_id,
+        policy=args.policy,
+        interactive=args.interactive
+    )
     app.run()
 
 

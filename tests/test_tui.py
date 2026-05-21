@@ -56,6 +56,15 @@ class TestRobitsTui(unittest.TestCase):
                 payload_json TEXT NOT NULL DEFAULT '{}',
                 created_at TEXT NOT NULL
             );
+            CREATE TABLE agents (
+                agent_id TEXT PRIMARY KEY,
+                role TEXT NOT NULL,
+                display_name TEXT,
+                username TEXT,
+                lifecycle_state TEXT NOT NULL DEFAULT 'active',
+                created_at TEXT NOT NULL,
+                metadata_json TEXT NOT NULL DEFAULT '{}'
+            );
         """)
         self.conn.commit()
         self.reader = RobitsDbReader(self.db_path)
@@ -135,6 +144,25 @@ class TestRobitsTui(unittest.TestCase):
         self.assertEqual(app.format_channel_name(ch_org), "# org-chat")
         self.assertEqual(app.format_channel_name(ch_thought), "💭 thoughts (CEO)")
         self.assertEqual(app.format_channel_name(ch_dm), "✉️ dm (CEO <-> Dev)")
+
+    def test_get_agents(self):
+        self.cursor.execute(
+            "INSERT INTO agents (agent_id, role, display_name, username, created_at) VALUES (?, ?, ?, ?, ?)",
+            ("SE-1", "SoftwareEngineer", "Jane Dev", "janedev", "2026-05-20T00:00:00Z")
+        )
+        self.conn.commit()
+
+        agents = self.reader.get_agents()
+        self.assertEqual(len(agents), 1)
+        self.assertEqual(agents[0]["agent_id"], "SE-1")
+        self.assertEqual(agents[0]["role"], "SoftwareEngineer")
+
+    def test_interactive_flag_assignment(self):
+        app_passive = RobitsTuiApp(self.db_path, interactive=False)
+        self.assertFalse(app_passive.interactive)
+
+        app_active = RobitsTuiApp(self.db_path, interactive=True)
+        self.assertTrue(app_active.interactive)
 
 
 if __name__ == "__main__":

@@ -8,9 +8,16 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from rich.pretty import Pretty
 from rich.text import Text
+import threading
+from datetime import timezone
+from textual import work
 from textual.app import App, ComposeResult
 from textual.containers import Container, Horizontal, Vertical
-from textual.widgets import Footer, Header, Label, ListItem, ListView, RichLog, Static
+from textual.widgets import Footer, Header, Label, ListItem, ListView, RichLog, Static, Input
+
+from robits.core.config import _config
+from robits.core.session import Session
+from robits.core.roles import load_tools
 
 
 class RobitsDbReader:
@@ -166,6 +173,24 @@ class RobitsDbReader:
         finally:
             conn.close()
 
+    def get_agents(self) -> List[Dict[str, Any]]:
+        conn = self._get_conn()
+        try:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                SELECT agent_id, role, display_name, username, lifecycle_state, metadata_json
+                FROM agents
+                ORDER BY agent_id
+                """
+            )
+            return [dict(row) for row in cursor.fetchall()]
+        except sqlite3.Error:
+            return []
+        finally:
+            conn.close()
+
+
 
 class RobitsTuiApp(App):
     """Textual TUI for Robits observability."""
@@ -261,19 +286,49 @@ class RobitsTuiApp(App):
         background: #1F3F66;
         color: #FFFFFF;
     }
+
+    #agent_list {
+        height: 1fr;
+        border-top: solid #2A3644;
+    }
+
+    #status_indicator {
+        background: #1B2936;
+        color: #B0C4DE;
+        padding: 0 1;
+        height: 1;
+        border-top: solid #2A3644;
+        border-bottom: solid #2A3644;
+        text-style: italic;
+    }
+
+    #message_input {
+        background: #090D14;
+        color: #E0E0E0;
+        border: none;
+        height: 3;
+    }
     """
 
-    def __init__(self, db_path: str, session_id: Optional[str] = None, policy: str = "full"):
+    def __init__(self, db_path: str, session_id: Optional[str] = None, policy: str = "full", interactive: bool = False):
         super().__init__()
         self.reader = RobitsDbReader(db_path)
         self.selected_session_id = session_id
         self.policy = policy
+        self.interactive = interactive
         self.selected_channel_id: Optional[int] = None
         self.selected_channel_type: Optional[str] = None
+
+        # Thread synchronization for interactive simulation
+        self.input_received_event = threading.Event()
+        self.last_user_input = ""
+        self.session: Optional[Session] = None
+        self.is_ceo_turn = False
 
         # Change-tracking states to optimize updates without full clears
         self.sessions_cache: List[Dict[str, Any]] = []
         self.channels_cache: List[Dict[str, Any]] = []
+        self.agents_cache: List[Dict[str, Any]] = []
         self.loaded_message_ids: set = set()
         self.loaded_event_ids: set = set()
         self.events_cache: List[Dict[str, Any]] = []
@@ -286,9 +341,17 @@ class RobitsTuiApp(App):
                 yield ListView(id="session_list")
                 yield Label("CHANNELS", classes="sidebar-title")
                 yield ListView(id="channel_list")
+                yield Label("AGENTS / PERSONAS", classes="sidebar-title")
+                yield ListView(id="agent_list")
             with Vertical(id="main_panel"):
                 yield Label("TRANSCRIPT (Policy: " + self.policy + ")", id="transcript_title")
                 yield RichLog(id="transcript_log", max_lines=1000)
+                
+                # Dynamic status indicator and message input area
+                placeholder_text = "CEO: Enter message or /command..." if self.interactive else "[Read-Only Mode] Refresh: r, Cycle Policy: p"
+                yield Label(placeholder_text, id="status_indicator")
+                yield Input(placeholder=placeholder_text, id="message_input", disabled=not self.interactive)
+                
             with Vertical(id="event_panel"):
                 yield Label("RUNTIME EVENTS", classes="panel-title")
                 yield ListView(id="event_list")
@@ -299,6 +362,102 @@ class RobitsTuiApp(App):
     def on_mount(self) -> None:
         self.refresh_data()
         self.set_interval(1.0, self.refresh_data)
+        if self.interactive:
+            self.start_interactive_session()
+
+    def start_interactive_session(self) -> None:
+        from robits.memory.sqlite import SQLiteMemoryStore
+        _config.memory_db_path = self.reader.db_path
+        _config.memory_store = SQLiteMemoryStore(self.reader.db_path)
+
+        # Initialize a new session
+        self.session = Session()
+        load_tools(self.session.system)
+
+        # Point the UI to this active session
+        self.selected_session_id = self.session.run_id
+
+        # Patch CEO interaction callback
+        self.patch_ceo_interact()
+
+        # Log session startup message
+        self.write_to_transcript(f"🚀 Started interactive session {self.session.run_id[:12]}...", "bold green")
+        self.write_to_transcript("Type a message to start, or type /help for commands.\n", "dim")
+
+        # Start worker thread
+        self.run_simulation_worker()
+
+    def patch_ceo_interact(self) -> None:
+        ceo = self.session.participants.get("CEO")
+        if not ceo:
+            return
+
+        def tui_interact(*args, **kwargs):
+            # Update turn state and notify UI
+            self.call_from_thread(self.notify_ceo_turn)
+
+            # Wait for user input in input box
+            self.input_received_event.wait()
+            self.input_received_event.clear()
+
+            return self.last_user_input
+
+        ceo.interact = tui_interact
+
+    def notify_ceo_turn(self) -> None:
+        self.is_ceo_turn = True
+        status_lbl = self.query_one("#status_indicator", Label)
+        status_lbl.update("🟢 CEO turn: Enter message or /command...")
+
+        inp = self.query_one("#message_input", Input)
+        inp.disabled = False
+        inp.placeholder = "CEO: Enter message or /command..."
+        inp.focus()
+
+    @work(thread=True)
+    def run_simulation_worker(self) -> None:
+        try:
+            self.session.run()
+        except SystemExit:
+            self.call_from_thread(self.action_quit)
+        except Exception as e:
+            import traceback
+            err_msg = f"\n[Simulation Error] {e}\n{traceback.format_exc()}"
+            self.call_from_thread(self.write_to_transcript, err_msg, "bold red")
+
+    def on_input_submitted(self, event: Input.Submitted) -> None:
+        text = event.value.strip()
+        if not text:
+            return
+
+        inp = self.query_one("#message_input", Input)
+        inp.value = ""
+
+        if text.startswith("/"):
+            self.handle_slash_command(text)
+            return
+
+        if not self.interactive or not self.session:
+            self.write_to_transcript("[System Warning] Read-only observability mode. Run with --interactive to chat.", "bold red")
+            return
+
+        # If it's the CEO's turn, we resume the worker thread
+        if self.is_ceo_turn:
+            self.is_ceo_turn = False
+            self.last_user_input = text
+
+            status_lbl = self.query_one("#status_indicator", Label)
+            status_lbl.update("⏳ Agents are thinking/acting...")
+            inp.disabled = True
+            inp.placeholder = "Waiting for agents..."
+
+            self.input_received_event.set()
+        else:
+            self.write_to_transcript("[System] Waiting for agents to finish their turns...", "bold yellow")
+
+    def write_to_transcript(self, content: str, style: str = "bold yellow") -> None:
+        log_pane = self.query_one("#transcript_log", RichLog)
+        log_pane.write(Text(content, style=style))
 
     def action_refresh(self) -> None:
         self.refresh_data()
@@ -352,12 +511,43 @@ class RobitsTuiApp(App):
             self.channels_cache = filtered_channels
             self.reload_channels_view()
 
-        # 4. Load incremental channel contents
+        # 4. Update agents list
+        agents = []
+        if self.interactive and self.session:
+            for name, role in self.session.participants.items():
+                agents.append({
+                    "agent_id": name,
+                    "role": role.__class__.__name__,
+                    "lifecycle_state": getattr(role, "lifecycle_state", "active")
+                })
+        else:
+            agents = self.reader.get_agents()
+
+        if agents != self.agents_cache:
+            self.agents_cache = agents
+            agent_list = self.query_one("#agent_list", ListView)
+            agent_list.clear()
+            for a in agents:
+                display = f"👤 {a['agent_id']} ({a['role']})"
+                item = ListItem(Label(display))
+                item.agent_name = a["agent_id"]
+                agent_list.append(item)
+
+        # 5. Load incremental channel contents
         if self.selected_channel_id is not None and self.selected_channel_type is not None:
             self.load_channel_contents()
 
-        # 5. Load incremental events
+        # 6. Load incremental events
         self.load_runtime_events()
+
+        # 7. Update status indicator if running interactive and agents are thinking
+        if self.interactive and not self.is_ceo_turn:
+            active_caller = getattr(_config, "active_tool_caller_name", None)
+            status_lbl = self.query_one("#status_indicator", Label)
+            if active_caller:
+                status_lbl.update(f"⏳ {active_caller} is acting/executing tools...")
+            else:
+                status_lbl.update("⏳ Agents are thinking/planning...")
 
     def filter_channels_by_policy(self, channels: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         filtered = []
@@ -540,6 +730,13 @@ class RobitsTuiApp(App):
                     self.clear_transcript()
                     self.load_channel_contents()
 
+        elif list_id == "agent_list":
+            selected_item = event.item
+            if selected_item:
+                agent_name = getattr(selected_item, "agent_name", None)
+                if agent_name:
+                    self.inspect_agent(agent_name)
+
         elif list_id == "event_list":
             selected_item = event.item
             if selected_item:
@@ -555,3 +752,137 @@ class RobitsTuiApp(App):
                     pretty_payload = Pretty(payload)
                     inspector = self.query_one("#event_inspector", Static)
                     inspector.update(pretty_payload)
+
+    def inspect_agent(self, agent_name: str) -> None:
+        inspector = self.query_one("#event_inspector", Static)
+        info = []
+        info.append(f"[bold cyan]👤 AGENT PERSONA: {agent_name}[/]")
+        
+        if self.interactive and self.session:
+            role_obj = self.session.participants.get(agent_name)
+            if role_obj:
+                info.append(f"  [bold]Class:[/] {role_obj.__class__.__name__}")
+                info.append(f"  [bold]Lifecycle State:[/] {getattr(role_obj, 'lifecycle_state', 'active')}")
+                
+                # Check waiting suspension
+                wu = getattr(role_obj, "waiting_until", None)
+                if wu:
+                    now = datetime.now(timezone.utc)
+                    remaining = (wu - now).total_seconds()
+                    if remaining > 0:
+                        info.append(f"  [bold]Status:[/] ⏳ Suspended/Napping (remains {int(remaining)}s)")
+                    else:
+                        info.append("  [bold]Status:[/] Active")
+                else:
+                    info.append("  [bold]Status:[/] Active")
+
+                clock_state = getattr(role_obj, "runtime_clock_state", None) or getattr(_config, "clock_state", "on")
+                info.append(f"  [bold]Clock State:[/] {clock_state}")
+                info.append(f"  [bold]Temperature:[/] {getattr(role_obj, 'temperature', 0.7)}")
+                info.append(f"  [bold]Allowed Tools:[/] {sorted(list(getattr(role_obj, 'allowed_tools', [])))}")
+                
+                # Active alarms
+                alarms = getattr(role_obj, "alarms", [])
+                if alarms:
+                    info.append("  [bold]Active Alarms:[/]")
+                    for alarm in alarms:
+                        info.append(f"    - ID: {alarm.alarm_id} (due: {alarm.due_at})")
+                        
+                info.append("\n[bold]Current Preprompt Template:[/]")
+                lines = role_obj.template.splitlines()
+                for line in lines[:15]:
+                    info.append(f"  {line}")
+                if len(lines) > 15:
+                    info.append("  ...")
+            else:
+                info.append("  Agent details not found in active session.")
+        else:
+            agents = self.reader.get_agents()
+            a = next((x for x in agents if x["agent_id"] == agent_name), None)
+            if a:
+                info.append(f"  [bold]Role:[/] {a['role']}")
+                info.append(f"  [bold]Lifecycle State:[/] {a['lifecycle_state']}")
+                info.append(f"  [bold]Display Name:[/] {a['display_name']}")
+                info.append(f"  [bold]Username:[/] {a['username']}")
+                info.append(f"  [bold]Metadata JSON:[/] {a['metadata_json']}")
+            else:
+                info.append("  Agent details not found in database.")
+                
+        inspector.update("\n".join(info))
+
+    def handle_slash_command(self, text: str) -> None:
+        parts = text.split(maxsplit=1)
+        cmd = parts[0].lower()
+        args = parts[1] if len(parts) > 1 else ""
+
+        log_pane = self.query_one("#transcript_log", RichLog)
+
+        if cmd in ("/help", "/?"):
+            log_pane.write(Text("\n=== TUI SLASH COMMANDS ===", style="bold yellow"))
+            log_pane.write(Text("  /help, /?              - Show this help message", style="cyan"))
+            log_pane.write(Text("  /personas, /agents     - List all loaded agent personas and details", style="cyan"))
+            log_pane.write(Text("  /clock                 - Show current circadian clock and schedule", style="cyan"))
+            log_pane.write(Text("  /session               - Show session ID and token usage statistics", style="cyan"))
+            log_pane.write(Text("  /clear                 - Clear the transcript view log", style="cyan"))
+            log_pane.write(Text("  /wait <minutes>        - Manually set wait suspension for the active agent", style="cyan"))
+            log_pane.write(Text("  /quit, /exit           - Exit the application", style="cyan"))
+            log_pane.write(Text("==========================\n", style="bold yellow"))
+
+        elif cmd in ("/quit", "/exit"):
+            self.action_quit()
+
+        elif cmd == "/clear":
+            self.clear_transcript()
+
+        elif cmd in ("/personas", "/agents"):
+            log_pane.write(Text("\n=== PERSONAS / AGENTS ===", style="bold yellow"))
+            if self.interactive and self.session:
+                for name, role in self.session.participants.items():
+                    clock_state = getattr(role, "runtime_clock_state", None) or getattr(_config, "clock_state", "on")
+                    wu = getattr(role, "waiting_until", None)
+                    suspended_str = f"Suspended until {wu.strftime('%H:%M:%S')}" if wu else "Active"
+                    log_pane.write(Text(f"👤 {name} ({role.__class__.__name__})", style="bold green"))
+                    log_pane.write(Text(f"   Clock: {clock_state} | Status: {suspended_str}", style="dim"))
+                    log_pane.write(Text(f"   Preprompt: {role.template[:120]}...", style="italic grey"))
+            else:
+                agents = self.reader.get_agents()
+                for a in agents:
+                    log_pane.write(Text(f"👤 {a['agent_id']} ({a['role']})", style="bold green"))
+                    log_pane.write(Text(f"   Status: {a['lifecycle_state']}", style="dim"))
+            log_pane.write(Text("==========================\n", style="bold yellow"))
+
+        elif cmd == "/clock":
+            log_pane.write(Text("\n=== CLOCK STATE ===", style="bold yellow"))
+            effective_clock = getattr(_config, "clock_state", "on")
+            break_sched = getattr(_config, "break_schedule", [])
+            log_pane.write(Text(f"  Current clock state: {effective_clock.upper()}", style="cyan"))
+            log_pane.write(Text(f"  Break schedule: {break_sched}", style="cyan"))
+            log_pane.write(Text("====================\n", style="bold yellow"))
+
+        elif cmd == "/session":
+            log_pane.write(Text("\n=== SESSION INFO ===", style="bold yellow"))
+            log_pane.write(Text(f"  Session ID: {self.selected_session_id}", style="cyan"))
+            if self.selected_session_id:
+                p, c, t = self.reader.get_token_totals(self.selected_session_id)
+                log_pane.write(Text(f"  Token usage: Prompt={p}, Completion={c}, Total={t}", style="cyan"))
+            log_pane.write(Text("====================\n", style="bold yellow"))
+
+        elif cmd == "/wait":
+            if not self.interactive or not self.session:
+                log_pane.write(Text("[System] Wait command only supported in interactive mode.", style="red"))
+                return
+            try:
+                mins = int(args) if args else 10
+            except ValueError:
+                log_pane.write(Text("[System] Usage: /wait <minutes>", style="red"))
+                return
+            receiver = self.session.last_receiver
+            if receiver:
+                from datetime import timedelta
+                receiver.waiting_until = datetime.now(timezone.utc) + timedelta(minutes=mins)
+                log_pane.write(Text(f"[System] Manually suspended {receiver.name} for {mins} minutes.", style="yellow"))
+            else:
+                log_pane.write(Text("[System] No active receiver found to suspend.", style="red"))
+
+        else:
+            log_pane.write(Text(f"[System] Unknown command: {cmd}. Type /help for commands.", style="red"))
