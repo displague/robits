@@ -47,6 +47,8 @@ def load_personas(path: str | None = None) -> dict[str, dict]:
                 "role": role,
                 "full_name": full_name,
                 "entries": valid_entries,
+                "preprompt_work": item.get("preprompt_work"),
+                "preprompt_personal": item.get("preprompt_personal"),
             }
             continue
 
@@ -57,6 +59,8 @@ def load_personas(path: str | None = None) -> dict[str, dict]:
                 "role": agent,
                 "full_name": agent,
                 "entries": valid_entries,
+                "preprompt_work": item.get("preprompt_work"),
+                "preprompt_personal": item.get("preprompt_personal"),
             }
     return result
 

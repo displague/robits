@@ -70,6 +70,11 @@ class RuntimeEventStream:
         self._subscribers.append(callback)
         return callback
 
+    def unsubscribe(self, callback):
+        """Unsubscribe a callback from the event stream."""
+        if callback in self._subscribers:
+            self._subscribers.remove(callback)
+
     def emit(self, event_type, session_id, payload=None, visibility="public"):
         """Create and store a RuntimeEvent, then notify all subscribers."""
         self._sequence += 1
@@ -184,6 +189,31 @@ class Session:
         self.run_id = run_id or f"run-{uuid4()}"
         self.max_turns = max_turns
         self.event_stream = event_stream if event_stream is not None else RuntimeEventStream()
+        
+        # Initialize token usage tracking and DB event persistence
+        self.prompt_tokens = 0
+        self.completion_tokens = 0
+        self.total_tokens = 0
+        self._db_ready = False
+
+        def _handle_event(event):
+            if event.session_id != self.run_id:
+                return
+
+            if event.event_type == "token_usage":
+                self.prompt_tokens += event.payload.get("prompt_tokens", 0) or 0
+                self.completion_tokens += event.payload.get("completion_tokens", 0) or 0
+                self.total_tokens += event.payload.get("total_tokens", 0) or 0
+
+            if self._db_ready and _m.memory_store is not None:
+                try:
+                    _m.memory_store.append_runtime_event_object(event)
+                except Exception:
+                    pass
+
+        self._event_callback = _handle_event
+        self.event_stream.subscribe(self._event_callback)
+
         self.transcript = []
         self.turns_completed = 0
         self._last_digest_turn = 0
@@ -191,7 +221,7 @@ class Session:
         self._meaningful_turns_completed = 0
         self._last_identity_digest_meaningful_turn = 0
         self._last_goal_digest_meaningful_turn = 0
-        self.last_receiver = self.participants.get("CEO") or next(iter(self.participants.values()))
+        self.last_receiver = next((p for p in self.participants.values() if p.__class__.__name__ == "Human"), None) or next(iter(self.participants.values()))
         _name_map: dict = {}
         for k, p in self.participants.items():
             for form in (
@@ -207,6 +237,15 @@ class Session:
         self._role_to_key = {id(p): k for k, p in self.participants.items()}
         _cs = clock_state or _m.clock_state
         self.clock_state = _cs if _cs in {"on", "off", "break"} else "on"
+
+        # Pre-create the database session before emitting "session.created" event
+        if _m.memory_store is not None:
+            try:
+                _m.memory_store.create_session(self.run_id)
+                self._db_ready = True
+            except Exception:
+                pass
+
         self.event_stream.emit(
             "session.created",
             self.run_id,
@@ -223,13 +262,26 @@ class Session:
         self._org_chat_channel_id = None
         self._thought_channel_ids: dict = {}
         self._dm_channel_ids: dict = {}
+
         if _m.memory_store is not None:
             try:
-                _m.memory_store.create_session(self.run_id)
                 for name, participant in self.participants.items():
                     role_type = type(participant).__name__
                     persona = _m.persona_entries.get(name) or {}
                     full_name = persona.get("full_name") if isinstance(persona, dict) else None
+                    
+                    metadata = {}
+                    if isinstance(persona, dict):
+                        if persona.get("preprompt_work"):
+                            metadata["preprompt_work"] = persona["preprompt_work"]
+                        if persona.get("preprompt_personal"):
+                            metadata["preprompt_personal"] = persona["preprompt_personal"]
+                    # Add fallbacks from participant if missing in persona
+                    if "preprompt_work" not in metadata and hasattr(participant, "preprompt_work"):
+                        metadata["preprompt_work"] = participant.preprompt_work
+                    if "preprompt_personal" not in metadata and hasattr(participant, "preprompt_personal"):
+                        metadata["preprompt_personal"] = participant.preprompt_personal
+
                     _m.memory_store.upsert_agent(
                         name, role_type,
                         display_name=full_name or name,
@@ -237,6 +289,7 @@ class Session:
                         full_name=full_name,
                         first_name=getattr(participant, "first_name", None),
                         last_name=getattr(participant, "last_name", None),
+                        metadata=metadata,
                     )
                     entries = persona.get("entries") if isinstance(persona, dict) else persona
                     if entries:
@@ -337,23 +390,61 @@ class Session:
         return False
 
     def route_message(self, message, last_receiver_name=None):
-        """Determine the next receiver for message; honour 'Name, prompt' directed syntax."""
-        prompt_split = message.split(",", 1) if isinstance(message, str) else []
-        if len(prompt_split) > 1:
-            receiver_token = prompt_split[0].strip()
-            resolved_key = self._name_to_key.get(receiver_token.lower())
-            if resolved_key is not None:
-                print(colored(f"// Directed to {resolved_key}", "grey"))
-                self.scheduler.observe(resolved_key)
-                self.event_stream.emit(
-                    "message.routed",
-                    self.run_id,
-                    {
-                        "receiver": resolved_key,
-                        "directed": True,
-                    },
-                )
-                return RoutedMessage(self.participants[resolved_key], prompt_split[1].strip(), True)
+        """Determine the next receiver for message; honour 'Name, prompt', 'Name: prompt', and '@Name prompt' directed syntax."""
+        directed_receiver = None
+        remaining_prompt = message
+
+        if isinstance(message, str) and message:
+            import re as _re
+            m = _re.match(r"^@?([a-zA-Z0-9_\s]+?)\s*[:,]\s*(.*)$", message)
+            if not m:
+                m = _re.match(r"^@([a-zA-Z0-9_]+?)\s+(.*)$", message)
+            if m:
+                receiver_token = m.group(1).strip()
+                resolved_key = self._name_to_key.get(receiver_token.lower())
+                if resolved_key is not None:
+                    directed_receiver = resolved_key
+                    remaining_prompt = m.group(2).strip()
+
+        if directed_receiver is not None:
+            print(colored(f"// Directed to {directed_receiver}", "grey"))
+            self.scheduler.observe(directed_receiver)
+            self.event_stream.emit(
+                "message.routed",
+                self.run_id,
+                {
+                    "receiver": directed_receiver,
+                    "directed": True,
+                },
+            )
+            return RoutedMessage(self.participants[directed_receiver], remaining_prompt, True)
+
+        # If the last turn was directed and the last receiver was NOT the CEO (meaning an agent just responded to a DM),
+        # route the agent's response back to the sender of that DM.
+        last_rec_obj = self.participants.get(last_receiver_name) if last_receiver_name else None
+        last_is_human = last_rec_obj.__class__.__name__ == "Human" if last_rec_obj else False
+        if (
+            self.transcript
+            and self.transcript[-1].directed
+            and not last_is_human
+        ):
+            last_entry = self.transcript[-1]
+            last_canonical_receiver = self._canonical_agent_id(last_entry.receiver)
+            current_canonical_last = self._canonical_agent_id(last_receiver_name)
+            if last_canonical_receiver == current_canonical_last:
+                original_sender = last_entry.sender
+                resolved_key = self._name_to_key.get(original_sender.lower())
+                if resolved_key is not None:
+                    self.scheduler.observe(resolved_key)
+                    self.event_stream.emit(
+                        "message.routed",
+                        self.run_id,
+                        {
+                            "receiver": resolved_key,
+                            "directed": True,
+                        },
+                    )
+                    return RoutedMessage(self.participants[resolved_key], message, True)
 
         now = datetime.now(timezone.utc)
         tried: set = set()
@@ -418,6 +509,23 @@ class Session:
             return message, []
         action_type = action.get("action")
         if action_type == "wait":
+            from datetime import timedelta
+            now = datetime.now(timezone.utc)
+            if sender is not None:
+                sender.waiting_until = now + timedelta(minutes=10)
+                sender.wait_started_turn = self.turns_completed
+                sender.wait_clock_state = getattr(sender, "runtime_clock_state", self.clock_state)
+                agent_name = getattr(sender, "name", None)
+                if agent_name and _m.agent_workspace_store is not None:
+                    try:
+                        wait_data = {
+                            "waiting_until": sender.waiting_until.isoformat(),
+                            "wait_started_turn": sender.wait_started_turn,
+                            "wait_clock_state": sender.wait_clock_state,
+                        }
+                        _m.agent_workspace_store.write(agent_name, _WAIT_STATE_FILE, json.dumps(wait_data))
+                    except Exception:
+                        pass
             self.event_stream.emit(
                 "agent.waited",
                 self.run_id,
@@ -859,6 +967,60 @@ class Session:
                 return
         role.runtime_role_name = getattr(role, "name", None)
 
+    def _decay_agent_adjustments(self, agent_id):
+        """Decrement turn counter for active preprompt adjustments and clear them if expired."""
+        if _m.memory_store is None or not agent_id:
+            return
+        try:
+            if not hasattr(_m.memory_store, "get_agent_metadata") or not hasattr(_m.memory_store, "update_agent_metadata"):
+                return
+            metadata = _m.memory_store.get_agent_metadata(agent_id)
+            updated = False
+            
+            # If the clock state transitioned, clear the opposing mode's adjustments
+            effective_clock = self._effective_clock_state()
+            if effective_clock == "on" and (metadata.get("personal_adjustment") is not None):
+                metadata["personal_adjustment"] = None
+                metadata["personal_adjustment_turns"] = None
+                updated = True
+            elif effective_clock in ("off", "break") and (metadata.get("work_adjustment") is not None):
+                metadata["work_adjustment"] = None
+                metadata["work_adjustment_turns"] = None
+                updated = True
+                
+            # Decay work adjustment
+            w_turns = metadata.get("work_adjustment_turns")
+            if w_turns is not None:
+                try:
+                    w_turns = int(w_turns) - 1
+                    if w_turns <= 0:
+                        metadata["work_adjustment"] = None
+                        metadata["work_adjustment_turns"] = None
+                    else:
+                        metadata["work_adjustment_turns"] = w_turns
+                    updated = True
+                except Exception:
+                    pass
+                    
+            # Decay personal adjustment
+            p_turns = metadata.get("personal_adjustment_turns")
+            if p_turns is not None:
+                try:
+                    p_turns = int(p_turns) - 1
+                    if p_turns <= 0:
+                        metadata["personal_adjustment"] = None
+                        metadata["personal_adjustment_turns"] = None
+                    else:
+                        metadata["personal_adjustment_turns"] = p_turns
+                    updated = True
+                except Exception:
+                    pass
+                    
+            if updated:
+                _m.memory_store.update_agent_metadata(agent_id, metadata)
+        except Exception:
+            pass
+
     def recent_system_events(self, limit=5):
         """Return the most recent non-empty system event strings from the transcript."""
         events = []
@@ -901,7 +1063,14 @@ class Session:
         org_context = format_org_chat_context(self.transcript, effective_org_lines)
         model_prompt = org_context + raw_prompt if org_context else raw_prompt
         self.prepare_agent_runtime(routed.receiver)
+        
+        # Track previous token totals to measure current step's usage
+        prev_p = self.prompt_tokens
+        prev_c = self.completion_tokens
+        prev_t = self.total_tokens
+
         response = routed.receiver.interact(sender.name, model_prompt)
+        self._decay_agent_adjustments(routed.receiver.name)
         response = "" if response is None else response
         model_thinking = getattr(routed.receiver, "runtime_thinking", None)
         native_tool_events = list(getattr(routed.receiver, "runtime_tool_results", []))
@@ -913,11 +1082,22 @@ class Session:
             system_events.extend(response_events)
             deliver_verified_tool_results(routed.receiver, response_events)
             self.sync_scheduler_participants()
-        if model_thinking and routed.receiver.name != "CEO":
+        if model_thinking and routed.receiver.__class__.__name__ != "Human":
             print(colored(f"[{routed.receiver.name} \U0001f914 {len(model_thinking)} chars]", "dark_grey"))
-        if routed.receiver.name != "CEO" and response != "":
+        if routed.receiver.__class__.__name__ != "Human" and response != "":
             print(colored(f"{routed.receiver.name} responds: {response}", "cyan"))
             get_logger().write_event("agent_response", agent=routed.receiver.name, content=response)
+        
+        # Display current turn token usage and session running totals
+        turn_p = self.prompt_tokens - prev_p
+        turn_c = self.completion_tokens - prev_c
+        turn_t = self.total_tokens - prev_t
+        if turn_t > 0:
+            token_str = f"[Tokens: {turn_p} in, {turn_c} out, {turn_t} total | running: {self.prompt_tokens} in, {self.completion_tokens} out, {self.total_tokens} total]"
+            import os
+            import sys
+            if os.environ.get("ROBITS_LOG_TOKENS") == "1" or (hasattr(sys.stdout, "isatty") and sys.stdout.isatty()):
+                print(colored(token_str, "dark_grey"))
         self.record_turn(
             sender=sender.name,
             receiver=routed.receiver.name,
@@ -995,3 +1175,18 @@ class Session:
                 pass
         self._embed_pending()
         return self
+
+    def close(self):
+        """Unsubscribe from the event stream to prevent memory leaks."""
+        if hasattr(self, "_event_callback") and self._event_callback:
+            try:
+                self.event_stream.unsubscribe(self._event_callback)
+            except Exception:
+                pass
+            self._event_callback = None
+
+    def __del__(self):
+        try:
+            self.close()
+        except Exception:
+            pass

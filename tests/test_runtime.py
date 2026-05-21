@@ -4482,6 +4482,10 @@ class PersonaRedesignTests(unittest.TestCase):
         self.assertIn("CEO", d)
         self.assertIsInstance(d["CEO"], Human)
 
+    def test_get_default_human_name_in_test_env(self):
+        from robits.core.roles import get_default_human_name
+        self.assertEqual(get_default_human_name(), "CEO")
+
 
 class PersonaSeedingTests(unittest.TestCase):
     """Tests for persona seeding into memory on first session."""
@@ -4966,6 +4970,27 @@ class DirectedRoutingTests(unittest.TestCase):
         self.assertTrue(routed.directed)
         self.assertIs(routed.receiver, p["alex_chen"])
 
+    def test_route_by_colon_separator(self):
+        p = self._make_participants()
+        routed = self._route(p, "alex_chen: do this")
+        self.assertTrue(routed.directed)
+        self.assertIs(routed.receiver, p["alex_chen"])
+        self.assertEqual(routed.prompt, "do this")
+
+    def test_route_by_at_prefix(self):
+        p = self._make_participants()
+        routed = self._route(p, "@alex_chen do this")
+        self.assertTrue(routed.directed)
+        self.assertIs(routed.receiver, p["alex_chen"])
+        self.assertEqual(routed.prompt, "do this")
+
+    def test_route_by_at_prefix_with_colon(self):
+        p = self._make_participants()
+        routed = self._route(p, "@alex_chen: do this")
+        self.assertTrue(routed.directed)
+        self.assertIs(routed.receiver, p["alex_chen"])
+        self.assertEqual(routed.prompt, "do this")
+
     def test_unknown_prefix_falls_through(self):
         p = self._make_participants()
         routed = self._route(p, "Finance, do this")
@@ -5263,6 +5288,127 @@ class SinglePersonaCollaborationTests(unittest.TestCase):
         self.assertTrue(received_prompts, "SE interact was never called")
         self.assertIn("please summarise recent tasks", received_prompts[0])
         self.assertNotIn("alex_chen,", received_prompts[0])
+
+    def test_directed_routing_goes_back_to_sender(self):
+        """If a message was directed, route the reply back to the original sender."""
+        self.store.upsert_agent("alex_chen", "SoftwareEngineer", "alex_chen")
+        self.store.upsert_agent("CEO", "Human", "CEO")
+        
+        session = main.Session(
+            participants={
+                "CEO": SimpleNamespace(
+                    name="CEO", lifecycle_state="active",
+                    interact=lambda *a, **kw: "new prompt",
+                    update_group_conversations=lambda m: None,
+                ),
+                "alex_chen": SimpleNamespace(
+                    name="alex_chen", lifecycle_state="active",
+                    interact=lambda *a, **kw: "acknowledged",
+                    update_group_conversations=lambda m: None,
+                    runtime_thinking=None,
+                    runtime_tool_results=[],
+                    waiting_until=None,
+                ),
+            }
+        )
+        
+        # Call route_message with a directed prompt from CEO to alex_chen
+        with redirect_stdout(StringIO()), redirect_stderr(StringIO()):
+            routed1 = session.route_message("alex_chen: do this", "CEO")
+            self.assertTrue(routed1.directed)
+            self.assertEqual(routed1.receiver.name, "alex_chen")
+            
+            # Record the turn simulating alex_chen responding
+            session.record_turn(
+                sender="CEO",
+                receiver="alex_chen",
+                prompt="do this",
+                response="acknowledged",
+                directed=True,
+            )
+            
+            # Now, last_receiver_name is alex_chen (who just responded).
+            # Route the response back.
+            routed2 = session.route_message("acknowledged", "alex_chen")
+            
+            # It should route back to CEO directly, not using the round-robin scheduler!
+            self.assertTrue(routed2.directed)
+            self.assertEqual(routed2.receiver.name, "CEO")
+
+    def test_wait_action_suspends_agent(self):
+        """An agent returning a wait action block is suspended in the scheduler."""
+        self.store.upsert_agent("alex_chen", "SoftwareEngineer", "alex_chen")
+        
+        session = main.Session(
+            participants={
+                "alex_chen": SimpleNamespace(
+                    name="alex_chen", lifecycle_state="active",
+                    interact=lambda *a, **kw: '{"action": "wait"}',
+                    update_group_conversations=lambda m: None,
+                    runtime_thinking=None,
+                    runtime_tool_results=[],
+                    waiting_until=None,
+                ),
+            }
+        )
+        
+        with redirect_stdout(StringIO()), redirect_stderr(StringIO()):
+            # Process the wait action outputted by alex_chen
+            response, events = session.process_agent_action('{"action": "wait"}', sender=session.participants["alex_chen"])
+            
+            self.assertEqual(response, "")
+            self.assertIsNotNone(session.participants["alex_chen"].waiting_until)
+            self.assertEqual(session.participants["alex_chen"].wait_clock_state, "on")
+class DotenvTests(unittest.TestCase):
+    def test_dotenv_loading(self):
+        """Test that _load_dotenv correctly reads and parses .env files into os.environ."""
+        from unittest.mock import patch, mock_open
+        from pathlib import Path
+        import os
+        from robits.core.config import _load_dotenv
+
+        # Dotenv content to test various formats (comments, spaces, single/double quotes)
+        dotenv_content = (
+            "# A comment line\n"
+            "TEST_VAR_1=value1\n"
+            "TEST_VAR_2 = value2\n"
+            "TEST_VAR_3 = 'value3'\n"
+            "TEST_VAR_4 = \"value4\"\n"
+            "TEST_VAR_5=value=with=equals\n"
+            "TEST_VAR_EMPTY=\n"
+        )
+
+        with patch.dict(os.environ, {}, clear=True), \
+             patch.object(Path, "is_file", return_value=True), \
+             patch("builtins.open", mock_open(read_data=dotenv_content)):
+            
+            _load_dotenv()
+            
+            self.assertEqual(os.environ.get("TEST_VAR_1"), "value1")
+            self.assertEqual(os.environ.get("TEST_VAR_2"), "value2")
+            self.assertEqual(os.environ.get("TEST_VAR_3"), "value3")
+            self.assertEqual(os.environ.get("TEST_VAR_4"), "value4")
+            self.assertEqual(os.environ.get("TEST_VAR_5"), "value=with=equals")
+            self.assertEqual(os.environ.get("TEST_VAR_EMPTY"), "")
+            # Ensure comments aren't imported
+            self.assertNotIn("# A comment line", os.environ)
+
+    def test_dotenv_does_not_overwrite_existing(self):
+        """Test that _load_dotenv does not overwrite existing environment variables."""
+        from unittest.mock import patch, mock_open
+        from pathlib import Path
+        import os
+        from robits.core.config import _load_dotenv
+
+        dotenv_content = "TEST_EXISTING=new_value\n"
+        
+        with patch.dict(os.environ, {"TEST_EXISTING": "original_value"}), \
+             patch.object(Path, "is_file", return_value=True), \
+             patch("builtins.open", mock_open(read_data=dotenv_content)):
+            
+            _load_dotenv()
+            
+            self.assertEqual(os.environ.get("TEST_EXISTING"), "original_value")
 
 
 if __name__ == "__main__":

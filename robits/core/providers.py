@@ -327,6 +327,36 @@ def _tool_result_is_error(raw_result):
     return str(raw_result).startswith("Error:")
 
 
+def _emit_token_usage_event(role, response):
+    """Extract token usage from response and emit a token_usage event."""
+    usage = getattr(response, "usage", None)
+    if not usage:
+        return
+
+    prompt_tokens = 0
+    completion_tokens = 0
+    total_tokens = 0
+
+    if hasattr(usage, "prompt_tokens"):
+        prompt_tokens = getattr(usage, "prompt_tokens", 0) or 0
+        completion_tokens = getattr(usage, "completion_tokens", 0) or 0
+        total_tokens = getattr(usage, "total_tokens", 0) or 0
+    elif isinstance(usage, dict):
+        prompt_tokens = usage.get("prompt_tokens", 0) or 0
+        completion_tokens = usage.get("completion_tokens", 0) or 0
+        total_tokens = usage.get("total_tokens", 0) or 0
+
+    if total_tokens > 0 or prompt_tokens > 0 or completion_tokens > 0:
+        payload = {
+            "agent": getattr(role, "name", None),
+            "role_name": getattr(role, "runtime_role_name", None),
+            "prompt_tokens": prompt_tokens,
+            "completion_tokens": completion_tokens,
+            "total_tokens": total_tokens,
+        }
+        _emit_role_tool_event(role, "token_usage", payload)
+
+
 class ModelProvider:
     """Abstract base for model provider implementations."""
 
@@ -363,6 +393,7 @@ class ChatCompletionsProvider(ModelProvider):
 
         for _ in range(8):
             response = _with_model_retries(lambda: self.client.chat.completions.create(**kwargs))
+            _emit_token_usage_event(role, response)
             message = response.choices[0].message
             tool_calls = getattr(message, "tool_calls", None) or []
             content, thinking = _extract_thinking_chat(message)
@@ -468,6 +499,7 @@ class ResponsesProvider(ModelProvider):
             kwargs["reasoning"] = {"effort": effort}
 
         response = _with_model_retries(lambda: self.client.responses.create(**kwargs))
+        _emit_token_usage_event(role, response)
         for _ in range(8):
             function_calls = _response_function_calls(response)
             thinking = _extract_thinking_responses(response)
@@ -530,9 +562,11 @@ class ResponsesProvider(ModelProvider):
                         previous_response_id=previous_response_id,
                     )
                 )
+                _emit_token_usage_event(role, response)
             else:
                 kwargs["input"] = messages + outputs
                 response = _with_model_retries(lambda: self.client.responses.create(**kwargs))
+                _emit_token_usage_event(role, response)
         return "Error: Too many consecutive tool-call rounds."
 
 

@@ -793,6 +793,42 @@ def agent_wait(employee_dict, minutes):
     return ""
 
 
+def agent_adjust_preprompt(employee_dict, adjustment, turns=5, mode="work"):
+    """Apply a temporary pre-prompt adjustment to the caller's persona for a specified number of turns.
+
+    Adjustments decay by 1 turn every step the agent takes.
+    """
+    del employee_dict
+    caller = _m.active_tool_caller
+    if caller is None:
+        return "Error: agent.adjust_preprompt called outside of agent context."
+    caller_name = _m.active_tool_caller_name or getattr(caller, "name", None)
+    if not caller_name:
+        return "Error: cannot determine caller name."
+    if not adjustment or not isinstance(adjustment, str) or not adjustment.strip():
+        return "Error: adjustment must be a non-empty string."
+    if not isinstance(turns, int) or turns <= 0 or turns > 10:
+        return "Error: turns must be an integer between 1 and 10."
+    if mode not in ("work", "personal"):
+        return "Error: mode must be 'work' or 'personal'."
+
+    if _m.memory_store is None:
+        return "Error: memory store not initialized."
+
+    try:
+        if not hasattr(_m.memory_store, "get_agent_metadata") or not hasattr(_m.memory_store, "update_agent_metadata"):
+            return "Error: memory store does not support metadata operations."
+
+        metadata = {
+            f"{mode}_adjustment": adjustment,
+            f"{mode}_adjustment_turns": turns
+        }
+        _m.memory_store.update_agent_metadata(caller_name, metadata)
+        return f"Successfully applied temporary {mode} adjustment for {turns} turns: {adjustment}"
+    except Exception as e:
+        return f"Error updating pre-prompt: {e}"
+
+
 _SUBAGENT_DEFAULT_TOOLS = frozenset({
     "agent.think",
     "builtin.web_search",
@@ -960,4 +996,5 @@ SANDBOX_GLOBALS = {
     "agent_think": agent_think,
     "agent_wait": agent_wait,
     "agent_spawn": agent_spawn,
+    "agent_adjust_preprompt": agent_adjust_preprompt,
 }

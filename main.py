@@ -216,6 +216,11 @@ def parse_args(argv=None):
 
 def main(argv=None):
     """CLI entry point: parse args, open JSONL log, run simulation."""
+    import sys
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(encoding="utf-8")
+    if hasattr(sys.stderr, "reconfigure"):
+        sys.stderr.reconfigure(encoding="utf-8")
     args = parse_args(argv)
     if getattr(args, "no_log", False):
         run_simulation(initial_message=args.prompt, max_turns=args.turns)

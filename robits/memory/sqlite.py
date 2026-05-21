@@ -479,6 +479,38 @@ class SQLiteMemoryStore:
         )
         self.connection.commit()
 
+    def get_agent_metadata(self, agent_id) -> dict:
+        row = self.connection.execute(
+            "SELECT metadata_json FROM agents WHERE agent_id = ?",
+            (agent_id,),
+        ).fetchone()
+        if row and row["metadata_json"]:
+            try:
+                return json.loads(row["metadata_json"])
+            except Exception:
+                pass
+        return {}
+
+    def update_agent_metadata(self, agent_id, metadata: dict) -> None:
+        row = self.connection.execute(
+            "SELECT metadata_json FROM agents WHERE agent_id = ?",
+            (agent_id,),
+        ).fetchone()
+        if not row:
+            raise ValueError(f"Agent {agent_id} does not exist.")
+        current = {}
+        if row["metadata_json"]:
+            try:
+                current = json.loads(row["metadata_json"])
+            except Exception:
+                pass
+        current.update(metadata)
+        self.connection.execute(
+            "UPDATE agents SET metadata_json = ? WHERE agent_id = ?",
+            (_json_dumps(current), agent_id),
+        )
+        self.connection.commit()
+
     def upsert_agent(
         self,
         agent_id,
@@ -493,6 +525,23 @@ class SQLiteMemoryStore:
         full_name=None,
     ):
         timestamp = created_at or _utc_now()
+        
+        # Merge metadata with existing metadata if present
+        existing_row = self.connection.execute(
+            "SELECT metadata_json FROM agents WHERE agent_id = ?",
+            (agent_id,),
+        ).fetchone()
+        existing_metadata = {}
+        if existing_row and existing_row["metadata_json"]:
+            try:
+                existing_metadata = json.loads(existing_row["metadata_json"])
+            except Exception:
+                pass
+        
+        merged_metadata = dict(existing_metadata)
+        if metadata:
+            merged_metadata.update(metadata)
+            
         self.connection.execute(
             """
             INSERT INTO agents(
@@ -520,7 +569,7 @@ class SQLiteMemoryStore:
                 full_name,
                 lifecycle_state,
                 timestamp,
-                _json_dumps(metadata),
+                _json_dumps(merged_metadata),
             ),
         )
         self.connection.commit()
