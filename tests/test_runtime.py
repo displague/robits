@@ -5359,6 +5359,56 @@ class SinglePersonaCollaborationTests(unittest.TestCase):
             self.assertEqual(response, "")
             self.assertIsNotNone(session.participants["alex_chen"].waiting_until)
             self.assertEqual(session.participants["alex_chen"].wait_clock_state, "on")
+class DotenvTests(unittest.TestCase):
+    def test_dotenv_loading(self):
+        """Test that _load_dotenv correctly reads and parses .env files into os.environ."""
+        from unittest.mock import patch, mock_open
+        from pathlib import Path
+        import os
+        from robits.core.config import _load_dotenv
+
+        # Dotenv content to test various formats (comments, spaces, single/double quotes)
+        dotenv_content = (
+            "# A comment line\n"
+            "TEST_VAR_1=value1\n"
+            "TEST_VAR_2 = value2\n"
+            "TEST_VAR_3 = 'value3'\n"
+            "TEST_VAR_4 = \"value4\"\n"
+            "TEST_VAR_5=value=with=equals\n"
+            "TEST_VAR_EMPTY=\n"
+        )
+
+        with patch.dict(os.environ, {}, clear=True), \
+             patch.object(Path, "is_file", return_value=True), \
+             patch("builtins.open", mock_open(read_data=dotenv_content)):
+            
+            _load_dotenv()
+            
+            self.assertEqual(os.environ.get("TEST_VAR_1"), "value1")
+            self.assertEqual(os.environ.get("TEST_VAR_2"), "value2")
+            self.assertEqual(os.environ.get("TEST_VAR_3"), "value3")
+            self.assertEqual(os.environ.get("TEST_VAR_4"), "value4")
+            self.assertEqual(os.environ.get("TEST_VAR_5"), "value=with=equals")
+            self.assertEqual(os.environ.get("TEST_VAR_EMPTY"), "")
+            # Ensure comments aren't imported
+            self.assertNotIn("# A comment line", os.environ)
+
+    def test_dotenv_does_not_overwrite_existing(self):
+        """Test that _load_dotenv does not overwrite existing environment variables."""
+        from unittest.mock import patch, mock_open
+        from pathlib import Path
+        import os
+        from robits.core.config import _load_dotenv
+
+        dotenv_content = "TEST_EXISTING=new_value\n"
+        
+        with patch.dict(os.environ, {"TEST_EXISTING": "original_value"}), \
+             patch.object(Path, "is_file", return_value=True), \
+             patch("builtins.open", mock_open(read_data=dotenv_content)):
+            
+            _load_dotenv()
+            
+            self.assertEqual(os.environ.get("TEST_EXISTING"), "original_value")
 
 
 if __name__ == "__main__":
