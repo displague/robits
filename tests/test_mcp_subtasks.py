@@ -224,6 +224,61 @@ class SubtaskTests(unittest.TestCase):
         self.assertEqual(len(events), 2)
         self.assertTrue(all(event.visibility == "private" for event in events))
 
+    def test_session_reinjection_keeps_handoff_but_not_private_arguments_or_inspection_history(self):
+        from contextlib import redirect_stdout
+        from io import StringIO
+        from tests.test_runtime import FakeRole
+        parent = main.Role("Rowan", "You are Rowan, a warm and practical colleague.", {})
+        parent.runtime_session_id = "private-session"
+        parent.allowed_tools = {"agent.*"}
+        queued = json.loads(self.registry.execute("agent.spawn", {
+            "task": "PRIVATE_QUEUED_INSTRUCTION", "defer": True}, {}, parent))["task_id"]
+        self.manager.event(queued, "tool_result", {"result": "PRIVATE_INSPECTION_RECORD"})
+        responses = [
+            message(tool="agent__focus", arguments={"task": "PRIVATE_FOCUS_INSTRUCTION"}),
+            message("The share is $47.23."),
+            message(tool="agent__subtask", arguments={"task_id": queued, "action": "inspect"}),
+            message("It's $47.23 each. I'll bring the thermos."),
+        ]
+        client = SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=lambda **kwargs: responses.pop(0))))
+        with patch.multiple(config, client=client, model_provider=ChatCompletionsProvider(client, self.registry),
+                            agent_workspace_store=None, _org_workspace=None), redirect_stdout(StringIO()) as output:
+            session = main.Session(participants={"CEO": FakeRole("CEO"), "Rowan": parent},
+                                   run_id="private-session", system=main.System({}, self.registry))
+            try:
+                self.assertEqual(session.step("Rowan, What do we owe?"), "It's $47.23 each. I'll bring the thermos.")
+            finally:
+                session.close()
+        retained = json.dumps(parent.conversation_history)
+        self.assertIn("47.23", retained)
+        self.assertIn(queued, retained)
+        self.assertIn("next_sequence", retained)
+        for secret in ("PRIVATE_QUEUED_INSTRUCTION", "PRIVATE_INSPECTION_RECORD", "PRIVATE_FOCUS_INSTRUCTION"):
+            self.assertNotIn(secret, retained)
+            self.assertNotIn(secret, output.getvalue())
+        self.assertIn("PRIVATE_INSPECTION_RECORD", json.dumps(self.manager.view(self.manager.tasks[queued])))
+
+    def test_responses_inspection_retains_only_compact_handoff(self):
+        from robits.core.providers import ResponsesProvider
+        queued = json.loads(self.spawn())["task_id"]
+        self.manager.event(queued, "tool_result", {"result": "PRIVATE_RESPONSES_INSPECTION"})
+        outputs = [SimpleNamespace(id="r1", output=[SimpleNamespace(type="function_call", name="agent__subtask",
+            call_id="inspect-id", arguments=json.dumps({"task_id": queued, "action": "inspect"}))]),
+            SimpleNamespace(id="r2", output=[], output_text="The work is queued.")]
+        calls = []
+        def create(**kwargs):
+            calls.append(kwargs)
+            return outputs.pop(0)
+        client = SimpleNamespace(responses=SimpleNamespace(create=create))
+        self.parent.conversation_history = {self.parent.name: []}
+        result = ResponsesProvider(client, self.registry).generate(self.parent, "fake", "CEO", [])
+        self.assertEqual(result, "The work is queued.")
+        self.assertIn("PRIVATE_RESPONSES_INSPECTION", calls[1]["input"][0]["output"])
+        main.deliver_verified_tool_results(self.parent, self.parent.runtime_tool_results)
+        history = json.dumps(self.parent.conversation_history)
+        self.assertNotIn("PRIVATE_RESPONSES_INSPECTION", history)
+        self.assertIn(queued, history)
+
     def test_two_levels_and_denial_at_execution_boundary(self):
         first = json.loads(self.spawn())["task_id"]
         child = self.manager.tasks[first]["role"]

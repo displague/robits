@@ -12,6 +12,7 @@ _XML_BLOCK_RE = re.compile(
     r"<tool_call>\s*(.*?)\s*(?:</tool_call>|$)",
     flags=re.DOTALL | re.IGNORECASE,
 )
+_PRIVATE_TASK_TOOLS = {"agent.focus", "agent.spawn", "agent.subtask", "agent.elicit"}
 _XML_QWEN_FN_RE = re.compile(
     r"<function=(?P<name>[^>]+)>\s*(?P<body>.*?)\s*</function>",
     flags=re.DOTALL,
@@ -187,11 +188,7 @@ def _execute_tool_call(registry, role, tool_name, call_id, args, employee_dict):
         get_manager().event(task_id, "tool_result", {"tool": tool_name, "result": result})
     event_type = "tool_call.failed" if _tool_result_is_error(result) else "tool_call.executed"
     _emit_role_tool_event(role, event_type, {**payload, "result": result})
-    if registry.resolve_name(tool_name) != "agent.think":
-        _record_role_tool_result(
-            role,
-            f"{event_type}: {tool_name}({json.dumps(args, sort_keys=True)}) -> {result}",
-        )
+    _retain_tool_handoff(registry, role, tool_name, args, result, event_type)
     return {"role": "tool", "tool_call_id": call_id, "content": str(result)}
 
 
@@ -303,9 +300,7 @@ def _emit_role_tool_event(role, event_type, payload):
     """Emit a tool event to the role's event stream and persist it to the memory store."""
     event_stream = getattr(role, "runtime_event_stream", None)
     session_id = getattr(role, "runtime_session_id", None)
-    private_action = payload.get("tool_name", "").replace("__", ".") in {
-        "agent.think", "agent.focus", "agent.spawn", "agent.subtask", "agent.elicit",
-    }
+    private_action = payload.get("tool_name", "").replace("__", ".") in _PRIVATE_TASK_TOOLS | {"agent.think"}
     if event_stream is not None and session_id is not None:
         event_stream.emit(event_type, session_id, payload,
                           visibility="private" if getattr(role, "runtime_task_id", None) or private_action else "public")
@@ -331,6 +326,27 @@ def _record_role_tool_result(role, result):
     if not hasattr(role, "runtime_tool_results"):
         role.runtime_tool_results = []
     role.runtime_tool_results.append(result)
+
+
+def _retain_tool_handoff(registry, role, tool_name, arguments, result, event_type):
+    """Keep concise facts for later turns, without replaying private work inputs."""
+    canonical = registry.resolve_name(tool_name)
+    if canonical == "agent.think":
+        return
+    if canonical in _PRIVATE_TASK_TOOLS:
+        handoff = result
+        try:
+            parsed = json.loads(result) if isinstance(result, str) else result
+            if isinstance(parsed, dict) and (canonical == "agent.subtask" or
+                    {"task_id", "status", "depth", "children"}.issubset(parsed)):
+                keys = {"task_id", "status", "result", "input_request", "depth", "children",
+                        "event_count", "next_sequence"}
+                handoff = json.dumps({k: v for k, v in parsed.items() if k in keys}, sort_keys=True)
+        except (ValueError, TypeError):
+            pass
+        _record_role_tool_result(role, f"Private task handoff ({event_type}): {handoff}")
+        return
+    _record_role_tool_result(role, f"{event_type}: {tool_name}({json.dumps(arguments, sort_keys=True)}) -> {result}")
 
 
 def _tool_result_is_error(raw_result):
@@ -571,12 +587,7 @@ class ResponsesProvider(ModelProvider):
                 status_payload = {**payload, "result": result}
                 event_type = "tool_call.failed" if _tool_result_is_error(result) else "tool_call.executed"
                 _emit_role_tool_event(role, event_type, status_payload)
-                resolved_name = self.registry.resolve_name(tool_name)
-                if resolved_name != "agent.think":
-                    _record_role_tool_result(
-                        role,
-                        f"{event_type}: {tool_name}({json.dumps(payload.get('arguments'), sort_keys=True)}) -> {result}",
-                    )
+                _retain_tool_handoff(self.registry, role, tool_name, payload.get("arguments"), result, event_type)
                 outputs.append(
                     {
                         "type": "function_call_output",
