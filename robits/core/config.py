@@ -193,6 +193,11 @@ class Config:
         self.tool_proposal_store = None
         self.active_tool_caller = None
         self.active_tool_caller_name = None
+        self.subtask_max_depth = max(0, int(env.get("ROBITS_SUBTASK_MAX_DEPTH", "2")))
+        self.subtask_max_tasks = max(1, int(env.get("ROBITS_SUBTASK_MAX_TASKS", "32")))
+        self.subtask_manager = None
+        self.mcp_manager = None
+        self.mcp_config_path = env.get("ROBITS_MCP_CONFIG", "").strip()
         self.active_session_transcript_length = 0
 
 

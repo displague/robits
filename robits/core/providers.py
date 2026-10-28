@@ -9,7 +9,7 @@ from robits.core.config import _config as _m
 
 # Compiled once at module load — used by _extract_xml_tool_calls
 _XML_BLOCK_RE = re.compile(
-    r"<tool_call>\s*(.*?)\s*</tool_call>",
+    r"<tool_call>\s*(.*?)\s*(?:</tool_call>|$)",
     flags=re.DOTALL | re.IGNORECASE,
 )
 _XML_QWEN_FN_RE = re.compile(
@@ -146,7 +146,7 @@ def _extract_xml_tool_calls(text):
                     try:
                         raw_args = json.loads(raw_args)
                     except json.JSONDecodeError:
-                        raw_args = {}
+                        return False
                 if name and isinstance(raw_args, dict):
                     extracted.append({"name": name, "arguments": raw_args})
                     return True
@@ -177,7 +177,14 @@ def _execute_tool_call(registry, role, tool_name, call_id, args, employee_dict):
         "arguments": args,
     }
     _emit_role_tool_event(role, "tool_call.requested", payload)
-    result = registry.execute(tool_name, args, employee_dict, caller=role)
+    if getattr(role, "runtime_input_request", None):
+        result = "Error: Task paused for parent input; retry this call after resuming."
+    else:
+        result = registry.execute(tool_name, args, employee_dict, caller=role)
+    task_id = getattr(role, "runtime_task_id", None)
+    if task_id:
+        from robits.runtime.subtasks import get_manager
+        get_manager().event(task_id, "tool_result", {"tool": tool_name, "result": result})
     event_type = "tool_call.failed" if _tool_result_is_error(result) else "tool_call.executed"
     _emit_role_tool_event(role, event_type, {**payload, "result": result})
     if registry.resolve_name(tool_name) != "agent.think":
@@ -296,8 +303,12 @@ def _emit_role_tool_event(role, event_type, payload):
     """Emit a tool event to the role's event stream and persist it to the memory store."""
     event_stream = getattr(role, "runtime_event_stream", None)
     session_id = getattr(role, "runtime_session_id", None)
+    private_action = payload.get("tool_name", "").replace("__", ".") in {
+        "agent.think", "agent.focus", "agent.spawn", "agent.subtask", "agent.elicit",
+    }
     if event_stream is not None and session_id is not None:
-        event_stream.emit(event_type, session_id, payload)
+        event_stream.emit(event_type, session_id, payload,
+                          visibility="private" if getattr(role, "runtime_task_id", None) or private_action else "public")
     if _m.memory_store is not None and event_type in {"tool_call.executed", "tool_call.failed"}:
         agent_id = getattr(role, "runtime_role_name", None) or getattr(role, "name", None)
         if agent_id:
@@ -324,7 +335,15 @@ def _record_role_tool_result(role, result):
 
 def _tool_result_is_error(raw_result):
     """Return True if the raw execute() output represents an error."""
-    return str(raw_result).startswith("Error:")
+    if str(raw_result).startswith("Error:"):
+        return True
+    try:
+        result = json.loads(raw_result) if isinstance(raw_result, str) else raw_result
+        return isinstance(result, dict) and (result.get("isError") is True
+            or result.get("status") in {"failed", "cancelled"}
+            or isinstance(result.get("result"), dict) and result["result"].get("isError") is True)
+    except (ValueError, TypeError):
+        return False
 
 
 def _emit_token_usage_event(role, response):
@@ -374,6 +393,7 @@ class ChatCompletionsProvider(ModelProvider):
 
     def generate(self, role, model, sender, messages):
         """Run a chat-completions agentic loop, executing tool calls until a text reply is produced."""
+        role.runtime_model = model
         employee_dict = getattr(role, "employee_dict", None)
         tools = self.registry.as_chat_completion_tools(role)
         kwargs = {
@@ -392,6 +412,10 @@ class ChatCompletionsProvider(ModelProvider):
             kwargs["tool_choice"] = "auto"
 
         for _ in range(8):
+            if getattr(role, "runtime_task_id", None):
+                role.runtime_model_rounds = getattr(role, "runtime_model_rounds", 0) + 1
+                if role.runtime_model_rounds > 32:
+                    return "Error: Subtask model round budget exceeded."
             response = _with_model_retries(lambda: self.client.chat.completions.create(**kwargs))
             _emit_token_usage_event(role, response)
             message = response.choices[0].message
@@ -436,6 +460,9 @@ class ChatCompletionsProvider(ModelProvider):
                             for call_dict, xc in zip(synth_calls, xml_calls)
                         )
                         kwargs["messages"] = msgs
+                        if getattr(role, "runtime_input_request", None):
+                            role.runtime_chat_messages = msgs
+                            return ""
                         continue
                 return content
             if employee_dict is None:
@@ -467,6 +494,9 @@ class ChatCompletionsProvider(ModelProvider):
                     _execute_tool_call(self.registry, role, tool_name, call_id, args, employee_dict)
                 )
             kwargs["messages"] = kwargs["messages"] + tool_results
+            if getattr(role, "runtime_input_request", None):
+                role.runtime_chat_messages = kwargs["messages"]
+                return ""
         return "Error: Too many consecutive tool-call rounds."
 
 
@@ -479,6 +509,7 @@ class ResponsesProvider(ModelProvider):
 
     def generate(self, role, model, sender, messages):
         """Run a responses agentic loop, chaining previous_response_id for state continuity."""
+        role.runtime_model = model
         employee_dict = getattr(role, "employee_dict", None)
         tools = self.registry.as_responses_tools(role)
         kwargs = {
