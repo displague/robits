@@ -2243,10 +2243,10 @@ class BuiltinToolTests(unittest.TestCase):
         from robits.core.tool_functions import _SUBAGENT_BLOCKED_PREFIXES
         self.assertIn("memory.", _SUBAGENT_BLOCKED_PREFIXES)
 
-    def test_agent_spawn_blocks_agent_spawn_recursion(self):
+    def test_agent_spawn_recursion_is_depth_limited_instead_of_prefix_blocked(self):
         """agent.spawn must not be available to sub-agents."""
         from robits.core.tool_functions import _SUBAGENT_BLOCKED_PREFIXES
-        self.assertIn("agent.spawn", _SUBAGENT_BLOCKED_PREFIXES)
+        self.assertNotIn("agent.spawn", _SUBAGENT_BLOCKED_PREFIXES)
 
     def test_agent_spawn_returns_error_when_all_tools_blocked(self):
         result = main.agent_spawn({}, "do something", tools=["memory.search"])

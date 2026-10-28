@@ -33,6 +33,10 @@ Personas (see below) let individual identities fill these role slots with their 
 
 ## How It Works
 
+Agents can use configured MCP servers through native function tools and delegate
+focused subtasks with configurable nesting, inspection, events and parent input.
+See [MCP and subtasks](docs/mcp-subtasks.md) for configuration and limits.
+
 Sessions own a run ID, participant list, transcript, and a `RoundRobinScheduler`. Undirected messages cycle through all active participants; directed messages (`HR, ...`) still go through the scheduler via `observe()` to keep ordering consistent.
 
 The System role parses JSON tool instructions from agent responses and executes registered tools. Approved tool proposals (from SE) are activated at rollout without a restart.

@@ -730,9 +730,26 @@ def builtin_tool_search(employee_dict, query, role_name=None):
 
 
 def builtin_mcp_call(employee_dict, server_url, tool_name, arguments=None):
-    """Stub: MCP server tool calls are not implemented in this runtime."""
-    del employee_dict
-    return "Error: builtin.mcp_call is not implemented in this runtime. Configure an MCP server and use a supported MCP connector."
+    """Compatibility bridge to an operator-configured MCP tool."""
+    from robits.runtime.mcp import get_manager
+    try:
+        manager = get_manager()
+        server = next((name for name, transport in manager.servers.items()
+                       if name == server_url or transport.url == server_url), None)
+        if server is None:
+            return "Error: MCP server must be registered in ROBITS_MCP_CONFIG."
+        # Route through the same registered tool policy as native function calls.
+        manager.register(_m.tool_registry, _m.active_tool_caller)
+        import hashlib
+        digest = hashlib.sha256(f"{server}:{tool_name}".encode()).hexdigest()[:12]
+        name = next((name for name in _m.tool_registry._tools
+                     if name.startswith("mcp.") and name.endswith(digest)), None)
+        if name is None:
+            return "Error: MCP tool is not registered."
+        return _m.tool_registry.execute(name, _coerce_json_object(arguments), employee_dict,
+                                        caller=_m.active_tool_caller)
+    except Exception as exc:
+        return f"Error: {exc}"
 
 
 def builtin_computer_use(employee_dict, action, coordinate=None):
@@ -831,6 +848,9 @@ def agent_adjust_preprompt(employee_dict, adjustment, turns=5, mode="work"):
 
 _SUBAGENT_DEFAULT_TOOLS = frozenset({
     "agent.think",
+    "agent.spawn",
+    "agent.subtask",
+    "agent.elicit",
     "builtin.web_search",
     "builtin.url_fetch",
     "builtin.file_search",
@@ -845,19 +865,22 @@ _SUBAGENT_BLOCKED_PREFIXES = (
     "memory.",
     "org.",
     "tools.",
-    "agent.spawn",
     "agent.wait",
 )
 
 
-def agent_spawn(employee_dict, task, tools=None, model=None):
-    """Spawn a stateless sub-agent to perform a focused task and return its response.
+def agent_spawn(employee_dict, task, tools=None, model=None, defer=False):
+    """Create an isolated, depth-limited subtask, optionally queued for later work.
 
     The sub-agent receives a minimal system prompt and the task only — no conversation
-    history and no memory tools.  It may call operational tools (web search, URL fetch,
-    etc.) before returning a final answer.
+    history and no memory tools. It can use inherited tools, delegate within the
+    depth budget, and yield to its parent for input without losing private history.
     """
     caller_name = _m.active_tool_caller_name or "unknown"
+    parent = _m.active_tool_caller
+    depth = getattr(parent, "runtime_task_depth", 0) + 1
+    if depth > _m.subtask_max_depth:
+        return "Error: Maximum subtask depth reached."
     if not isinstance(task, str) or not task.strip():
         return "Error: task must be a non-empty string."
 
@@ -873,27 +896,43 @@ def agent_spawn(employee_dict, task, tools=None, model=None):
         t for t in requested
         if not any(t == b or t.startswith(b) for b in _SUBAGENT_BLOCKED_PREFIXES)
     }
+    from robits.core.tools import role_can_use_tool
+    if hasattr(parent, "allowed_tools"):
+        # A child may only narrow the parent's authority.
+        allowed = {name for name in allowed if name in _m.tool_registry
+                   and role_can_use_tool(parent, _m.tool_registry.get(name))}
+        # Remote MCP tools and its operation controls inherit explicitly granted access.
+        if tools is None:
+            allowed.update(t.name for t in _m.tool_registry.tools_for_role(parent)
+                           if t.name.startswith("mcp."))
+    if depth >= _m.subtask_max_depth:
+        allowed.discard("agent.spawn")
     if not allowed:
         return "Error: no permitted tools remain after filtering blocked prefixes."
 
     from types import SimpleNamespace
     sub_role = SimpleNamespace(
-        name=f"{caller_name}:subtask",
+        name=f"{caller_name}:subtask_{uuid4().hex[:8]}",
         allowed_tools=allowed,
         capabilities=getattr(_m.active_tool_caller, "capabilities", set()),
         employee_dict=employee_dict,
         max_tokens=getattr(_m.active_tool_caller, "max_tokens", 400),
         temperature=0.3,
         top_p=0.9,
-        runtime_event_stream=None,
-        runtime_session_id=None,
-        runtime_role_name=f"{caller_name}:subtask",
+        runtime_event_stream=getattr(parent, "runtime_event_stream", None),
+        runtime_session_id=getattr(parent, "runtime_session_id", None),
+        runtime_role_name=None,
+        runtime_task_depth=depth,
+        runtime_task_root=getattr(parent, "runtime_task_root", None) or (
+            getattr(parent, "runtime_session_id", None),
+            getattr(parent, "runtime_role_name", None) or getattr(parent, "name", "unknown")),
         runtime_tool_results=[],
     )
 
     use_model = (
         model if isinstance(model, str) and model.strip()
         else _m.spawn_model
+        or getattr(parent, "runtime_model", None)
         or _m.cheap_model
     )
     _task_stripped = task.strip()
@@ -909,21 +948,29 @@ def agent_spawn(employee_dict, task, tools=None, model=None):
             "content": (
                 f"You are a focused task executor working on behalf of {caller_name}. "
                 "Perform the given task using available tools and return a concise result. "
-                "Do not ask clarifying questions. Do not retain memory between calls."
+                "Use agent.elicit to ask your parent for missing information. "
+                "Use native function calls for tools. Return only the focused task result."
                 + _shell_hint
             ),
         },
         {"role": "user", "content": _task_stripped},
     ]
 
-    from robits.core.providers import ChatCompletionsProvider
     from termcolor import colored
     task_preview = task.strip()[:80]
     print(colored(f"[spawn] {sub_role.name} ({use_model}) — \"{task_preview}\"", "dark_grey"))
     get_logger().write_event("spawn_start", agent=sub_role.name, model=use_model, task=task_preview)
-    provider = ChatCompletionsProvider(_m.client, _m.tool_registry)
+    from robits.runtime.subtasks import get_manager
+    manager = get_manager()
     try:
-        result = provider.generate(sub_role, use_model, caller_name, messages)
+        task_id = manager.create(sub_role, use_model, messages, parent)
+        record = manager.tasks[task_id]
+        if defer:
+            return json.dumps(manager.view(record))
+        manager.run(record)
+        if record["status"] == "input_required":
+            return json.dumps(manager.view(record))
+        result = record["result"]
     except Exception as exc:
         print(colored(f"[spawn] {sub_role.name} -> error: {exc}", "dark_grey"))
         get_logger().write_event("spawn_error", agent=sub_role.name, error=str(exc))
@@ -966,6 +1013,10 @@ def _restore_wait_state(agent_name, role):
 
 # Functions available in the tool sandbox (exec globals for compile_tool).
 # Add new sandbox-accessible functions here; compile_tool picks them up automatically.
+from robits.runtime.subtasks import subtask_control, subtask_elicit
+from robits.runtime.mcp import mcp_operation
+
+
 SANDBOX_GLOBALS = {
     "workspace_list": workspace_list,
     "workspace_read": workspace_read,
@@ -996,5 +1047,8 @@ SANDBOX_GLOBALS = {
     "agent_think": agent_think,
     "agent_wait": agent_wait,
     "agent_spawn": agent_spawn,
+    "subtask_control": subtask_control,
+    "subtask_elicit": subtask_elicit,
+    "mcp_operation": mcp_operation,
     "agent_adjust_preprompt": agent_adjust_preprompt,
 }

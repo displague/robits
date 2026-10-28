@@ -43,6 +43,7 @@ class ToolDefinition:
     owner_capability: str | None = None
     system_tool: bool = False
     grantable: bool = True
+    raw_arguments: bool = False
 
     @property
     def openai_name(self):
@@ -108,6 +109,8 @@ def _validate_tool_code_ast(tree):
 
 def role_can_use_tool(role, tool):
     """Return True if role has the required capabilities and a matching tool grant."""
+    if getattr(role, "runtime_task_depth", 0) >= _m.subtask_max_depth and tool.name == "agent.spawn":
+        return False
     if role.__class__.__name__ == "Human":
         return True
     role_name = getattr(role, "name", None)
@@ -536,6 +539,9 @@ class ToolRegistry:
 
     def tools_for_role(self, role):
         """Return all ToolDefinitions that role is permitted to use."""
+        if _m.mcp_config_path or _m.mcp_manager is not None:
+            from robits.runtime.mcp import get_manager
+            get_manager().register(self, role)
         return [tool for tool in self._tools.values() if role_can_use_tool(role, tool)]
 
     def execute(self, name, args, employee_dict, caller=None):
@@ -545,6 +551,8 @@ class ToolRegistry:
         except ValueError as e:
             return f"Error: {e}"
         resolved_name = self.resolve_name(name)
+        if not isinstance(args, dict):
+            return "Error: Tool arguments must be an object."
         if resolved_name not in self._tools:
             return f"Error: Tool '{name}' not found."
         tool = self._tools[resolved_name]
@@ -554,7 +562,7 @@ class ToolRegistry:
         if missing_args:
             return f"Error: Missing args for tool '{name}': {missing_args}"
         unexpected_args = [arg_name for arg_name in args if arg_name not in tool.args]
-        if unexpected_args:
+        if unexpected_args and not tool.raw_arguments:
             return f"Error: Unexpected args for tool '{name}': {unexpected_args}"
         previous_caller = _m.active_tool_caller
         previous_caller_name = _m.active_tool_caller_name
@@ -568,7 +576,7 @@ class ToolRegistry:
             if _m.active_tool_caller_name is None:
                 _m.active_tool_caller_name = getattr(caller, "name", None)
         try:
-            result = tool.func(employee_dict=employee_dict, **args)
+            result = tool.func(employee_dict, args) if tool.raw_arguments else tool.func(employee_dict=employee_dict, **args)
         finally:
             _m.active_tool_caller = previous_caller
             _m.active_tool_caller_name = previous_caller_name

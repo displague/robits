@@ -466,13 +466,11 @@
   grantable: true
   owner_capability: agent
   description: >
-    Spawn a stateless sub-agent to perform a focused task and return its result.
-    The sub-agent has no conversation history and no memory tools — it receives only
-    the task description and an operational tool set. Use this to delegate
-    web research, URL fetching, shell commands, or tool discovery without burdening
-    your own context. By default all builtin.* tools and agent.think are available.
-    Supplying `tools` replaces the defaults with that explicit list; memory, org,
-    lifecycle, proposal, and agent.spawn tools are always blocked from sub-agents.
+    Delegate a focused task to an isolated copy of yourself. Pass only the context
+    it needs. Returns a concise result, or a task handle if it requests input.
+    Set defer=true to queue the task, then use agent.subtask to run, inspect,
+    respond, or cancel. Children may delegate within the configured depth limit.
+    Tools can only narrow your grants; memory, org, and proposal tools are excluded.
     Tool names must be explicit (no wildcards).
   parameters:
     type: object
@@ -494,10 +492,62 @@
         type: string
         description: >
           Optional model override. Defaults to the configured cheap model.
+      defer:
+        type: boolean
+        description: Queue without executing; use agent.subtask with action run.
     required:
       - task
   code: |
-    return agent_spawn(employee_dict, task, tools=tools, model=model if model is not None else "")
+    return agent_spawn(employee_dict, task, tools=tools, model=model if model is not None else "", defer=defer if defer is not None else False)
+- name: agent.subtask
+  grantable: true
+  owner_capability: agent
+  description: >
+    Inspect a child task's status, result, events, input request and children.
+    action=run advances a queued task until completion or input is needed.
+    action=respond supplies missing information, then action=run resumes it.
+    action=cancel cancels the task and its descendants.
+  parameters:
+    type: object
+    properties:
+      task_id: {type: string}
+      action: {type: string, enum: [inspect, run, respond, cancel]}
+      response: {type: string}
+      after_sequence: {type: integer, description: Return events after this sequence; -1 starts at the beginning.}
+      limit: {type: integer, minimum: 1, maximum: 50, description: Event page size; defaults to 10 most recent.}
+    required: [task_id]
+  code: |
+    return subtask_control(employee_dict, task_id, action=action if action is not None else "inspect", response=response, after_sequence=after_sequence, limit=limit if limit is not None else 10)
+- name: agent.elicit
+  grantable: true
+  owner_capability: agent
+  description: Ask your parent for missing information and yield until they respond.
+  parameters:
+    type: object
+    properties:
+      message: {type: string}
+    required: [message]
+  code: |
+    return subtask_elicit(employee_dict, message)
+- name: mcp.operation
+  grantable: true
+  owner_capability: mcp
+  required_capabilities: [mcp]
+  description: >
+    Continue an MCP operation using its operation_id. Omit responses to poll a task.
+    Supply responses keyed by input request ID for elicitation: each value has
+    action accept, decline, or cancel and optional content matching requestedSchema.
+    For questions requiring a parent's input, use agent.elicit first. Never invent
+    user consent or credentials. Set cancel=true to cancel the operation.
+  parameters:
+    type: object
+    properties:
+      operation_id: {type: string}
+      responses: {type: object, additionalProperties: true}
+      cancel: {type: boolean}
+    required: [operation_id]
+  code: |
+    return mcp_operation(employee_dict, operation_id, responses=responses, cancel=cancel if cancel is not None else False)
 - name: memory.search
   system_tool: true
   grantable: true
