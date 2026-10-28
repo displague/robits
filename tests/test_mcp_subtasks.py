@@ -146,6 +146,28 @@ class MCPTests(unittest.TestCase):
         self.transport.results = [{"resultType": "complete", "taskId": "t", "status": "cancelled"}]
         self.assertEqual(self.manager.advance(handle, self.role, cancel=True)["status"], "cancelled")
 
+    def test_task_acknowledgements_keep_handle_until_terminal_poll(self):
+        self.transport.results = [
+            {"resultType": "task", "taskId": "t", "status": "working"},
+            {"resultType": "complete"},
+            {"resultType": "complete", "taskId": "t", "status": "input_required", "inputRequests": {
+                "q": {"method": "elicitation/create", "params": {"message": "Which option?"}}}},
+            {"resultType": "complete"},
+            {"resultType": "complete", "taskId": "t", "status": "completed", "result": {"content": []}},
+        ]
+        handle = self.manager.call("example", "slow", {}, self.role)["operation_id"]
+        ack = self.manager.advance(handle, self.role, cancel=True)
+        self.assertEqual(ack["acknowledged"], "tasks/cancel")
+        self.assertEqual(ack["status"], "working")
+        self.assertIn(handle, self.manager.pending)
+        self.manager.advance(handle, self.role)
+        ack = self.manager.advance(handle, self.role, {"q": {"action": "decline"}})
+        self.assertEqual(ack["acknowledged"], "tasks/update")
+        self.assertIn(handle, self.manager.pending)
+        result = self.manager.advance(handle, self.role)
+        self.assertEqual(result["status"], "completed")
+        self.assertNotIn(handle, self.manager.pending)
+
 
 class SubtaskTests(unittest.TestCase):
     def setUp(self):
@@ -163,6 +185,45 @@ class SubtaskTests(unittest.TestCase):
     def spawn(self, **kwargs):
         return self.registry.execute("agent.spawn", {"task": "focused work", "defer": True, **kwargs}, {}, self.parent)
 
+    def test_private_work_stays_out_of_parent_conversation_and_console(self):
+        from contextlib import redirect_stdout
+        from io import StringIO
+        parent = main.Role("Rowan", "You are Rowan, a warm and practical colleague.", {})
+        parent.allowed_tools = {"agent.*"}
+        parent.runtime_session_id = "persona-session"
+        parent.runtime_event_stream = main.RuntimeEventStream()
+        secret = "PRIVATE_WORKING_NOTE_7e1c"
+        responses = [
+            message(tool="agent__focus", arguments={"task": f"Check the share privately: {secret}"}),
+            message(tool="agent__think", arguments={"content": secret}),
+            message("The share is $47.23."),
+            message("It's $47.23 each. I'll bring the thermos."),
+        ]
+        client = SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=lambda **kwargs: responses.pop(0))))
+        output = StringIO()
+        with patch.multiple(config, client=client, model_provider=ChatCompletionsProvider(client, self.registry)), redirect_stdout(output):
+            reply = parent.interact("CEO", "What do we each owe for the order?")
+        self.assertEqual(reply, "It's $47.23 each. I'll bring the thermos.")
+        self.assertEqual(output.getvalue(), "")
+        history = parent.conversation_history[parent.name]
+        self.assertEqual([item["role"] for item in history], ["system", "user", "assistant"])
+        self.assertNotIn(secret, json.dumps(history))
+        events = parent.runtime_event_stream.events()
+        internal = [e for e in events if e.event_type.startswith(("tool_call.", "subtask."))]
+        self.assertTrue(internal)
+        self.assertTrue(all(e.visibility == "private" for e in internal))
+        task = next(iter(self.manager.tasks.values()))
+        self.assertEqual(task["result"], "The share is $47.23.")
+        self.assertNotIn("warm and practical colleague", json.dumps(task["messages"]))
+
+    def test_surface_private_note_events_do_not_enter_public_observer_stream(self):
+        from robits.core.providers import _execute_tool_call
+        _execute_tool_call(self.registry, self.parent, "agent__think", "private-note",
+                           {"content": "A private reminder."}, {})
+        events = self.parent.runtime_event_stream.events()
+        self.assertEqual(len(events), 2)
+        self.assertTrue(all(event.visibility == "private" for event in events))
+
     def test_two_levels_and_denial_at_execution_boundary(self):
         first = json.loads(self.spawn())["task_id"]
         child = self.manager.tasks[first]["role"]
@@ -171,7 +232,16 @@ class SubtaskTests(unittest.TestCase):
         self.assertEqual(grandchild.runtime_task_depth, 2)
         self.assertFalse(role_can_use_tool(grandchild, self.registry.get("agent.spawn")))
         self.assertTrue(self.registry.execute("agent.spawn", {"task": "forbidden"}, {}, grandchild).startswith("Error:"))
+        self.assertFalse(role_can_use_tool(grandchild, self.registry.get("agent.focus")))
+        self.assertTrue(self.registry.execute("agent.focus", {"task": "forbidden"}, {}, grandchild).startswith("Error:"))
         self.assertIn(second, self.manager.view(self.manager.tasks[first])["children"])
+
+    def test_focus_exposes_only_a_task_argument_and_preserves_spawn_options(self):
+        tools = self.registry.as_chat_completion_tools(self.parent)
+        focus = next(t["function"] for t in tools if t["function"]["name"] == "agent__focus")
+        spawn = next(t["function"] for t in tools if t["function"]["name"] == "agent__spawn")
+        self.assertEqual(set(focus["parameters"]["properties"]), {"task"})
+        self.assertTrue({"tools", "model", "defer"}.issubset(spawn["parameters"]["properties"]))
 
     def test_no_grant_escalation_and_context_isolation(self):
         task = self.manager.tasks[json.loads(self.spawn(tools=["builtin.shell_run", "builtin.web_search"]))["task_id"]]
@@ -195,6 +265,7 @@ class SubtaskTests(unittest.TestCase):
             pending = json.loads(subtask_control({}, task_id, "run"))
             self.assertEqual(pending["status"], "input_required")
             self.assertEqual(pending["input_request"], "Which city?")
+            self.assertNotIn("events", pending)
             self.assertEqual(len(requests), 1)
             subtask_control({}, task_id, "respond", "Paris")
             completed = json.loads(subtask_control({}, task_id, "run"))
@@ -202,7 +273,15 @@ class SubtaskTests(unittest.TestCase):
         self.assertEqual(completed["result"], "Paris forecast.")
         self.assertEqual(requests[1]["messages"][-1], {"role": "user", "content": "Paris"})
         self.assertEqual(requests[1]["messages"][-2]["tool_call_id"], "call-1")
-        self.assertIn("tool_result", [event["kind"] for event in completed["events"]])
+        self.assertNotIn("events", completed)
+        inspected = json.loads(subtask_control({}, task_id, "inspect"))
+        self.assertIn("tool_result", [event["kind"] for event in inspected["events"]])
+
+    def test_creation_returns_compact_handle_and_explicit_inspection_has_events(self):
+        created = json.loads(self.spawn())
+        self.assertNotIn("events", created)
+        inspected = json.loads(subtask_control({}, created["task_id"], "inspect"))
+        self.assertEqual(inspected["events"][0]["kind"], "created")
 
     def test_cancel_descendants_and_task_budget(self):
         task_id = json.loads(self.spawn())["task_id"]

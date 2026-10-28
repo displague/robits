@@ -848,6 +848,7 @@ def agent_adjust_preprompt(employee_dict, adjustment, turns=5, mode="work"):
 
 _SUBAGENT_DEFAULT_TOOLS = frozenset({
     "agent.think",
+    "agent.focus",
     "agent.spawn",
     "agent.subtask",
     "agent.elicit",
@@ -907,6 +908,7 @@ def agent_spawn(employee_dict, task, tools=None, model=None, defer=False):
                            if t.name.startswith("mcp."))
     if depth >= _m.subtask_max_depth:
         allowed.discard("agent.spawn")
+        allowed.discard("agent.focus")
     if not allowed:
         return "Error: no permitted tools remain after filtering blocked prefixes."
 
@@ -946,8 +948,10 @@ def agent_spawn(employee_dict, task, tools=None, model=None, defer=False):
         {
             "role": "system",
             "content": (
-                f"You are a focused task executor working on behalf of {caller_name}. "
-                "Perform the given task using available tools and return a concise result. "
+                f"You are a private focused subtask of {caller_name}, working in a separate context. "
+                "Help with the supplied reflection, question, or mundane work using available tools. "
+                "Return concise findings and uncertainties that the parent can use in its own voice; "
+                "keep working notes and intermediate tool activity in this private context. "
                 "Use agent.elicit to ask your parent for missing information. "
                 "Use native function calls for tools. Return only the focused task result."
                 + _shell_hint
@@ -956,9 +960,7 @@ def agent_spawn(employee_dict, task, tools=None, model=None, defer=False):
         {"role": "user", "content": _task_stripped},
     ]
 
-    from termcolor import colored
     task_preview = task.strip()[:80]
-    print(colored(f"[spawn] {sub_role.name} ({use_model}) — \"{task_preview}\"", "dark_grey"))
     get_logger().write_event("spawn_start", agent=sub_role.name, model=use_model, task=task_preview)
     from robits.runtime.subtasks import get_manager
     manager = get_manager()
@@ -966,17 +968,15 @@ def agent_spawn(employee_dict, task, tools=None, model=None, defer=False):
         task_id = manager.create(sub_role, use_model, messages, parent)
         record = manager.tasks[task_id]
         if defer:
-            return json.dumps(manager.view(record))
+            return json.dumps(manager.brief(record))
         manager.run(record)
         if record["status"] == "input_required":
-            return json.dumps(manager.view(record))
+            return json.dumps(manager.brief(record))
         result = record["result"]
     except Exception as exc:
-        print(colored(f"[spawn] {sub_role.name} -> error: {exc}", "dark_grey"))
         get_logger().write_event("spawn_error", agent=sub_role.name, error=str(exc))
         return f"Error: sub-agent failed: {exc}"
     char_count = len(result or "")
-    print(colored(f"[spawn] {sub_role.name} -> {char_count} chars", "dark_grey"))
     get_logger().write_event("spawn_result", agent=sub_role.name, chars=char_count, preview=(result or "")[:200])
     return result or "Error: sub-agent returned no response."
 

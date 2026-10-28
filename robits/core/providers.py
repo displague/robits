@@ -303,9 +303,12 @@ def _emit_role_tool_event(role, event_type, payload):
     """Emit a tool event to the role's event stream and persist it to the memory store."""
     event_stream = getattr(role, "runtime_event_stream", None)
     session_id = getattr(role, "runtime_session_id", None)
+    private_action = payload.get("tool_name", "").replace("__", ".") in {
+        "agent.think", "agent.focus", "agent.spawn", "agent.subtask", "agent.elicit",
+    }
     if event_stream is not None and session_id is not None:
         event_stream.emit(event_type, session_id, payload,
-                          visibility="private" if getattr(role, "runtime_task_id", None) else "public")
+                          visibility="private" if getattr(role, "runtime_task_id", None) or private_action else "public")
     if _m.memory_store is not None and event_type in {"tool_call.executed", "tool_call.failed"}:
         agent_id = getattr(role, "runtime_role_name", None) or getattr(role, "name", None)
         if agent_id:

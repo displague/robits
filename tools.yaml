@@ -462,12 +462,34 @@
       - adjustment
   code: |
     return agent_adjust_preprompt(employee_dict, adjustment, turns=turns if 'turns' in locals() and turns is not None else 5, mode=mode if 'mode' in locals() and mode is not None else 'work')
+- name: agent.focus
+  grantable: true
+  owner_capability: agent
+  description: >
+    Work on a focused question, reflection, or mundane task in a private separate
+    context. Supply only the needed facts and ask for concise findings or a
+    question back. Returns the findings for you to use in your own voice.
+  parameters:
+    type: object
+    properties:
+      task:
+        type: string
+        description: Focused work plus the facts it needs and the desired concise result.
+    required: [task]
+  code: |
+    return agent_spawn(employee_dict, task)
 - name: agent.spawn
   grantable: true
   owner_capability: agent
   description: >
-    Delegate a focused task to an isolated copy of yourself. Pass only the context
-    it needs. Returns a concise result, or a task handle if it requests input.
+    Advanced private subtask creation with explicit tool, model and queue options.
+    For ordinary private work, agent.focus needs only a task string.
+    Work privately in a separate context for focused reflection, inner dialogue,
+    checking details, or mundane work, without filling your conversational persona's
+    context. Pass only the context it needs; request concise findings or a question
+    back. Continue the outward conversation in your own voice without narrating
+    this internal activity unless asked. Returns a concise result, or a task handle
+    if it requests input.
     Set defer=true to queue the task, then use agent.subtask to run, inspect,
     respond, or cancel. Children may delegate within the configured depth limit.
     Tools can only narrow your grants; memory, org, and proposal tools are excluded.
@@ -491,7 +513,7 @@
       model:
         type: string
         description: >
-          Optional model override. Defaults to the configured cheap model.
+          Optional model override. Uses the configured subtask model or your current model.
       defer:
         type: boolean
         description: Queue without executing; use agent.subtask with action run.

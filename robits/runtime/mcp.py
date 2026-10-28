@@ -397,6 +397,13 @@ class MCPManager:
             raise ValueError("MCP continuation budget exceeded")
         updated = self.rpc(record["server"], method, params, role)
         state = updated.get("task", updated)
+        if task_id and method in {"tasks/update", "tasks/cancel"} and "status" not in state:
+            # An acknowledgement is not a new task state. Cancellation is intent,
+            # and input acceptance does not imply that the task has completed.
+            record["rounds"] += 1
+            return {"operation_id": handle, "taskId": task_id,
+                    "status": task.get("status"), "status_is_last_observed": True,
+                    "acknowledged": method, "next_action": "poll"}
         if state.get("status") in {"completed", "failed", "cancelled"}:
             self.pending.pop(handle)
             return updated

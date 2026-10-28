@@ -109,7 +109,7 @@ def _validate_tool_code_ast(tree):
 
 def role_can_use_tool(role, tool):
     """Return True if role has the required capabilities and a matching tool grant."""
-    if getattr(role, "runtime_task_depth", 0) >= _m.subtask_max_depth and tool.name == "agent.spawn":
+    if getattr(role, "runtime_task_depth", 0) >= _m.subtask_max_depth and tool.name in {"agent.spawn", "agent.focus"}:
         return False
     if role.__class__.__name__ == "Human":
         return True

@@ -76,6 +76,11 @@ class SubtaskManager:
             record["status"], record["result"] = "failed", f"Error: sub-agent failed: {exc}"
             self.event(record["task_id"], "failed", {"result": record["result"]})
 
+    def brief(self, record):
+        """Routine handoff: return findings or a question, without replaying work."""
+        return {key: value for key, value in self.view(record).items()
+                if key not in {"events", "event_count", "next_sequence"}}
+
     def view(self, record, after_sequence=None, limit=10):
         if not isinstance(limit, int) or isinstance(limit, bool) or not 1 <= limit <= 50:
             raise ValueError("event limit must be between 1 and 50")
@@ -124,7 +129,7 @@ def subtask_control(employee_dict, task_id, action="inspect", response=None, aft
                     manager.event(child["task_id"], "cancelled", {})
         elif action != "inspect":
             raise ValueError("action must be inspect, run, respond or cancel")
-        return json.dumps(manager.view(record, after_sequence, limit))
+        return json.dumps(manager.view(record, after_sequence, limit) if action == "inspect" else manager.brief(record))
     except Exception as exc:
         return f"Error: {exc}"
 
