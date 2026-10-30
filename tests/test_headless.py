@@ -301,6 +301,53 @@ class IdleSchedulingTests(HeadlessTestCase):
         self.assertEqual(session.turns_completed, 1)
         self.assertEqual(len(self.events(session, "session.model_error")), 2)
 
+    def test_failed_turn_does_not_repeat_the_input_in_history(self):
+        class HistoryRole(FakeRole):
+            def __init__(self, name, responses):
+                super().__init__(name, responses)
+                self.conversation_history = {name: [{"role": "system", "content": "s"}]}
+
+            def interact(self, sender=None, prompt=None):
+                self.conversation_history[self.name].append({"role": "user", "content": prompt})
+                return super().interact(sender, prompt)
+
+        a = HistoryRole("A", [RuntimeError("model down"), "recovered"])
+        session = self.session({"A": a})
+        self.run_quiet(session, initial_message="hello", max_turns=1)
+        user_turns = [m for m in a.conversation_history["A"] if m["role"] == "user"]
+        self.assertEqual(len(user_turns), 1)
+        self.assertEqual(session.turns_completed, 1)
+
+    def test_gives_up_after_max_consecutive_errors(self):
+        a = FakeRole("A", [RuntimeError("down")] * 10)
+        session = self.session({"A": a})
+        with patch.object(_config, "max_consecutive_errors", 3):
+            self.run_quiet(session, initial_message="hello", max_turns=1)
+        self.assertEqual(len(a.received), 3)
+        self.assertEqual(self.sleeper.calls, [5.0, 10.0])
+        self.assertEqual(str(session.failed), "down")
+        self.assertEqual(len(self.events(session, "session.error_exit")), 1)
+        self.assertEqual(session.turns_completed, 0)
+
+    def test_cli_exits_non_zero_after_giving_up(self):
+        class Failing:
+            headless = True
+            failed = RuntimeError("down")
+            system = None
+
+            def run(self, **_):
+                return self
+
+            def stop_on_signals(self):
+                from contextlib import nullcontext
+                return nullcontext()
+
+        with patch.object(main, "Session", return_value=Failing()), \
+                patch.object(main, "load_tools"):
+            with self.assertRaises(SystemExit) as raised:
+                main.run_simulation(initial_message="hi", max_turns=1)
+        self.assertEqual(raised.exception.code, 1)
+
 
 class SigtermTests(HeadlessTestCase):
     def test_sigterm_interrupts_a_real_idle_sleep(self):

@@ -179,6 +179,7 @@ For local models with embedding support, `sqlite-vec` is included in `requiremen
 | `ROBITS_MAX_TURNS_PER_HOUR` | `0` (unlimited) | Headless: session-wide turn budget over a sliding hour |
 | `ROBITS_IDLE_MAX_SLEEP_SECONDS` | `300` | Headless: longest single idle sleep before re-checking (0 = no cap) |
 | `ROBITS_ERROR_BACKOFF_SECONDS` | `5` | Headless: first backoff after a failed turn; doubles per consecutive failure |
+| `ROBITS_MAX_CONSECUTIVE_ERRORS` | `5` | Headless: consecutive failed turns before the run gives up and exits 1 (`0` retries forever) |
 | `ROBITS_LOCATION` | — | Default location string for agent context |
 | `ROBITS_TIMEZONE` | — | Default timezone (e.g. `America/New_York`) |
 

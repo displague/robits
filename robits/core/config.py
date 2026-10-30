@@ -189,6 +189,8 @@ class Config:
         self.error_backoff_seconds = max(
             0.0, float(env.get("ROBITS_ERROR_BACKOFF_SECONDS", "5"))
         )
+        # Consecutive failed turns before a headless run gives up (0 = retry forever).
+        self.max_consecutive_errors = max(0, int(env.get("ROBITS_MAX_CONSECUTIVE_ERRORS", "5")))
 
         # --- misc ---
         self.builtin_search_url = env.get("ROBITS_SEARCH_URL", "").strip()

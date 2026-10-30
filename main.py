@@ -193,8 +193,12 @@ def run_simulation(initial_message=None, max_turns=None):
     load_tools(session.system)
     if session.headless:
         # SIGTERM stops after the current turn; run() then returns normally (exit 0).
+        # Giving up after max_consecutive_errors failed turns exits 1.
         with session.stop_on_signals():
-            return session.run(initial_message=initial_message, max_turns=max_turns)
+            session.run(initial_message=initial_message, max_turns=max_turns)
+        if session.failed:
+            raise SystemExit(1)
+        return session
     return session.run(initial_message=initial_message, max_turns=max_turns)
 
 

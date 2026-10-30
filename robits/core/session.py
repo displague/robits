@@ -223,6 +223,7 @@ class Session:
         self._last_turn_at: dict = {}
         self._turn_times = deque()
         self._error_count = 0
+        self.failed = None
         self._backoff_until = None
         self.participants = (
             participants if participants is not None
@@ -1165,7 +1166,16 @@ class Session:
         prev_c = self.completion_tokens
         prev_t = self.total_tokens
 
-        response = routed.receiver.interact(sender.name, model_prompt)
+        history = getattr(routed.receiver, "conversation_history", None)
+        history = history.get(routed.receiver.name) if isinstance(history, dict) else None
+        history_length = len(history) if history is not None else None
+        try:
+            response = routed.receiver.interact(sender.name, model_prompt)
+        except Exception:
+            # A failed turn is retried; drop the prompt it recorded so the retry doesn't repeat it.
+            if history is not None:
+                del history[history_length:]
+            raise
         self._decay_agent_adjustments(routed.receiver.name)
         response = "" if response is None else response
         model_thinking = getattr(routed.receiver, "runtime_thinking", None)
@@ -1239,7 +1249,8 @@ class Session:
                     except Exception as e:
                         if sender is self._external:
                             self._inbox.appendleft(message)
-                        self._back_off(e)
+                        if self._back_off(e):
+                            break
                         continue
                     self._error_count = 0
                     turn_at = self._now()
@@ -1291,6 +1302,7 @@ class Session:
             {
                 "turns_completed": self.turns_completed,
                 "stop_reason": self._stop_requested,
+                "failed": str(self.failed) if self.failed else None,
             },
         )
         if _m.memory_store is not None:
@@ -1463,8 +1475,23 @@ class Session:
         return _SLEPT
 
     def _back_off(self, error):
-        """Record a failed headless turn and schedule an exponential backoff."""
+        """Record a failed headless turn and schedule an exponential backoff.
+
+        Returns True when max_consecutive_errors is reached: the run gives up and
+        self.failed holds the error (main exits non-zero).
+        """
         self._error_count += 1
+        limit = _m.max_consecutive_errors
+        if limit and self._error_count >= limit:
+            self.failed = error
+            self.event_stream.emit(
+                "session.error_exit",
+                self.run_id,
+                {"error": str(error), "consecutive": self._error_count},
+            )
+            get_logger().write_event("error_exit", error=str(error), consecutive=self._error_count)
+            print(colored(f"[error] {error}; giving up after {self._error_count} consecutive failed turns", "red"))
+            return True
         delay = _m.error_backoff_seconds * (2 ** (self._error_count - 1))
         cap = _m.idle_max_sleep_seconds or 300.0
         delay = min(delay, cap)
@@ -1476,6 +1503,7 @@ class Session:
         )
         get_logger().write_event("model_error", error=str(error), consecutive=self._error_count, backoff_seconds=delay)
         print(colored(f"[error] {error}; backing off {delay:.0f}s", "yellow"))
+        return False
 
     def close(self):
         """Unsubscribe from the event stream to prevent memory leaks."""
