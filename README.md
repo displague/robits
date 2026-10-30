@@ -130,7 +130,7 @@ Embeddings are computed lazily at agent wake-up (`_build_wait_summary`) and at s
 
 ## Observability
 
-Sessions emit a `RuntimeEventStream` for: `session.created`, `session.completed`, `message.routed`, `message.recorded`, `tool.executed`, `tool_call.requested`, `tool_call.executed`, `tool_call.failed`, `thought.recorded`, `agent.waited`, `clock.state.changed`. Tests can subscribe to the stream for assertions without a terminal.
+Sessions emit a `RuntimeEventStream` for: `session.created`, `session.completed`, `message.routed`, `message.recorded`, `tool.executed`, `tool_call.requested`, `tool_call.executed`, `tool_call.failed`, `thought.recorded`, `agent.waited`, `clock.state.changed`, and in headless mode `session.sleeping` (reason, seconds, next wake time per persona), `session.idle_exit` and `session.model_error`. Tests can subscribe to the stream for assertions without a terminal.
 
 ## Sandboxes
 
@@ -174,6 +174,12 @@ For local models with embedding support, `sqlite-vec` is included in `requiremen
 | `ROBITS_GOAL_DIGEST_INTERVAL` | `0` | Meaningful turns between goal checkpoints |
 | `ROBITS_MAX_PARALLELISM` | `1` | Max concurrent model calls |
 | `ROBITS_MAX_API_RETRIES` | `3` | Retries on transient API errors |
+| `ROBITS_HEADLESS` | off | Run without a stdin Human (same as `--headless`); `1`/`true`/`yes`/`on` enables |
+| `ROBITS_MIN_TURN_INTERVAL_SECONDS` | `0` | Headless: minimum seconds between two turns of the same persona |
+| `ROBITS_MAX_TURNS_PER_HOUR` | `0` (unlimited) | Headless: session-wide turn budget over a sliding hour |
+| `ROBITS_IDLE_MAX_SLEEP_SECONDS` | `300` | Headless: longest single idle sleep before re-checking (0 = no cap) |
+| `ROBITS_ERROR_BACKOFF_SECONDS` | `5` | Headless: first backoff after a failed turn; doubles per consecutive failure |
+| `ROBITS_MAX_CONSECUTIVE_ERRORS` | `5` | Headless: consecutive failed turns before the run gives up and exits 1 (`0` retries forever) |
 | `ROBITS_LOCATION` | — | Default location string for agent context |
 | `ROBITS_TIMEZONE` | — | Default timezone (e.g. `America/New_York`) |
 
@@ -188,6 +194,16 @@ For non-interactive smoke checks:
 ```bash
 python main.py --prompt "Ops, say hello to HR" --turns 1
 ```
+
+### Headless mode
+
+`python main.py --headless` (or `ROBITS_HEADLESS=1`) runs model-backed personas without a stdin Human:
+
+- No CEO is added to the roster, Human personas are skipped, and no role gets the CEO's unconditional tool access. Operator powers come from the `operator` capability.
+- Inputs come from `--prompt` (delivered as a message from `external`), alarms, and `Session.deliver()` for events from integrations. An input goes to the next due persona, or to the persona it addresses (`Name: ...`).
+- A turn happens only when there is something to attend to: a queued input, a non-empty reply to pass on, an expired wait, or a due alarm. Silence or `agent.wait` ends a turn without forcing anyone else's.
+- When nobody is due (all waiting, off the clock, minimum interval, turn budget, or error backoff) the session sleeps until the earliest wake time or until `Session.deliver()`, `wake()`, `set_clock_state()` or SIGTERM. A run with `--turns` that has nothing scheduled ends; without `--turns` it runs until stopped.
+- SIGTERM stops after the current turn and exits 0. JSONL events go to stderr unless `--log` is given.
 
 Capture to a log file while watching:
 
