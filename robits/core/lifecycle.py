@@ -451,3 +451,14 @@ def due_alarm_reminders(role, now=None):
                 due += delta
             alarm.due_at = _format_datetime(due)
     return reminders
+
+
+def next_alarm_at(role):
+    """Return the earliest due datetime among a role's active alarms, or None."""
+    due_times = []
+    for alarm in _active_alarms(role):
+        try:
+            due_times.append(_parse_datetime(alarm.due_at))
+        except ValueError:
+            continue
+    return min(due_times) if due_times else None

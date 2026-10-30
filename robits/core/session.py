@@ -1,8 +1,12 @@
 """Session management, scheduling, and transcript classes."""
 import json
+import signal
+import threading
 import time
+from collections import deque
+from contextlib import contextmanager
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, time as dtime, timedelta, timezone
 from uuid import uuid4
 
 from robits.core.config import _config as _m
@@ -22,7 +26,7 @@ from robits.core.context import (
     deliver_verified_tool_results,
     prepend_verified_tool_results,
 )
-from robits.core.lifecycle import due_alarm_reminders
+from robits.core.lifecycle import due_alarm_reminders, next_alarm_at
 from robits.core.tool_functions import _restore_wait_state, _WAIT_STATE_FILE
 from robits.core.persona import seed_persona
 from robits.core.io import get_logger
@@ -152,6 +156,28 @@ class RoundRobinScheduler:
 _CLOCK_TEMP_MULTIPLIER = {"on": 0.6, "break": 0.9, "off": 1.3}
 
 
+class ExternalInput:
+    """Sender for headless inputs (--prompt seed, delivered events); has no tool grants."""
+
+    name = "external"
+    capabilities = frozenset()
+    allowed_tools = frozenset()
+
+
+def _default_sleeper(seconds, wake_event):
+    """Block until wake_event is set or seconds elapse (None = until woken).
+
+    Waits in short slices so Python signal handlers (SIGTERM) run promptly
+    even if the signal is not delivered to the sleeping thread.
+    """
+    deadline = None if seconds is None else time.monotonic() + seconds
+    while not wake_event.is_set():
+        remaining = 1.0 if deadline is None else deadline - time.monotonic()
+        if remaining <= 0:
+            return
+        wake_event.wait(min(remaining, 1.0))
+
+
 def _modulate_temperature(role, clock_state):
     """Adjust role.temperature and role.top_p around their base values for clock state.
 
@@ -166,6 +192,9 @@ def _modulate_temperature(role, clock_state):
         role.top_p = max(0.1, min(1.0, role.base_top_p * multiplier))
 
 
+_SLEPT = object()
+
+
 class Session:
     """Orchestrates a multi-turn conversation between participants, routing messages and managing memory."""
 
@@ -178,11 +207,31 @@ class Session:
         max_turns=None,
         event_stream=None,
         clock_state=None,
+        headless=None,
+        clock=None,
+        sleeper=None,
     ):
+        self.headless = _m.headless if headless is None else bool(headless)
+        # Injectable time source and sleeper so idle scheduling is testable
+        # without real sleeps.  clock() returns an aware UTC datetime.
+        self._now = clock or (lambda: datetime.now(timezone.utc))
+        self._sleeper = sleeper or _default_sleeper
+        self._wake_event = threading.Event()
+        self._stop_requested = None
+        self._inbox = deque()
+        self._external = ExternalInput()
+        self._last_turn_at: dict = {}
+        self._turn_times = deque()
+        self._error_count = 0
+        self._backoff_until = None
         self.participants = (
             participants if participants is not None
-            else build_employee_dict(_m.persona_entries or None)
+            else build_employee_dict(_m.persona_entries or None, headless=self.headless)
         )
+        if self.headless:
+            # A headless roster never contains a stdin-reading Human.
+            for key in [k for k, p in self.participants.items() if p.__class__.__name__ == "Human"]:
+                del self.participants[key]
         self.system = system if system is not None else System(self.participants)
         scheduler_names = list(self.participants)
         self.scheduler = scheduler if scheduler is not None else RoundRobinScheduler(scheduler_names)
@@ -221,7 +270,10 @@ class Session:
         self._meaningful_turns_completed = 0
         self._last_identity_digest_meaningful_turn = 0
         self._last_goal_digest_meaningful_turn = 0
-        self.last_receiver = next((p for p in self.participants.values() if p.__class__.__name__ == "Human"), None) or next(iter(self.participants.values()))
+        if self.headless:
+            self.last_receiver = self._external
+        else:
+            self.last_receiver = next((p for p in self.participants.values() if p.__class__.__name__ == "Human"), None) or next(iter(self.participants.values()))
         _name_map: dict = {}
         for k, p in self.participants.items():
             for form in (
@@ -253,6 +305,7 @@ class Session:
                 "participants": list(self.participants),
                 "max_turns": self.max_turns,
                 "clock_state": self.clock_state,
+                "headless": self.headless,
             },
         )
         for name, participant in self.participants.items():
@@ -294,6 +347,11 @@ class Session:
                     entries = persona.get("entries") if isinstance(persona, dict) else persona
                     if entries:
                         seed_persona(_m.memory_store, name, entries)
+                if self.headless:
+                    # Inputs from outside are recorded as messages from this sender.
+                    _m.memory_store.upsert_agent(
+                        self._external.name, "External", display_name=self._external.name,
+                    )
                 self._org_chat_channel_id = _m.memory_store.get_or_create_channel(
                     CHANNEL_ORG_CHAT,
                     social_distance=SOCIAL_PROFESSIONAL,
@@ -389,11 +447,8 @@ class Session:
             return True
         return False
 
-    def route_message(self, message, last_receiver_name=None):
-        """Determine the next receiver for message; honour 'Name, prompt', 'Name: prompt', and '@Name prompt' directed syntax."""
-        directed_receiver = None
-        remaining_prompt = message
-
+    def _parse_directed(self, message):
+        """Return (participant_key, remaining_prompt) for directed syntax, else (None, message)."""
         if isinstance(message, str) and message:
             import re as _re
             m = _re.match(r"^@?([a-zA-Z0-9_\s]+?)\s*[:,]\s*(.*)$", message)
@@ -403,8 +458,50 @@ class Session:
                 receiver_token = m.group(1).strip()
                 resolved_key = self._name_to_key.get(receiver_token.lower())
                 if resolved_key is not None:
-                    directed_receiver = resolved_key
-                    remaining_prompt = m.group(2).strip()
+                    return resolved_key, m.group(2).strip()
+        return None, message
+
+    def _is_due(self, name, now):
+        """Return True if participant name may take an undirected turn at now.
+
+        Outside headless mode only an unexpired wait blocks a turn.  Headless
+        mode also honours the off clock and the per-persona minimum interval.
+        """
+        role = self.participants.get(name)
+        if role is None:
+            return False
+        wu = getattr(role, "waiting_until", None)
+        if wu is not None and now < wu and not self._interrupt_wait_for_phase(role):
+            return False
+        if not self.headless:
+            return True
+        if getattr(role, "lifecycle_state", "active") != "active":
+            return False
+        if self._effective_clock_state() == "off":
+            return False
+        last = self._last_turn_at.get(name)
+        interval = _m.min_turn_interval_seconds
+        return not (last is not None and interval and now < last + timedelta(seconds=interval))
+
+    def route_message(self, message, last_receiver_name=None, receiver_name=None):
+        """Determine the next receiver for message; honour 'Name, prompt', 'Name: prompt', and '@Name prompt' directed syntax.
+
+        receiver_name forces an undirected delivery to that participant (used
+        by the headless scheduler for expired waits and due alarms).
+        """
+        if receiver_name is not None:
+            self.scheduler.observe(receiver_name)
+            self.event_stream.emit(
+                "message.routed",
+                self.run_id,
+                {
+                    "receiver": receiver_name,
+                    "directed": False,
+                },
+            )
+            return RoutedMessage(self.participants[receiver_name], message, False)
+
+        directed_receiver, remaining_prompt = self._parse_directed(message)
 
         if directed_receiver is not None:
             print(colored(f"// Directed to {directed_receiver}", "grey"))
@@ -446,15 +543,14 @@ class Session:
                     )
                     return RoutedMessage(self.participants[resolved_key], message, True)
 
-        now = datetime.now(timezone.utc)
+        now = self._now()
         tried: set = set()
         receiver_name = self.scheduler.next(last_receiver_name)
         while receiver_name not in tried:
             receiver = self.participants.get(receiver_name)
             if receiver is None:
                 break
-            wu = getattr(receiver, "waiting_until", None)
-            if wu is None or now >= wu or self._interrupt_wait_for_phase(receiver):
+            if self._is_due(receiver_name, now):
                 break
             tried.add(receiver_name)
             receiver_name = self.scheduler.next(receiver_name)
@@ -509,8 +605,7 @@ class Session:
             return message, []
         action_type = action.get("action")
         if action_type == "wait":
-            from datetime import timedelta
-            now = datetime.now(timezone.utc)
+            now = self._now()
             if sender is not None:
                 sender.waiting_until = now + timedelta(minutes=10)
                 sender.wait_started_turn = self.turns_completed
@@ -938,7 +1033,7 @@ class Session:
         if self.clock_state == "on":
             schedule = getattr(_m, "break_schedule", [])
             if schedule:
-                now = datetime.now(timezone.utc).astimezone().strftime("%H:%M")
+                now = self._now().astimezone().strftime("%H:%M")
                 for start, end in schedule:
                     if start <= now < end:
                         return "break"
@@ -960,6 +1055,7 @@ class Session:
         role.runtime_thinking = None
         effective_clock = self._effective_clock_state()
         role.runtime_clock_state = effective_clock
+        role.runtime_headless = self.headless
         _modulate_temperature(role, effective_clock)
         for name, participant in self.participants.items():
             if participant is role:
@@ -1032,23 +1128,23 @@ class Session:
                         return list(reversed(events))
         return list(reversed(events))
 
-    def step(self, message):
+    def step(self, message, sender=None, receiver_name=None):
         """Execute one turn: route message, run the agent, record the transcript entry."""
-        sender = self.last_receiver
+        sender = sender or self.last_receiver
         self.sync_scheduler_participants()
         _m.active_session_transcript_length = len(self.transcript)
-        routed = self.route_message(message, sender.name)
+        routed = self.route_message(message, sender.name, receiver_name=receiver_name)
         system_events = self.process_tool_instruction(message, sender=sender)
         if system_events:
             deliver_verified_tool_results(sender, system_events)
         self.sync_scheduler_participants()
         prompt = routed.prompt
-        now = datetime.now(timezone.utc)
+        now = self._now()
         wu = getattr(routed.receiver, "waiting_until", None)
         if wu is not None and now >= wu:
             wait_summary = self._build_wait_summary(routed.receiver)
             prompt = wait_summary + "\n\n" + prompt
-        reminders = due_alarm_reminders(routed.receiver)
+        reminders = due_alarm_reminders(routed.receiver, now=now)
         if reminders:
             prompt = "\n".join(reminders + [prompt])
         receiver_key = self._role_to_key.get(id(routed.receiver))
@@ -1113,11 +1209,17 @@ class Session:
     def run(self, initial_message=None, max_turns=None):
         """Run the session loop until max_turns is reached or a SystemExit is raised."""
         effective_max_turns = self.max_turns if max_turns is None else max_turns
-        last_response = (
-            initial_message
-            if initial_message is not None
-            else self.last_receiver.interact()
-        )
+        if self.headless:
+            # No stdin: the seed prompt is an input from outside, like any event.
+            if initial_message:
+                self.deliver(initial_message)
+            last_response = ""
+        else:
+            last_response = (
+                initial_message
+                if initial_message is not None
+                else self.last_receiver.interact()
+            )
         if last_response is None:
             last_response = ""
 
@@ -1125,7 +1227,26 @@ class Session:
         _loop_threshold = _m.loop_detect_threshold
         try:
             while effective_max_turns is None or self.turns_completed < effective_max_turns:
-                last_response = self.step(last_response)
+                if self.headless:
+                    turn = self._next_headless_turn(last_response, effective_max_turns is not None)
+                    if turn is None:
+                        break
+                    if turn is _SLEPT:
+                        continue
+                    message, sender, receiver_name = turn
+                    try:
+                        last_response = self.step(message, sender=sender, receiver_name=receiver_name)
+                    except Exception as e:
+                        if sender is self._external:
+                            self._inbox.appendleft(message)
+                        self._back_off(e)
+                        continue
+                    self._error_count = 0
+                    turn_at = self._now()
+                    self._turn_times.append(turn_at)
+                    self._last_turn_at[self._role_to_key.get(id(self.last_receiver))] = turn_at
+                else:
+                    last_response = self.step(last_response)
                 _normalized = " ".join((last_response or "").lower().split())
                 # Only count idle turns — if this turn had tool calls or directed
                 # routing, useful work is happening, so reset the window.
@@ -1160,12 +1281,16 @@ class Session:
         except SystemExit:
             print(colored("\nSession ended by CEO.", "yellow"))
             get_logger().write_event("session_ended")
+        if self._stop_requested:
+            print(colored(f"\nSession stopped ({self._stop_requested}).", "yellow"))
+            get_logger().write_event("session_stopped", reason=self._stop_requested)
 
         self.event_stream.emit(
             "session.completed",
             self.run_id,
             {
                 "turns_completed": self.turns_completed,
+                "stop_reason": self._stop_requested,
             },
         )
         if _m.memory_store is not None:
@@ -1175,6 +1300,182 @@ class Session:
                 pass
         self._embed_pending()
         return self
+
+    # --- headless input, wake-up and idle scheduling ---
+
+    def deliver(self, message):
+        """Queue an external input (event, task update, operator note) and wake the session.
+
+        Safe to call from another thread.  The input is offered to the next due
+        persona, or to the persona it addresses ('Name: ...'); it does not wake
+        a waiting persona otherwise.
+        """
+        self._inbox.append(message)
+        self.wake()
+
+    def wake(self):
+        """Interrupt an idle sleep so the scheduler re-evaluates who is due."""
+        self._wake_event.set()
+
+    def request_stop(self, reason="stop"):
+        """Ask the session to stop after the current turn; interrupts an idle sleep."""
+        self._stop_requested = reason
+        self.wake()
+
+    def set_clock_state(self, clock_state):
+        """Change the base clock state and wake the scheduler."""
+        if clock_state in {"on", "off", "break"}:
+            self.clock_state = clock_state
+            self.wake()
+
+    @contextmanager
+    def stop_on_signals(self, signums=(signal.SIGTERM,)):
+        """Route signums to request_stop while the block runs (main thread only)."""
+        previous = {}
+        try:
+            for signum in signums:
+                previous[signum] = signal.signal(
+                    signum, lambda num, _frame: self.request_stop(signal.Signals(num).name)
+                )
+        except ValueError:
+            pass  # not the main thread; rely on request_stop() instead
+        try:
+            yield self
+        finally:
+            for signum, handler in previous.items():
+                signal.signal(signum, handler)
+
+    def _next_headless_turn(self, last_response, finite):
+        """Pick the next headless turn as (message, sender, receiver_name), or sleep.
+
+        Returns None to end the session, _SLEPT after an idle sleep, or a turn
+        tuple.  A turn needs something to attend to: a queued input, a non-empty
+        reply to pass on, an expired wait or a due alarm.  Silence and rest end
+        a turn without forcing anyone else's.
+        """
+        self._wake_event.clear()
+        if self._stop_requested:
+            return None
+        now = self._now()
+        if self._backoff_until is not None and now < self._backoff_until:
+            return self._idle(now, self._backoff_until, "model_error_backoff", finite)
+        limit = _m.max_turns_per_hour
+        while self._turn_times and self._turn_times[0] <= now - timedelta(hours=1):
+            self._turn_times.popleft()
+        if limit and len(self._turn_times) >= limit:
+            return self._idle(now, self._turn_times[0] + timedelta(hours=1), "turn_budget", finite)
+        if self._effective_clock_state() == "off":
+            return self._idle(now, self._next_clock_change(now), "off_clock", finite)
+        self.sync_scheduler_participants()
+        due = [name for name in self.scheduler.participant_names if self._is_due(name, now)]
+        if self._inbox:
+            if due or self._parse_directed(self._inbox[0])[0] is not None:
+                return self._inbox.popleft(), self._external, None
+        elif (last_response or "").strip():
+            if due or self._parse_directed(last_response)[0] is not None:
+                return last_response, None, None
+        for name in due:
+            role = self.participants[name]
+            wu = getattr(role, "waiting_until", None)
+            alarm_at = next_alarm_at(role)
+            if (wu is not None and now >= wu) or (alarm_at is not None and now >= alarm_at):
+                return "", None, name
+        wake_at = min(
+            (t for t in self._persona_wake_times(now, last_response).values() if t is not None),
+            default=None,
+        )
+        clock_change = self._next_clock_change(now)
+        if clock_change is not None and (wake_at is None or clock_change < wake_at):
+            wake_at = clock_change
+        return self._idle(now, wake_at, "nothing_due" if due else "no_persona_due", finite)
+
+    def _persona_wake_times(self, now, last_response=""):
+        """Return {name: datetime or None}: when each persona next has a reason to take a turn."""
+        work_pending = bool(self._inbox) or bool((last_response or "").strip())
+        interval = timedelta(seconds=_m.min_turn_interval_seconds)
+        wake_times = {}
+        for name in self.scheduler.participant_names:
+            role = self.participants.get(name)
+            if role is None:
+                continue
+            wu = getattr(role, "waiting_until", None)
+            alarm_at = next_alarm_at(role)
+            reasons = [t for t in (wu, alarm_at) if t is not None]
+            if work_pending:
+                reasons.append(now)
+            ready = [now]
+            if wu is not None:
+                ready.append(wu)
+            last = self._last_turn_at.get(name)
+            if last is not None and interval:
+                ready.append(last + interval)
+            wake_times[name] = max(min(reasons), max(ready)) if reasons else None
+        return wake_times
+
+    def _next_clock_change(self, now):
+        """Return the next scheduled break boundary (local time) after now, or None."""
+        schedule = getattr(_m, "break_schedule", [])
+        if self.clock_state != "on" or not schedule:
+            return None
+        local = now.astimezone()
+        upcoming = []
+        for day in (0, 1):
+            date = local.date() + timedelta(days=day)
+            for window in schedule:
+                for hhmm in window:
+                    hour, minute = (int(part) for part in hhmm.split(":"))
+                    boundary = datetime.combine(date, dtime(hour, minute), tzinfo=local.tzinfo)
+                    if boundary > local:
+                        upcoming.append(boundary)
+        return min(upcoming) if upcoming else None
+
+    def _idle(self, now, wake_at, reason, finite):
+        """Sleep until wake_at (capped) or an external wake; return _SLEPT, or None to end.
+
+        A bounded session (max_turns set) with nothing scheduled ends instead of
+        waiting forever for an event.
+        """
+        if wake_at is None and finite:
+            self.event_stream.emit("session.idle_exit", self.run_id, {"reason": reason})
+            get_logger().write_event("session_idle_exit", reason=reason)
+            return None
+        seconds = None if wake_at is None else max(0.0, (wake_at - now).total_seconds())
+        cap = _m.idle_max_sleep_seconds
+        if cap and (seconds is None or seconds > cap):
+            seconds = cap
+        personas = {
+            name: (t.isoformat(timespec="seconds") if t is not None else None)
+            for name, t in self._persona_wake_times(now).items()
+        }
+        wake_iso = wake_at.isoformat(timespec="seconds") if wake_at is not None else None
+        self.event_stream.emit(
+            "session.sleeping",
+            self.run_id,
+            {"reason": reason, "seconds": seconds, "wake_at": wake_iso, "personas": personas},
+        )
+        get_logger().write_event("session_sleep", reason=reason, seconds=seconds, wake_at=wake_iso, personas=personas)
+        print(colored(
+            f"[idle] {reason}: sleeping {'until woken' if seconds is None else f'{seconds:.0f}s'}"
+            f" (next wake {wake_iso or 'on event'})",
+            "dark_grey",
+        ))
+        self._sleeper(seconds, self._wake_event)
+        return _SLEPT
+
+    def _back_off(self, error):
+        """Record a failed headless turn and schedule an exponential backoff."""
+        self._error_count += 1
+        delay = _m.error_backoff_seconds * (2 ** (self._error_count - 1))
+        cap = _m.idle_max_sleep_seconds or 300.0
+        delay = min(delay, cap)
+        self._backoff_until = self._now() + timedelta(seconds=delay)
+        self.event_stream.emit(
+            "session.model_error",
+            self.run_id,
+            {"error": str(error), "consecutive": self._error_count, "backoff_seconds": delay},
+        )
+        get_logger().write_event("model_error", error=str(error), consecutive=self._error_count, backoff_seconds=delay)
+        print(colored(f"[error] {error}; backing off {delay:.0f}s", "yellow"))
 
     def close(self):
         """Unsubscribe from the event stream to prevent memory leaks."""

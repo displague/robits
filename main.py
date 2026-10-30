@@ -191,6 +191,10 @@ def run_simulation(initial_message=None, max_turns=None):
     """Initialise the session, load tools, and run the simulation loop."""
     session = Session()
     load_tools(session.system)
+    if session.headless:
+        # SIGTERM stops after the current turn; run() then returns normally (exit 0).
+        with session.stop_on_signals():
+            return session.run(initial_message=initial_message, max_turns=max_turns)
     return session.run(initial_message=initial_message, max_turns=max_turns)
 
 
@@ -211,6 +215,11 @@ def parse_args(argv=None):
     parser.add_argument(
         "--no-log", action="store_true", help="Disable log file creation."
     )
+    parser.add_argument(
+        "--headless",
+        action="store_true",
+        help="Run without a stdin Human (also ROBITS_HEADLESS=1); JSONL events go to stderr unless --log is set.",
+    )
     return parser.parse_args(argv)
 
 
@@ -222,8 +231,18 @@ def main(argv=None):
     if hasattr(sys.stderr, "reconfigure"):
         sys.stderr.reconfigure(encoding="utf-8")
     args = parse_args(argv)
+    if getattr(args, "headless", False):
+        _config.headless = True
     if getattr(args, "no_log", False):
         run_simulation(initial_message=args.prompt, max_turns=args.turns)
+        return
+    if _config.headless and not args.log:
+        # Containers collect stdout/stderr; keep JSONL events off the stdout transcript.
+        set_logger(JsonlLogger(sys.stderr))
+        try:
+            run_simulation(initial_message=args.prompt, max_turns=args.turns)
+        finally:
+            set_logger(None)
         return
     log_path = Path(args.log) if args.log else _default_log_path()
     log_path.parent.mkdir(parents=True, exist_ok=True)
