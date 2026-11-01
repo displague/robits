@@ -388,7 +388,15 @@ def _apply_persona_tools(role, info):
         for grant in tools:
             if not isinstance(grant, str) or not grant.strip():
                 raise ValueError("tools entries must be non-empty strings")
-            normalized = _normalize_tool_grant(grant.strip())
+            grant = grant.strip()
+            if grant.startswith("mcp:"):
+                # Readable form for one MCP tool: mcp:<server>.<tool> -> its registry name.
+                from robits.runtime.mcp import registry_tool_name
+                server, _, remote = grant[4:].partition(".")
+                if not server or not remote or remote == "*":
+                    raise ValueError(f"{grant!r} must name one MCP tool as mcp:<server>.<tool>")
+                grant = registry_tool_name(server, remote)
+            normalized = _normalize_tool_grant(grant)
             if normalized not in ceiling:
                 ceiling.append(normalized)
         # Replaces the role's default grants rather than adding to them.

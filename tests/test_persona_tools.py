@@ -77,7 +77,7 @@ class PersonaToolTests(unittest.TestCase):
         return reply, calls
 
     def test_configured_tools_are_exactly_the_schemas_sent(self):
-        employee_dict = self.build(small={"tools": ["memory.search", "agent.think", WEATHER]})
+        employee_dict = self.build(small={"tools": ["memory.search", "agent.think", "mcp:example.weather-lookup"]})
         role = employee_dict["small"]
         reply, calls = self.generate(role, [chat_message("Done.")])
         self.assertEqual(reply, "Done.")
@@ -110,9 +110,11 @@ class PersonaToolTests(unittest.TestCase):
             employee_dict = main.build_employee_dict({
                 "bad": {"role": "SE", "tools": "memory.search"},
                 "worse": {"role": "SE", "max_tool_rounds": 0},
+                "vague": {"role": "SE", "tools": ["mcp:example.*"]},
             })
         self.assertNotIn("bad", employee_dict)
         self.assertNotIn("worse", employee_dict)
+        self.assertNotIn("vague", employee_dict)
 
     def test_bad_calls_get_a_corrective_message_and_the_turn_continues(self):
         employee_dict = self.build(small={"tools": ["memory.search", "agent.think"]})

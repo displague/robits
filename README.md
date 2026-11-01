@@ -99,13 +99,13 @@ Every model-backed role starts with broad default grants, which suits large host
   tools:
     - agent.think
     - memory.search
-    - mcp.t_weather_lookup_1a2b3c4d5e6f
+    - mcp:weather.lookup
   tool_budget: 3
   max_tool_rounds: 3
   memories: []
 ```
 
-- `tools` uses the grant syntax (exact names or `namespace.*`, dotted form) and **replaces** the role's default grants. Schemas are sent in list order. MCP tools use their registry names, as shown by `tools.list` (`mcp.t_<slug>_<hash>`, from `robits.runtime.mcp.registry_tool_name(server, tool)`); `mcp.*` selects every MCP tool. Listing an MCP tool gives the persona the `mcp` capability.
+- `tools` uses the grant syntax (exact names or `namespace.*`, dotted form) and **replaces** the role's default grants. Schemas are sent in list order. Name one MCP tool as `mcp:<server>.<tool>` (the server key from the MCP config and the tool's remote name); it resolves to the registry name `tools.list` shows (`mcp.t_<slug>_<hash>`), which also works. `mcp.*` selects every MCP tool. Listing an MCP tool gives the persona the `mcp` capability.
 - `tool_budget` caps how many tool schemas are sent per round (default `ROBITS_TOOL_BUDGET`). Tools past the budget stay granted but are not offered.
 - `max_tool_rounds` caps consecutive tool-call rounds per model call (default `ROBITS_MAX_TOOL_ROUNDS`).
 
