@@ -13,6 +13,15 @@ _XML_BLOCK_RE = re.compile(
     flags=re.DOTALL | re.IGNORECASE,
 )
 _PRIVATE_TASK_TOOLS = {"agent.focus", "agent.spawn", "agent.subtask", "agent.elicit"}
+# Call errors a model can fix by choosing another tool or other arguments.
+_CORRECTABLE_TOOL_ERRORS = (
+    "Error: Tool '",
+    "Error: Role '",
+    "Error: Invalid tool",
+    "Error: Missing args",
+    "Error: Unexpected args",
+    "Error: Tool arguments must",
+)
 _XML_QWEN_FN_RE = re.compile(
     r"<function=(?P<name>[^>]+)>\s*(?P<body>.*?)\s*</function>",
     flags=re.DOTALL,
@@ -163,7 +172,24 @@ def _extract_xml_tool_calls(text):
     return clean, extracted
 
 
-def _execute_tool_call(registry, role, tool_name, call_id, args, employee_dict):
+def _max_tool_rounds(role):
+    """Return the role's tool-round cap: its persona override or the global default."""
+    return getattr(role, "max_tool_rounds", None) or _m.max_tool_rounds
+
+
+def _correct_tool_error(role, offered, result):
+    """Append the offered tool names to a correctable call error for roles with configured tools.
+
+    Small models recover better from a short list of what they may call than
+    from a bare error. Roles without a ``tools:`` list keep the plain error.
+    """
+    if getattr(role, "tool_ceiling", None) is None or not str(result).startswith(_CORRECTABLE_TOOL_ERRORS):
+        return result
+    names = ", ".join(offered) if offered else "none"
+    return f"{result} Tools you may use: {names}."
+
+
+def _execute_tool_call(registry, role, tool_name, call_id, args, employee_dict, offered=()):
     """Execute one tool call and return the tool-result message dict.
 
     Handles event emission, result recording (skipped for agent.think), and
@@ -181,7 +207,7 @@ def _execute_tool_call(registry, role, tool_name, call_id, args, employee_dict):
     if getattr(role, "runtime_input_request", None):
         result = "Error: Task paused for parent input; retry this call after resuming."
     else:
-        result = registry.execute(tool_name, args, employee_dict, caller=role)
+        result = _correct_tool_error(role, offered, registry.execute(tool_name, args, employee_dict, caller=role))
     task_id = getattr(role, "runtime_task_id", None)
     if task_id:
         from robits.runtime.subtasks import get_manager
@@ -412,6 +438,7 @@ class ChatCompletionsProvider(ModelProvider):
         role.runtime_model = model
         employee_dict = getattr(role, "employee_dict", None)
         tools = self.registry.as_chat_completion_tools(role)
+        offered = [tool["function"]["name"] for tool in tools]
         kwargs = {
             "model": model,
             "messages": list(messages),
@@ -427,7 +454,7 @@ class ChatCompletionsProvider(ModelProvider):
             kwargs["tools"] = tools
             kwargs["tool_choice"] = "auto"
 
-        for _ in range(8):
+        for _ in range(_max_tool_rounds(role)):
             if getattr(role, "runtime_task_id", None):
                 role.runtime_model_rounds = getattr(role, "runtime_model_rounds", 0) + 1
                 if role.runtime_model_rounds > 32:
@@ -472,6 +499,7 @@ class ChatCompletionsProvider(ModelProvider):
                                 call_dict["id"],
                                 xc["arguments"],
                                 employee_dict,
+                                offered,
                             )
                             for call_dict, xc in zip(synth_calls, xml_calls)
                         )
@@ -503,11 +531,11 @@ class ChatCompletionsProvider(ModelProvider):
                     tool_results.append({
                         "role": "tool",
                         "tool_call_id": call_id,
-                        "content": f"Error: Invalid tool arguments JSON: {error}",
+                        "content": _correct_tool_error(role, offered, f"Error: Invalid tool arguments JSON: {error}"),
                     })
                     continue
                 tool_results.append(
-                    _execute_tool_call(self.registry, role, tool_name, call_id, args, employee_dict)
+                    _execute_tool_call(self.registry, role, tool_name, call_id, args, employee_dict, offered)
                 )
             kwargs["messages"] = kwargs["messages"] + tool_results
             if getattr(role, "runtime_input_request", None):
@@ -528,6 +556,7 @@ class ResponsesProvider(ModelProvider):
         role.runtime_model = model
         employee_dict = getattr(role, "employee_dict", None)
         tools = self.registry.as_responses_tools(role)
+        offered = [tool["name"] for tool in tools]
         kwargs = {
             "model": model,
             "input": messages,
@@ -547,7 +576,7 @@ class ResponsesProvider(ModelProvider):
 
         response = _with_model_retries(lambda: self.client.responses.create(**kwargs))
         _emit_token_usage_event(role, response)
-        for _ in range(8):
+        for _ in range(_max_tool_rounds(role)):
             function_calls = _response_function_calls(response)
             thinking = _extract_thinking_responses(response)
             if thinking:
@@ -574,16 +603,16 @@ class ResponsesProvider(ModelProvider):
                     payload["arguments"] = getattr(call, "arguments", "")
                     payload["error"] = f"Invalid tool arguments JSON: {error}"
                     _emit_role_tool_event(role, "tool_call.requested", payload)
-                    result = f"Error: Invalid tool arguments JSON: {error}"
+                    result = _correct_tool_error(role, offered, f"Error: Invalid tool arguments JSON: {error}")
                 else:
                     payload["arguments"] = args
                     _emit_role_tool_event(role, "tool_call.requested", payload)
-                    result = self.registry.execute(
+                    result = _correct_tool_error(role, offered, self.registry.execute(
                         tool_name,
                         args,
                         employee_dict,
                         caller=role,
-                    )
+                    ))
                 status_payload = {**payload, "result": result}
                 event_type = "tool_call.failed" if _tool_result_is_error(result) else "tool_call.executed"
                 _emit_role_tool_event(role, event_type, status_payload)

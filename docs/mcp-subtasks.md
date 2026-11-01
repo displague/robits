@@ -25,7 +25,8 @@ survive across processes if the server returns continuations or task handles.
 HTTP is preferred for long-running server tasks.
 
 Give a role the `mcp` capability and `mcp.*` grant (or individual tools selected
-from `tools.list`). Discovery loads tools/list pages lazily before the role's
+from `tools.list`). A persona's `tools:` list can name MCP tools directly; see
+Personas in the README. Discovery loads tools/list pages lazily before the role's
 first model invocation. Remote descriptions and inputSchema become ordinary
 OpenAI-compatible function tools for both Chat and Responses. Provider-safe
 names are stable hashes of server and remote tool names. Arguments and form
@@ -110,7 +111,8 @@ pause error and must be retried after resuming.
 At depth 2, agent.focus and agent.spawn are absent from exposed schemas and rejected by runtime
 execution. Set 0 to disable delegation. `ROBITS_SUBTASK_MAX_TASKS` defaults to 32
 per root/session, including completed tasks; each task has a cumulative budget
-of 32 model rounds across resumes, and each generate call permits 8 tool rounds.
+of 32 model rounds across resumes, and each generate call permits 8 tool rounds
+(`ROBITS_MAX_TOOL_ROUNDS`, or the parent persona's `max_tool_rounds`).
 Cancellation marks queued/waiting descendants cancelled. It cannot interrupt a
 synchronous model request already running. Private runtime events include
 creation, running, tool results, input requests/responses, completion and errors.

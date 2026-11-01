@@ -544,6 +544,23 @@ class ToolRegistry:
             get_manager().register(self, role)
         return [tool for tool in self._tools.values() if role_can_use_tool(role, tool)]
 
+    def offered_tools(self, role):
+        """Return the tools whose schemas are sent to role's model, ordered and capped by its tool budget.
+
+        A persona with a configured ``tools:`` list sees its tools in that order.
+        Tools beyond the budget stay granted but are not offered.
+        """
+        tools = self.tools_for_role(role)
+        ceiling = getattr(role, "tool_ceiling", None)
+        if ceiling:
+            def position(tool):
+                return next((i for i, grant in enumerate(ceiling) if _tool_grant_matches(tool.name, grant)), len(ceiling))
+            tools = sorted(tools, key=position)
+        budget = getattr(role, "tool_budget", None)
+        if budget is None:
+            budget = _m.tool_budget or None
+        return tools if budget is None else tools[:budget]
+
     def execute(self, name, args, employee_dict, caller=None):
         """Look up and invoke a tool, setting active_tool_caller for the duration."""
         try:
@@ -584,10 +601,10 @@ class ToolRegistry:
 
     def as_responses_tools(self, role=None):
         """Return all (or role-filtered) tools serialised for the Responses API."""
-        tools = self._tools.values() if role is None else self.tools_for_role(role)
+        tools = self._tools.values() if role is None else self.offered_tools(role)
         return [tool.as_responses_tool() for tool in tools]
 
     def as_chat_completion_tools(self, role=None):
         """Return all (or role-filtered) tools serialised for the Chat Completions API."""
-        tools = self._tools.values() if role is None else self.tools_for_role(role)
+        tools = self._tools.values() if role is None else self.offered_tools(role)
         return [tool.as_chat_completion_tool() for tool in tools]

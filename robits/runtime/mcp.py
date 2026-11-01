@@ -263,6 +263,14 @@ def make_transport(**options):
     return StdioTransport(**options) if "command" in options else HttpTransport(**options)
 
 
+def registry_tool_name(server, remote_name):
+    """Return the registry name for a remote tool, as used in grants and persona `tools:` lists."""
+    digest = hashlib.sha256(f"{server}:{remote_name}".encode()).hexdigest()[:12]
+    # Stable, collision resistant, <=64 byte provider name.
+    slug = re.sub(r"[^a-zA-Z0-9_]", "_", remote_name)[:20]
+    return f"mcp.t_{slug}_{digest}"
+
+
 def owner(role):
     return (getattr(role, "runtime_session_id", None),
             getattr(role, "runtime_role_name", None) or getattr(role, "name", "unknown"))
@@ -301,10 +309,7 @@ class MCPManager:
                 result = self.rpc(server, "tools/list", {"cursor": cursor} if cursor else {}, role)
                 for remote in result.get("tools", []):
                     original = remote["name"]
-                    digest = hashlib.sha256(f"{server}:{original}".encode()).hexdigest()[:12]
-                    # Stable, collision resistant, <=64 byte provider name.
-                    slug = re.sub(r"[^a-zA-Z0-9_]", "_", original)[:20]
-                    name = f"mcp.t_{slug}_{digest}"
+                    name = registry_tool_name(server, original)
                     schema = remote.get("inputSchema", {"type": "object", "properties": {}})
                     if schema.get("type") != "object":
                         raise ValueError("MCP tool inputSchema must be an object schema")
