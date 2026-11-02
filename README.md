@@ -203,7 +203,9 @@ python main.py --prompt "Ops, say hello to HR" --turns 1
 - Inputs come from `--prompt` (delivered as a message from `external`), alarms, and `Session.deliver()` for events from integrations. An input goes to the next due persona, or to the persona it addresses (`Name: ...`).
 - A turn happens only when there is something to attend to: a queued input, a non-empty reply to pass on, an expired wait, or a due alarm. Silence or `agent.wait` ends a turn without forcing anyone else's.
 - When nobody is due (all waiting, off the clock, minimum interval, turn budget, or error backoff) the session sleeps until the earliest wake time or until `Session.deliver()`, `wake()`, `set_clock_state()` or SIGTERM. A run with `--turns` that has nothing scheduled ends; without `--turns` it runs until stopped.
-- SIGTERM stops after the current turn and exits 0. JSONL events go to stderr unless `--log` is given.
+- Addressed inputs and replies remain queued while their recipient rests or is inside its minimum interval. Other eligible recipients can still receive their inputs; delivery does not require a reply.
+- Model failures before any tool attempt retry the same recipient with its reminder and input intact. After a tool attempt, a failed turn exits with `session.error_exit` and `tool_outcome_requires_inspection`, avoiding automatic replay of uncertain side effects.
+- On POSIX, SIGTERM stops after the current turn and exits 0. Windows callers should use `Session.request_stop()` for cooperative shutdown; `os.kill(SIGTERM)` terminates the process directly. JSONL events go to stderr unless `--log` is given.
 
 Capture to a log file while watching:
 

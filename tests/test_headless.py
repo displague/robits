@@ -185,6 +185,103 @@ class HeadlessRunTests(HeadlessTestCase):
 
 
 class IdleSchedulingTests(HeadlessTestCase):
+    def test_retry_stays_with_original_recipient(self):
+        a = FakeRole("A", [RuntimeError("down"), ""])
+        b = FakeRole("B", ["unused"])
+        session = self.session({"A": a, "B": b})
+        self.run_quiet(session, initial_message="hello", max_turns=1)
+        self.assertEqual(len(a.received), 2)
+        self.assertEqual(b.received, [])
+
+    def test_directed_retry_keeps_prompt_and_reply_address(self):
+        a = FakeRole("A", ["B: question", ""])
+        b = FakeRole("B", [RuntimeError("down"), "answer"])
+        c = FakeRole("C", ["unused"])
+        session = self.session({"A": a, "B": b, "C": c})
+        self.run_quiet(session, initial_message="A: start", max_turns=3)
+        self.assertEqual(len(b.received), 2)
+        self.assertTrue(session.transcript[1].directed)
+        self.assertIn("answer", a.received[1][1])
+        self.assertEqual(c.received, [])
+
+    def test_failed_alarm_delivery_is_retried_with_reminder(self):
+        a = FakeRole("A", [RuntimeError("down"), ""])
+        a.alarms.append(main.Alarm("alarm", "A", "remember this", self.clock.now.isoformat()))
+        session = self.session({"A": a})
+        self.run_quiet(session, max_turns=1)
+        self.assertEqual(len(a.received), 2)
+        self.assertTrue(all("remember this" in prompt for _, prompt in a.received))
+        self.assertEqual(a.alarms[0].status, "completed")
+
+    def test_input_arriving_during_turn_does_not_drop_reply(self):
+        session = None
+        class DeliveringRole(FakeRole):
+            def interact(self, sender=None, prompt=None):
+                session.deliver("C: incoming")
+                return super().interact(sender, prompt)
+        a = DeliveringRole("A", ["B: keep this"])
+        b, c = FakeRole("B", [""]), FakeRole("C", [""])
+        session = self.session({"A": a, "B": b, "C": c})
+        self.run_quiet(session, initial_message="A: hello", max_turns=3)
+        self.assertIn("keep this", b.received[0][1])
+        self.assertEqual(b.received[0][0], "A")
+        self.assertIn("incoming", c.received[0][1])
+
+    def test_paused_persona_with_overdue_alarm_does_not_spin(self):
+        a = FakeRole("A")
+        a.lifecycle_state = "paused"
+        a.alarms.append(main.Alarm("alarm", "A", "later", self.clock.now.isoformat()))
+        session = self.session({"A": a})
+        self.run_quiet(session, max_turns=1)
+        self.assertEqual(self.sleeper.calls, [])
+        self.assertEqual(a.received, [])
+
+    def test_failure_after_tool_attempt_stops_without_replaying(self):
+        session = None
+        effects = []
+        class ToolRole(FakeRole):
+            def interact(self, sender=None, prompt=None):
+                effects.append("created")
+                session.event_stream.emit("tool_call.requested", session.run_id, {"tool_name": "create"})
+                raise RuntimeError("continuation failed")
+        a = ToolRole("A")
+        session = self.session({"A": a})
+        self.run_quiet(session, initial_message="create once", max_turns=1)
+        self.assertEqual(effects, ["created"])
+        self.assertIsNotNone(session.failed)
+        self.assertEqual(self.events(session, "session.error_exit")[0].payload["reason"],
+                         "tool_outcome_requires_inspection")
+
+    def test_directed_input_honours_wait_without_spinning_on_other_ready_persona(self):
+        a = FakeRole("A", [""])
+        b = FakeRole("B", ["unused"])
+        a.waiting_until = self.clock.now + timedelta(seconds=60)
+        session = self.session({"A": a, "B": b})
+        self.run_quiet(session, initial_message="A: hello", max_turns=1)
+        self.assertEqual(self.sleeper.calls, [60.0])
+        self.assertEqual(len(a.received), 1)
+        self.assertEqual(b.received, [])
+
+    def test_directed_input_honours_minimum_interval(self):
+        a = FakeRole("A", [""])
+        session = self.session({"A": a})
+        session._last_turn_at["A"] = self.clock.now
+        with patch.object(_config, "min_turn_interval_seconds", 60.0):
+            self.run_quiet(session, initial_message="A: hello", max_turns=1)
+        self.assertEqual(self.sleeper.calls, [60.0])
+
+    def test_resting_recipient_does_not_block_other_queued_input(self):
+        a = FakeRole("A", ["unused"])
+        b = FakeRole("B", [""])
+        a.waiting_until = self.clock.now + timedelta(seconds=60)
+        session = self.session({"A": a, "B": b})
+        session.deliver("A: later")
+        session.deliver("B: hello")
+        self.run_quiet(session, max_turns=1)
+        self.assertEqual(a.received, [])
+        self.assertIn("hello", b.received[0][1])
+        self.assertEqual(list(session._inbox), ["A: later"])
+
     def test_all_waiting_sleeps_until_earliest_wake_without_model_calls(self):
         a = FakeRole("A", ["ok"])
         b = FakeRole("B", ["unused"])
@@ -225,8 +322,8 @@ class IdleSchedulingTests(HeadlessTestCase):
         self.run_quiet(session)
 
         self.assertEqual(self.clock.now, start)  # woken before any time passed
-        self.assertEqual(len(a.received), 1)
-        self.assertIn("ping", a.received[0][1])
+        self.assertEqual(len(a.received), 0)  # delivery does not interrupt chosen rest
+        self.assertEqual(list(session._inbox), ["A: ping"])
         completed = self.events(session, "session.completed")[0].payload
         self.assertEqual(completed["stop_reason"], "test")
 
@@ -349,6 +446,7 @@ class IdleSchedulingTests(HeadlessTestCase):
         self.assertEqual(raised.exception.code, 1)
 
 
+@unittest.skipIf(os.name == "nt", "Windows os.kill(SIGTERM) terminates without Python signal handlers")
 class SigtermTests(HeadlessTestCase):
     def test_sigterm_interrupts_a_real_idle_sleep(self):
         a = FakeRole("A")

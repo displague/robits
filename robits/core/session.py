@@ -5,6 +5,7 @@ import threading
 import time
 from collections import deque
 from contextlib import contextmanager
+from copy import deepcopy
 from dataclasses import dataclass, field
 from datetime import datetime, time as dtime, timedelta, timezone
 from uuid import uuid4
@@ -219,6 +220,9 @@ class Session:
         self._wake_event = threading.Event()
         self._stop_requested = None
         self._inbox = deque()
+        self._pending_replies = deque()
+        self._retry_turn = None
+        self._attempt_receiver = None
         self._external = ExternalInput()
         self._last_turn_at: dict = {}
         self._turn_times = deque()
@@ -491,16 +495,18 @@ class Session:
         by the headless scheduler for expired waits and due alarms).
         """
         if receiver_name is not None:
+            target, remaining = self._parse_directed(message)
+            directed = target == receiver_name
             self.scheduler.observe(receiver_name)
             self.event_stream.emit(
                 "message.routed",
                 self.run_id,
                 {
                     "receiver": receiver_name,
-                    "directed": False,
+                    "directed": directed,
                 },
             )
-            return RoutedMessage(self.participants[receiver_name], message, False)
+            return RoutedMessage(self.participants[receiver_name], remaining if directed else message, directed)
 
         directed_receiver, remaining_prompt = self._parse_directed(message)
 
@@ -1135,12 +1141,17 @@ class Session:
         self.sync_scheduler_participants()
         _m.active_session_transcript_length = len(self.transcript)
         routed = self.route_message(message, sender.name, receiver_name=receiver_name)
+        self._attempt_receiver = self._role_to_key.get(id(routed.receiver))
+        event_start = len(self.event_stream.events())
         system_events = self.process_tool_instruction(message, sender=sender)
         if system_events:
             deliver_verified_tool_results(sender, system_events)
         self.sync_scheduler_participants()
         prompt = routed.prompt
         now = self._now()
+        alarm_snapshot = deepcopy(getattr(routed.receiver, "alarms", []))
+        wait_snapshot = {key: getattr(routed.receiver, key, None) for key in
+                         ("waiting_until", "wait_started_turn", "wait_clock_state")}
         wu = getattr(routed.receiver, "waiting_until", None)
         if wu is not None and now >= wu:
             wait_summary = self._build_wait_summary(routed.receiver)
@@ -1173,8 +1184,14 @@ class Session:
             response = routed.receiver.interact(sender.name, model_prompt)
         except Exception:
             # A failed turn is retried; drop the prompt it recorded so the retry doesn't repeat it.
-            if history is not None:
+            attempted = any(event.event_type in {"tool_call.requested", "tool.executed"}
+                            for event in self.event_stream.events()[event_start:])
+            if history is not None and not attempted:
                 del history[history_length:]
+            if not attempted:
+                routed.receiver.alarms = alarm_snapshot
+                for key, value in wait_snapshot.items():
+                    setattr(routed.receiver, key, value)
             raise
         self._decay_agent_adjustments(routed.receiver.name)
         response = "" if response is None else response
@@ -1238,17 +1255,24 @@ class Session:
         try:
             while effective_max_turns is None or self.turns_completed < effective_max_turns:
                 if self.headless:
-                    turn = self._next_headless_turn(last_response, effective_max_turns is not None)
+                    turn = self._next_headless_turn("", effective_max_turns is not None)
                     if turn is None:
                         break
                     if turn is _SLEPT:
                         continue
                     message, sender, receiver_name = turn
+                    sender = sender or self.last_receiver
+                    event_start = len(self.event_stream.events())
                     try:
                         last_response = self.step(message, sender=sender, receiver_name=receiver_name)
                     except Exception as e:
-                        if sender is self._external:
-                            self._inbox.appendleft(message)
+                        if any(event.event_type in {"tool_call.requested", "tool.executed"}
+                               for event in self.event_stream.events()[event_start:]):
+                            self.failed = e
+                            self.event_stream.emit("session.error_exit", self.run_id, {
+                                "error": str(e), "reason": "tool_outcome_requires_inspection"})
+                            break
+                        self._retry_turn = (message, sender, self._attempt_receiver)
                         if self._back_off(e):
                             break
                         continue
@@ -1256,6 +1280,15 @@ class Session:
                     turn_at = self._now()
                     self._turn_times.append(turn_at)
                     self._last_turn_at[self._role_to_key.get(id(self.last_receiver))] = turn_at
+                    if (last_response or "").strip():
+                        pending_reply = last_response
+                        # Freeze a DM return address before another input changes
+                        # the transcript used by route_message's reply shortcut.
+                        if self._parse_directed(pending_reply)[0] is None and self.transcript[-1].directed:
+                            target = self._name_to_key.get(self.transcript[-1].sender.lower())
+                            if target is not None:
+                                pending_reply = f"{target}: {pending_reply}"
+                        self._pending_replies.append((pending_reply, self.last_receiver))
                 else:
                     last_response = self.step(last_response)
                 _normalized = " ".join((last_response or "").lower().split())
@@ -1380,11 +1413,23 @@ class Session:
             return self._idle(now, self._next_clock_change(now), "off_clock", finite)
         self.sync_scheduler_participants()
         due = [name for name in self.scheduler.participant_names if self._is_due(name, now)]
-        if self._inbox:
-            if due or self._parse_directed(self._inbox[0])[0] is not None:
-                return self._inbox.popleft(), self._external, None
-        elif (last_response or "").strip():
-            if due or self._parse_directed(last_response)[0] is not None:
+        if self._retry_turn is not None:
+            if self._retry_turn[2] in due:
+                turn, self._retry_turn = self._retry_turn, None
+                return turn
+        for index, message in enumerate(self._inbox):
+            target = self._parse_directed(message)[0]
+            if (target in due) if target is not None else bool(due):
+                del self._inbox[index]
+                return message, self._external, None
+        for index, (message, sender) in enumerate(self._pending_replies):
+            target = self._parse_directed(message)[0]
+            if (target in due) if target is not None else bool(due):
+                del self._pending_replies[index]
+                return message, sender, None
+        if (last_response or "").strip():
+            target = self._parse_directed(last_response)[0]
+            if (target in due) if target is not None else bool(due):
                 return last_response, None, None
         for name in due:
             role = self.participants[name]
@@ -1403,17 +1448,24 @@ class Session:
 
     def _persona_wake_times(self, now, last_response=""):
         """Return {name: datetime or None}: when each persona next has a reason to take a turn."""
-        work_pending = bool(self._inbox) or bool((last_response or "").strip())
+        pending = list(self._inbox)
+        pending.extend(message for message, _sender in self._pending_replies)
+        if (last_response or "").strip():
+            pending.append(last_response)
+        targets = [self._parse_directed(message)[0] for message in pending]
         interval = timedelta(seconds=_m.min_turn_interval_seconds)
         wake_times = {}
         for name in self.scheduler.participant_names:
             role = self.participants.get(name)
             if role is None:
                 continue
+            if getattr(role, "lifecycle_state", "active") != "active":
+                wake_times[name] = None
+                continue
             wu = getattr(role, "waiting_until", None)
             alarm_at = next_alarm_at(role)
             reasons = [t for t in (wu, alarm_at) if t is not None]
-            if work_pending:
+            if None in targets or name in targets or (self._retry_turn is not None and self._retry_turn[2] == name):
                 reasons.append(now)
             ready = [now]
             if wu is not None:
