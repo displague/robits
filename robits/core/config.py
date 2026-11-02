@@ -177,6 +177,21 @@ class Config:
         self.break_schedule = _parse_break_schedule(env.get("ROBITS_BREAK_SCHEDULE", ""))
         self.tool_proposals_file = env.get("ROBITS_TOOL_PROPOSALS_FILE", "var/tool_proposals.json")
 
+        # --- headless / idle scheduling ---
+        self.headless = env.get("ROBITS_HEADLESS", "").strip().lower() in {"1", "true", "yes", "on"}
+        self.min_turn_interval_seconds = max(
+            0.0, float(env.get("ROBITS_MIN_TURN_INTERVAL_SECONDS", "0"))
+        )
+        self.max_turns_per_hour = max(0, int(env.get("ROBITS_MAX_TURNS_PER_HOUR", "0")))
+        self.idle_max_sleep_seconds = max(
+            0.0, float(env.get("ROBITS_IDLE_MAX_SLEEP_SECONDS", "300"))
+        )
+        self.error_backoff_seconds = max(
+            0.0, float(env.get("ROBITS_ERROR_BACKOFF_SECONDS", "5"))
+        )
+        # Consecutive failed turns before a headless run gives up (0 = retry forever).
+        self.max_consecutive_errors = max(0, int(env.get("ROBITS_MAX_CONSECUTIVE_ERRORS", "5")))
+
         # --- misc ---
         self.builtin_search_url = env.get("ROBITS_SEARCH_URL", "").strip()
         self._reasoning_effort_env = (

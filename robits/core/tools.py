@@ -111,14 +111,16 @@ def role_can_use_tool(role, tool):
     """Return True if role has the required capabilities and a matching tool grant."""
     if getattr(role, "runtime_task_depth", 0) >= _m.subtask_max_depth and tool.name in {"agent.spawn", "agent.focus"}:
         return False
-    if role.__class__.__name__ == "Human":
+    # Headless runs have no human operator; nobody gets the CEO's blanket access.
+    headless = _m.headless or getattr(role, "runtime_headless", False)
+    if role.__class__.__name__ == "Human" and not headless:
         return True
     role_name = getattr(role, "name", None)
-    if role_name == "CEO":
+    if role_name == "CEO" and not headless:
         return True
     try:
         from robits.core.roles import get_default_human_name
-        if role_name == get_default_human_name():
+        if role_name == get_default_human_name() and not headless:
             return True
     except Exception:
         pass
