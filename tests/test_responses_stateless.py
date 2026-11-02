@@ -4,7 +4,7 @@ import unittest
 from types import SimpleNamespace
 
 from robits.core.config import responses_stateful
-from robits.core.providers import ResponsesProvider
+from robits.core.providers import ChatCompletionsProvider, ResponsesProvider
 
 TOOL = {"type": "function", "name": "lookup", "description": "Look up a fact.",
         "parameters": {"type": "object", "properties": {"q": {"type": "string"}}}}
@@ -114,6 +114,44 @@ class ResponsesStatefulSettingTests(unittest.TestCase):
     def test_explicit_setting_wins(self):
         self.assertTrue(responses_stateful("true", "http://127.0.0.1:1234/v1/"))
         self.assertFalse(responses_stateful("off", None))
+
+
+class ObjectArgumentsTests(unittest.TestCase):
+    """Some local servers send tool-call arguments as a JSON object instead of a string."""
+
+    def test_chat_completions_accepts_object_arguments(self):
+        call = SimpleNamespace(id="c1", type="function",
+                               function=SimpleNamespace(name="lookup", arguments={"q": "alpha"}))
+        first = SimpleNamespace(content="", tool_calls=[call], model_dump=lambda: {
+            "role": "assistant", "content": "", "tool_calls": [
+                {"id": "c1", "type": "function", "function": {"name": "lookup", "arguments": {"q": "alpha"}}}]})
+        final = SimpleNamespace(content="Found.", tool_calls=None)
+        sent = []
+
+        def create(**kwargs):
+            sent.append(kwargs)
+            message = first if len(sent) == 1 else final
+            return SimpleNamespace(choices=[SimpleNamespace(message=message)])
+
+        registry = FakeRegistry()
+        registry.as_chat_completion_tools = lambda role: [{"type": "function", "function": TOOL}]
+        client = SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=create)))
+        reply = ChatCompletionsProvider(client, registry).generate(make_role(), "small-model", "CEO", list(USER))
+        self.assertEqual(reply, "Found.")
+        self.assertEqual(registry.executed, [("lookup", {"q": "alpha"})])
+        echoed = sent[1]["messages"][1]["tool_calls"][0]["function"]["arguments"]
+        self.assertEqual(echoed, '{"q": "alpha"}', "arguments go back as a JSON string")
+
+    def test_responses_accepts_object_arguments(self):
+        first = SimpleNamespace(id="r1", output_text="", output=[SimpleNamespace(
+            type="function_call", call_id="c1", name="lookup", arguments={"q": "alpha"})])
+        client, calls = make_client([first, text_response("r2", "Found.")])
+        registry = FakeRegistry()
+        reply = ResponsesProvider(client, registry, stateful=False).generate(
+            make_role(), "small-model", "CEO", list(USER))
+        self.assertEqual(reply, "Found.")
+        self.assertEqual(registry.executed, [("lookup", {"q": "alpha"})])
+        self.assertEqual(calls[1]["input"][1]["arguments"], '{"q": "alpha"}')
 
 
 if __name__ == "__main__":

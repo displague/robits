@@ -56,6 +56,35 @@ def _response_text(response):
     return "".join(chunks)
 
 
+def _parse_tool_arguments(raw):
+    """Parse tool-call arguments. The spec sends a JSON string; some local servers send an object."""
+    if isinstance(raw, dict):
+        return raw
+    args = json.loads(raw or "{}")
+    if not isinstance(args, dict):
+        raise json.JSONDecodeError("arguments must be a JSON object", str(raw), 0)
+    return args
+
+
+def _arguments_text(raw):
+    """Return tool-call arguments as the JSON string the spec expects."""
+    return raw if isinstance(raw, str) and raw else json.dumps(raw or {})
+
+
+def _assistant_message(message):
+    """Dump an assistant message for the next request, with arguments as JSON strings."""
+    # warnings=False: the SDK types arguments as str and warns when a server sent an object.
+    try:
+        dumped = message.model_dump(warnings=False)
+    except TypeError:
+        dumped = message.model_dump()
+    for call in dumped.get("tool_calls") or []:
+        function = call.get("function") or {}
+        if "arguments" in function:
+            function["arguments"] = _arguments_text(function["arguments"])
+    return dumped
+
+
 def _response_function_calls(response):
     """Return all function_call output items from a Responses API response."""
     calls = []
@@ -511,13 +540,13 @@ class ChatCompletionsProvider(ModelProvider):
                 return content
             if employee_dict is None:
                 return "Error: Tool call requested but no employee dictionary is available."
-            kwargs["messages"] = list(kwargs["messages"]) + [message.model_dump()]
+            kwargs["messages"] = list(kwargs["messages"]) + [_assistant_message(message)]
             tool_results = []
             for call in tool_calls:
                 tool_name = call.function.name
                 call_id = call.id
                 try:
-                    args = json.loads(call.function.arguments or "{}")
+                    args = _parse_tool_arguments(call.function.arguments)
                 except json.JSONDecodeError as error:
                     payload = {
                         "agent": getattr(role, "name", None),
@@ -558,7 +587,7 @@ def _replay_items(response):
                 "type": "function_call",
                 "call_id": getattr(item, "call_id", None) or getattr(item, "id", ""),
                 "name": getattr(item, "name", ""),
-                "arguments": getattr(item, "arguments", "") or "{}",
+                "arguments": _arguments_text(getattr(item, "arguments", "")),
             })
         elif kind == "message":
             text = "".join(getattr(part, "text", "") or "" for part in getattr(item, "content", []) or [])
@@ -631,7 +660,7 @@ class ResponsesProvider(ModelProvider):
                     "tool_name": tool_name,
                 }
                 try:
-                    args = json.loads(getattr(call, "arguments", "") or "{}")
+                    args = _parse_tool_arguments(getattr(call, "arguments", ""))
                 except json.JSONDecodeError as error:
                     payload["arguments"] = getattr(call, "arguments", "")
                     payload["error"] = f"Invalid tool arguments JSON: {error}"

@@ -260,6 +260,8 @@ python run_local.py --prompt "SE, do you have experience with Python or cooking?
 
 Tested with `granite4.1:3b` for tool calling; `granite-embedding:latest` and `embeddinggemma:latest` for embeddings. Models are pulled with `ollama pull <name>`.
 
+Some OpenAI-compatible servers (for example RKLLama on Rockchip NPUs) return tool-call `arguments` as a JSON object instead of a string. Robits accepts both and sends them back as strings.
+
 ### LM Studio
 
 LM Studio's Responses API is stateful and honours `previous_response_id`. The defaults work; add `ROBITS_RESPONSES_STATEFUL=true` to send only the new tool results each round:
