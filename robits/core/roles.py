@@ -176,6 +176,10 @@ CRITICAL ROLE & COMPLIANCE RULES:
             "memory.list_digests",
             "memory.expand_digest",
         }
+        # Set from a persona's `tools:` list: replaces allowed_tools and caps runtime grants.
+        self.tool_ceiling = None
+        self.tool_budget = None
+        self.max_tool_rounds = None
         self.alarms = []
         self.sandbox_metadata = SandboxMetadata.disabled(self.name)
         self.runtime_event_stream = None
@@ -373,6 +377,43 @@ _ROLE_CLASS_MAP = {
 }
 
 
+def _apply_persona_tools(role, info):
+    """Apply a persona's optional tools, tool_budget and max_tool_rounds; raise ValueError if malformed."""
+    from robits.core.tools import _normalize_tool_grant
+    tools = info.get("tools")
+    if tools is not None:
+        if isinstance(tools, str) or not isinstance(tools, list):
+            raise ValueError("tools must be a list of tool names or namespace.* patterns")
+        ceiling = []
+        for grant in tools:
+            if not isinstance(grant, str) or not grant.strip():
+                raise ValueError("tools entries must be non-empty strings")
+            grant = grant.strip()
+            if grant.startswith("mcp:"):
+                # Readable form for one MCP tool: mcp:<server>.<tool> -> its registry name.
+                from robits.runtime.mcp import registry_tool_name
+                server, _, remote = grant[4:].partition(".")
+                if not server or not remote or remote == "*":
+                    raise ValueError(f"{grant!r} must name one MCP tool as mcp:<server>.<tool>")
+                grant = registry_tool_name(server, remote)
+            normalized = _normalize_tool_grant(grant)
+            if normalized not in ceiling:
+                ceiling.append(normalized)
+        # Replaces the role's default grants rather than adding to them.
+        role.tool_ceiling = tuple(ceiling)
+        role.allowed_tools = set(ceiling)
+        # Selecting MCP tools by name is the opt-in; discovery needs the capability.
+        if any(grant.startswith("mcp.") for grant in ceiling):
+            role.capabilities = set(role.capabilities) | {"mcp"}
+    for key, minimum in (("tool_budget", 0), ("max_tool_rounds", 1)):
+        value = info.get(key)
+        if value is None:
+            continue
+        if isinstance(value, bool) or not isinstance(value, int) or value < minimum:
+            raise ValueError(f"{key} must be an integer >= {minimum}")
+        setattr(role, key, value)
+
+
 def build_employee_dict(persona_map=None, headless=False):
     """Construct and return the set of organisation participants.
 
@@ -416,6 +457,15 @@ def build_employee_dict(persona_map=None, headless=False):
                 instance.preprompt_work = info["preprompt_work"]
             if info.get("preprompt_personal"):
                 instance.preprompt_personal = info["preprompt_personal"]
+            try:
+                _apply_persona_tools(instance, info)
+            except ValueError as error:
+                import logging
+                logging.warning(
+                    "robits: persona %r has invalid tool settings (%s) — skipping",
+                    username, error,
+                )
+                continue
             employee_dict[username] = instance
         if not headless and not any(isinstance(v, Human) for v in employee_dict.values()):
             human_name = get_default_human_name()

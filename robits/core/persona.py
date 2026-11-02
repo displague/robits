@@ -9,7 +9,11 @@ _DEFAULT_PERSONAS_FILE = "personas.yaml"
 
 
 def load_personas(path: str | None = None) -> dict[str, dict]:
-    """Load personas.yaml and return {username: {role, full_name, entries}}.
+    """Load personas.yaml and return {username: {role, full_name, entries, ...}}.
+
+    Optional per-persona tool settings (``tools``, ``tool_budget``,
+    ``max_tool_rounds``) are passed through as-is (None when absent) and
+    validated by ``build_employee_dict``.
 
     Supports both the new schema (username/role/full_name) and the legacy
     schema (agent) for backwards compatibility.  Returns an empty dict if
@@ -49,6 +53,9 @@ def load_personas(path: str | None = None) -> dict[str, dict]:
                 "entries": valid_entries,
                 "preprompt_work": item.get("preprompt_work"),
                 "preprompt_personal": item.get("preprompt_personal"),
+                "tools": item.get("tools"),
+                "tool_budget": item.get("tool_budget"),
+                "max_tool_rounds": item.get("max_tool_rounds"),
             }
             continue
 
@@ -61,6 +68,9 @@ def load_personas(path: str | None = None) -> dict[str, dict]:
                 "entries": valid_entries,
                 "preprompt_work": item.get("preprompt_work"),
                 "preprompt_personal": item.get("preprompt_personal"),
+                "tools": item.get("tools"),
+                "tool_budget": item.get("tool_budget"),
+                "max_tool_rounds": item.get("max_tool_rounds"),
             }
     return result
 

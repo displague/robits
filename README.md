@@ -88,6 +88,29 @@ Seeding is idempotent: if any memory record already exists for the agent, the se
 
 Configure the file path with `ROBITS_PERSONAS_FILE` (defaults to `personas.yaml` in the working directory).
 
+### Tool allowlists and budgets
+
+Every model-backed role starts with broad default grants, which suits large hosted models. Small local models do better with a handful of tools. A persona can declare its own:
+
+```yaml
+- username: sam_small
+  full_name: Sam Small
+  role: SE
+  tools:
+    - agent.think
+    - memory.search
+    - mcp:weather.lookup
+  tool_budget: 3
+  max_tool_rounds: 3
+  memories: []
+```
+
+- `tools` uses the grant syntax (exact names or `namespace.*`, dotted form) and **replaces** the role's default grants. Schemas are sent in list order. Name one MCP tool as `mcp:<server>.<tool>` (the server key from the MCP config and the tool's remote name); it resolves to the registry name `tools.list` shows (`mcp.t_<slug>_<hash>`), which also works. `mcp.*` selects every MCP tool. Listing an MCP tool gives the persona the `mcp` capability.
+- `tool_budget` caps how many tool schemas are sent per round (default `ROBITS_TOOL_BUDGET`). Tools past the budget stay granted but are not offered.
+- `max_tool_rounds` caps consecutive tool-call rounds per model call (default `ROBITS_MAX_TOOL_ROUNDS`).
+
+With a `tools` list, a call to an unknown or disallowed tool, or with bad arguments, gets an error that ends with the tool names the persona may use. The error uses up a round. `tools.grant` and other runtime grants cannot widen the persona beyond its list unless an `operator` role (or the human) makes the grant. Personas without `tools` keep the default grants and plain errors. Subtasks inherit the budget and round cap.
+
 ### @mention detection
 
 When an org-chat message contains `@username` or any recognisable form of an agent's name (first name, last name, full name), the mentioned agent receives a lightweight note prepended to their next turn's prompt. The scheduler is not interrupted; mentions stay in the normal rotation.
@@ -157,6 +180,8 @@ For local models with embedding support, `sqlite-vec` is included in `requiremen
 | `ROBITS_LOOP_DETECT_THRESHOLD` | `3` | Consecutive identical idle responses (no tool calls, no directed routing) before the session halts with `session.loop_detected`; must be an integer ≥ 2 |
 | `ROBITS_PROVIDER_API` | `responses` | `responses` or `chat` / `chat_completions` |
 | `ROBITS_MAX_CONTEXT_TOKENS` | `0` (unlimited) | Trim conversation history to this token budget before each model call (~4 chars/token). Useful for small-context local models (e.g. `3500` for 4k-context models) |
+| `ROBITS_MAX_TOOL_ROUNDS` | `8` | Consecutive tool-call rounds per model call; personas can override with `max_tool_rounds` |
+| `ROBITS_TOOL_BUDGET` | `0` (unlimited) | Most tool schemas sent per round; personas can override with `tool_budget` |
 | `ROBITS_MEMORY_DB` | `~/.local/share/robits/memory.db` | SQLite path for memory storage |
 | `ROBITS_CLOCK_STATE` | `on` | Base clock state: `on`, `break`, or `off` |
 | `ROBITS_BREAK_SCHEDULE` | — | Scheduled break windows, e.g. `12:00-13:00,15:00-15:30` |

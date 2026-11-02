@@ -103,6 +103,9 @@ class Config:
             self.loop_detect_threshold = 3
         self.provider_api = env.get("ROBITS_PROVIDER_API", "responses").strip().lower()
         self.max_context_tokens = max(0, int(env.get("ROBITS_MAX_CONTEXT_TOKENS", "0")))
+        # Tool-calling limits; personas may override both (see personas.yaml).
+        self.max_tool_rounds = max(1, int(env.get("ROBITS_MAX_TOOL_ROUNDS", "8")))
+        self.tool_budget = max(0, int(env.get("ROBITS_TOOL_BUDGET", "0")))
 
         # --- concurrency / retry ---
         self.max_parallelism = max(1, int(env.get("ROBITS_MAX_PARALLELISM", "1")))

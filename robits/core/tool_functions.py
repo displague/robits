@@ -13,6 +13,7 @@ from robits.core.lifecycle import (
 )
 from robits.core.tools import (
     _normalize_tool_grant,
+    _tool_grant_matches,
     _coerce_json_object,
     _normalize_tool_parameters,
     _coerce_string_list,
@@ -117,6 +118,14 @@ def work_todo_add(employee_dict, title, content=None):
         return json.dumps({"error": str(e)})
 
 
+def _caller_is_operator():
+    """Return True for trusted runtime code (no tool caller), the human, or a role with operator capability."""
+    caller = _m.active_tool_caller
+    if caller is None or caller.__class__.__name__ == "Human":
+        return True
+    return "operator" in getattr(caller, "capabilities", set())
+
+
 def grant_tool_access(employee_dict, role_name, tool_name, granted_by=None):
     """Add tool_name to a role's allowed_tools set; return a status string or error."""
     try:
@@ -133,6 +142,12 @@ def grant_tool_access(employee_dict, role_name, tool_name, granted_by=None):
         if not any(tool.name.startswith(f"{namespace}.") for tool in _m.tool_registry._tools.values()):
             return f"Error: Tool namespace '{namespace}' not found."
     role = employee_dict[normalized_name]
+    ceiling = getattr(role, "tool_ceiling", None)
+    if ceiling is not None and not _caller_is_operator() and not any(
+        _tool_grant_matches(normalized_tool_name, grant) for grant in ceiling
+    ):
+        return (f"Error: '{normalized_tool_name}' is outside the configured tools for role "
+                f"'{normalized_name}'; only an operator can widen them.")
     role.allowed_tools.add(normalized_tool_name)
     actor_text = f" by {granted_by}" if granted_by else ""
     return f"Granted tool access '{normalized_tool_name}' to role '{normalized_name}'{actor_text}."
@@ -919,6 +934,9 @@ def agent_spawn(employee_dict, task, tools=None, model=None, defer=False):
         capabilities=getattr(_m.active_tool_caller, "capabilities", set()),
         employee_dict=employee_dict,
         max_tokens=getattr(_m.active_tool_caller, "max_tokens", 400),
+        tool_ceiling=getattr(parent, "tool_ceiling", None),
+        tool_budget=getattr(parent, "tool_budget", None),
+        max_tool_rounds=getattr(parent, "max_tool_rounds", None),
         temperature=0.3,
         top_p=0.9,
         runtime_event_stream=getattr(parent, "runtime_event_stream", None),
