@@ -17,10 +17,10 @@ spec:
       ports:
         - {protocol: UDP, port: 53}
         - {protocol: TCP, port: 53}
-    # Model endpoint: an in-cluster Ollama in namespace "llm".
+    # Model endpoint: an in-cluster Ollama in namespace "ollama".
     - to:
         - namespaceSelector:
-            matchLabels: {kubernetes.io/metadata.name: llm}
+            matchLabels: {kubernetes.io/metadata.name: ollama}
       ports:
         - {protocol: TCP, port: 11434}
     # MCP servers outside the cluster, e.g.:
