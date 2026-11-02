@@ -544,15 +544,46 @@ class ChatCompletionsProvider(ModelProvider):
         return "Error: Too many consecutive tool-call rounds."
 
 
-class ResponsesProvider(ModelProvider):
-    """ModelProvider backed by the OpenAI Responses API (stateful multi-turn)."""
+def _replay_items(response):
+    """Turn a response's output into input items for a backend that keeps no state.
 
-    def __init__(self, api_client, registry=None):
+    Function calls and assistant text are kept; reasoning items are dropped because
+    non-OpenAI servers may reject them and they carry no state the model needs.
+    """
+    items = []
+    for item in getattr(response, "output", []) or []:
+        kind = getattr(item, "type", None)
+        if kind == "function_call":
+            items.append({
+                "type": "function_call",
+                "call_id": getattr(item, "call_id", None) or getattr(item, "id", ""),
+                "name": getattr(item, "name", ""),
+                "arguments": getattr(item, "arguments", "") or "{}",
+            })
+        elif kind == "message":
+            text = "".join(getattr(part, "text", "") or "" for part in getattr(item, "content", []) or [])
+            if text:
+                items.append({"role": "assistant", "content": text})
+    return items
+
+
+class ResponsesProvider(ModelProvider):
+    """ModelProvider backed by the OpenAI Responses API.
+
+    With a stateful backend, tool rounds chain previous_response_id and send only the new
+    function_call_output items. Otherwise (ROBITS_RESPONSES_STATEFUL, see config) each round
+    replays the whole conversation, as ChatCompletionsProvider does.
+    """
+
+    stateful = None  # None: use the configured ROBITS_RESPONSES_STATEFUL
+
+    def __init__(self, api_client, registry=None, stateful=None):
         self.client = api_client
         self.registry = registry if registry is not None else _m.tool_registry
+        self.stateful = stateful
 
     def generate(self, role, model, sender, messages):
-        """Run a responses agentic loop, chaining previous_response_id for state continuity."""
+        """Run a responses agentic loop until a text reply is produced."""
         role.runtime_model = model
         employee_dict = getattr(role, "employee_dict", None)
         tools = self.registry.as_responses_tools(role)
@@ -576,6 +607,7 @@ class ResponsesProvider(ModelProvider):
 
         response = _with_model_retries(lambda: self.client.responses.create(**kwargs))
         _emit_token_usage_event(role, response)
+        conversation = list(messages)
         round_limit = _max_tool_rounds(role)
         for round_index in range(round_limit):
             function_calls = _response_function_calls(response)
@@ -628,19 +660,15 @@ class ResponsesProvider(ModelProvider):
             if round_index + 1 >= round_limit:
                 break
             previous_response_id = getattr(response, "id", None)
-            if previous_response_id:
-                response = _with_model_retries(
-                    lambda: self.client.responses.create(
-                        model=model,
-                        input=outputs,
-                        previous_response_id=previous_response_id,
-                    )
-                )
-                _emit_token_usage_event(role, response)
+            stateful = self.stateful if self.stateful is not None else getattr(_m, "responses_stateful", True)
+            if stateful and previous_response_id:
+                # Tools and sampling settings are not inherited from the previous response.
+                request = {**kwargs, "input": outputs, "previous_response_id": previous_response_id}
             else:
-                kwargs["input"] = messages + outputs
-                response = _with_model_retries(lambda: self.client.responses.create(**kwargs))
-                _emit_token_usage_event(role, response)
+                conversation = conversation + _replay_items(response) + outputs
+                request = {**kwargs, "input": conversation}
+            response = _with_model_retries(lambda: self.client.responses.create(**request))
+            _emit_token_usage_event(role, response)
         return "Error: Too many consecutive tool-call rounds."
 
 

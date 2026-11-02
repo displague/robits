@@ -179,6 +179,7 @@ For local models with embedding support, `sqlite-vec` is included in `requiremen
 | `ROBITS_SPAWN_MODEL` | `ROBITS_CHEAP_MODEL` | Default model for `agent.spawn` sub-agents; overrides `ROBITS_CHEAP_MODEL` for spawned executors (e.g. `functiongemma-270m-it`) |
 | `ROBITS_LOOP_DETECT_THRESHOLD` | `3` | Consecutive identical idle responses (no tool calls, no directed routing) before the session halts with `session.loop_detected`; must be an integer ≥ 2 |
 | `ROBITS_PROVIDER_API` | `responses` | `responses` or `chat` / `chat_completions` |
+| `ROBITS_RESPONSES_STATEFUL` | `auto` | Whether the Responses backend honours `previous_response_id`. `auto` assumes yes only for OpenAI's API (no `OPENAI_BASE_URL`, or `api.openai.com`); otherwise each tool round resends the whole conversation. Set `true` for a stateful local server such as LM Studio to send less per round |
 | `ROBITS_MAX_CONTEXT_TOKENS` | `0` (unlimited) | Trim conversation history to this token budget before each model call (~4 chars/token). Useful for small-context local models (e.g. `3500` for 4k-context models) |
 | `ROBITS_MAX_TOOL_ROUNDS` | `8` | Consecutive tool-call rounds per model call; personas can override with `max_tool_rounds` |
 | `ROBITS_TOOL_BUDGET` | `0` (unlimited) | Most tool schemas sent per round; personas can override with `tool_budget` |
@@ -244,7 +245,7 @@ python main.py --prompt "Ops, say hello to HR" --turns 1 --log run.log
 
 ### Ollama
 
-Ollama exposes an OpenAI-compatible Responses API at `/v1/responses` (since v0.13.3), but it is **non-stateful**: `previous_response_id` is silently ignored. This breaks the within-turn tool-call continuation in `ResponsesProvider`. Use `ROBITS_PROVIDER_API=chat` with Ollama:
+Ollama exposes an OpenAI-compatible Responses API at `/v1/responses` (since v0.13.3), but it is **non-stateful**: `previous_response_id` is silently ignored. With the default `ROBITS_RESPONSES_STATEFUL=auto`, robits treats any non-OpenAI base URL as stateless and resends the whole conversation on each tool round, so both `ROBITS_PROVIDER_API=responses` and `chat` work with Ollama. Chat Completions is the more widely supported surface across Ollama versions and other local servers:
 
 ```bash
 OPENAI_BASE_URL=http://127.0.0.1:11434/v1/ \
@@ -261,7 +262,7 @@ Tested with `granite4.1:3b` for tool calling; `granite-embedding:latest` and `em
 
 ### LM Studio
 
-LM Studio's Responses API is stateful and honours `previous_response_id`, so the default `ROBITS_PROVIDER_API=responses` works correctly:
+LM Studio's Responses API is stateful and honours `previous_response_id`. The defaults work; add `ROBITS_RESPONSES_STATEFUL=true` to send only the new tool results each round:
 
 ```bash
 OPENAI_BASE_URL=http://127.0.0.1:1234/v1/ \
