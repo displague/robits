@@ -1,0 +1,60 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: robits
+spec:
+  replicas: 1  # one session per data volume
+  strategy:
+    type: Recreate  # never two pods on the same SQLite DB
+  template:
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+        seccompProfile: {type: RuntimeDefault}
+      terminationGracePeriodSeconds: 60  # SIGTERM stops after the current turn
+      containers:
+        - name: robits
+          image: robits
+          # Add args: ["--prompt", "..."] to seed a first message.
+          envFrom:
+            - configMapRef: {name: robits-config}
+          env:
+            - name: OPENAI_API_KEY
+              valueFrom: {secretKeyRef: {name: robits-secrets, key: OPENAI_API_KEY}}
+            - {name: ROBITS_PERSONAS_FILE, value: /config/personas.yaml}
+            - {name: ROBITS_MCP_CONFIG, value: /secrets/mcp.json}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: {drop: [ALL]}
+          resources:
+            requests: {cpu: 50m, memory: 128Mi}
+            limits: {memory: 512Mi}
+          livenessProbe:
+            # Checks the headless loop's heartbeat; never calls the model. max-age must
+            # exceed ROBITS_IDLE_MAX_SLEEP_SECONDS (300) plus your slowest model call.
+            exec:
+              command: [python, -m, robits.health, --max-age, "900"]
+            initialDelaySeconds: 30
+            periodSeconds: 60
+            timeoutSeconds: 10
+          volumeMounts:
+            - {name: data, mountPath: /data}
+            - {name: config, mountPath: /config, readOnly: true}
+            - {name: secrets, mountPath: /secrets, readOnly: true}
+            - {name: tmp, mountPath: /tmp}
+      volumes:
+        - name: data
+          persistentVolumeClaim: {claimName: robits-data}
+        - name: config
+          configMap: {name: robits-config}
+        - name: secrets
+          secret:
+            secretName: robits-secrets
+            items: [{key: mcp.json, path: mcp.json}]
+        - name: tmp
+          emptyDir: {sizeLimit: 64Mi}

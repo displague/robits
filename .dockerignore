@@ -1,0 +1,13 @@
+.git
+.github
+.venv
+**/__pycache__
+*.db
+*.sqlite*
+var/
+data/
+logs/
+tests/
+docs/
+deploy/
+scripts/

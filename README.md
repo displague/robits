@@ -186,6 +186,7 @@ For local models with embedding support, `sqlite-vec` is included in `requiremen
 | `ROBITS_CLOCK_STATE` | `on` | Base clock state: `on`, `break`, or `off` |
 | `ROBITS_BREAK_SCHEDULE` | — | Scheduled break windows, e.g. `12:00-13:00,15:00-15:30` |
 | `ROBITS_PERSONAS_FILE` | `personas.yaml` | Path to persona seed file |
+| `ROBITS_TOOLS_FILE` | bundled `tools.yaml` | Path to the tool catalogue, e.g. a read-only mounted copy |
 | `ROBITS_EMBEDDING_MODEL` | — | Embedding model name; disables semantic search when unset |
 | `ROBITS_EMBEDDING_BASE_URL` | `OPENAI_BASE_URL` | Embedding endpoint (can differ from chat endpoint) |
 | `ROBITS_EMBEDDING_API_KEY` | `OPENAI_API_KEY` | Embedding API key |
@@ -205,6 +206,7 @@ For local models with embedding support, `sqlite-vec` is included in `requiremen
 | `ROBITS_IDLE_MAX_SLEEP_SECONDS` | `300` | Headless: longest single idle sleep before re-checking (0 = no cap) |
 | `ROBITS_ERROR_BACKOFF_SECONDS` | `5` | Headless: first backoff after a failed turn; doubles per consecutive failure |
 | `ROBITS_MAX_CONSECUTIVE_ERRORS` | `5` | Headless: consecutive failed turns before the run gives up and exits 1 (`0` retries forever) |
+| `ROBITS_HEARTBEAT_FILE` | — | Headless: file touched on every loop pass; `python -m robits.health` checks its age (liveness probe) |
 | `ROBITS_LOCATION` | — | Default location string for agent context |
 | `ROBITS_TIMEZONE` | — | Default timezone (e.g. `America/New_York`) |
 
@@ -231,6 +233,8 @@ python main.py --prompt "Ops, say hello to HR" --turns 1
 - Addressed inputs and replies remain queued while their recipient rests or is inside its minimum interval. Other eligible recipients can still receive their inputs; delivery does not require a reply.
 - Model failures before any tool attempt retry the same recipient with its reminder and input intact. After a tool attempt, a failed turn exits with `session.error_exit` and `tool_outcome_requires_inspection`, avoiding automatic replay of uncertain side effects.
 - On POSIX, SIGTERM stops after the current turn and exits 0. Windows callers should use `Session.request_stop()` for cooperative shutdown; `os.kill(SIGTERM)` terminates the process directly. JSONL events go to stderr unless `--log` is given.
+
+To run headless in a container or on Kubernetes, see [docs/deploy.md](docs/deploy.md).
 
 Capture to a log file while watching:
 
