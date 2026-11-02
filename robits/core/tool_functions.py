@@ -23,10 +23,10 @@ from robits.runtime.tool_proposals import ToolProposalStore
 from robits.core.io import get_logger
 
 
-def workspace_list(employee_dict, agent_name, path=""):
+def workspace_list(employee_dict, agent_name, path="", reason=None):
     """List files in an agent's workspace directory at path."""
     del employee_dict
-    normalized_name, error = _workspace_agent_name(agent_name)
+    normalized_name, error = _workspace_agent_name(agent_name, "list", path, reason)
     if error:
         return error
     try:
@@ -35,10 +35,10 @@ def workspace_list(employee_dict, agent_name, path=""):
         return f"Error: {e}"
 
 
-def workspace_read(employee_dict, agent_name, path, max_bytes=65536):
+def workspace_read(employee_dict, agent_name, path, max_bytes=65536, reason=None):
     """Read a file from an agent's workspace, returning content up to max_bytes."""
     del employee_dict
-    normalized_name, error = _workspace_agent_name(agent_name)
+    normalized_name, error = _workspace_agent_name(agent_name, "read", path, reason)
     if error:
         return error
     try:
@@ -51,10 +51,10 @@ def workspace_read(employee_dict, agent_name, path, max_bytes=65536):
         return f"Error: {e}"
 
 
-def workspace_write(employee_dict, agent_name, path, content, append=False):
+def workspace_write(employee_dict, agent_name, path, content, append=False, reason=None):
     """Write (or append) content to a file in an agent's workspace."""
     del employee_dict
-    normalized_name, error = _workspace_agent_name(agent_name)
+    normalized_name, error = _workspace_agent_name(agent_name, "write", path, reason)
     if error:
         return error
     try:
@@ -63,16 +63,27 @@ def workspace_write(employee_dict, agent_name, path, content, append=False):
         return f"Error: {e}"
 
 
-def workspace_delete(employee_dict, agent_name, path):
+def workspace_delete(employee_dict, agent_name, path, reason=None):
     """Delete a file from an agent's workspace."""
     del employee_dict
-    normalized_name, error = _workspace_agent_name(agent_name)
+    normalized_name, error = _workspace_agent_name(agent_name, "delete", path, reason)
     if error:
         return error
     try:
         return json.dumps(_m.agent_workspace_store.delete(normalized_name, path), sort_keys=True)
     except Exception as e:
         return f"Error: {e}"
+
+
+def access_audit_list(employee_dict, limit=20, owner=None, caller=None):
+    """Return recent cross-persona workspace accesses for operator review (#140)."""
+    del employee_dict
+    from robits.core.access_audit import recent
+    try:
+        entries = recent(limit=limit, owner=owner or None, caller=caller or None)
+    except (TypeError, ValueError) as e:
+        return f"Error: {e}"
+    return json.dumps({"entries": entries, "count": len(entries)}, sort_keys=True)
 
 
 def org_chat_read(employee_dict, limit=20):
@@ -644,12 +655,12 @@ def builtin_url_fetch(employee_dict, url, max_chars=16000):
     return raw[:limit]
 
 
-def builtin_file_search(employee_dict, agent_name, query, path="", max_results=10):
+def builtin_file_search(employee_dict, agent_name, query, path="", max_results=10, reason=None):
     """Search an agent's workspace files for lines matching query."""
     del employee_dict
     if not isinstance(query, str) or not query.strip():
         return "Error: Search query must be a non-empty string."
-    normalized_name, error = _workspace_agent_name(agent_name)
+    normalized_name, error = _workspace_agent_name(agent_name, "search", path, reason)
     if error:
         return error
     workspace = _m.agent_workspace_store.workspace_root(normalized_name)
@@ -685,7 +696,7 @@ def builtin_file_search(employee_dict, agent_name, query, path="", max_results=1
     return json.dumps(results, sort_keys=True)
 
 
-def builtin_shell_run(employee_dict, agent_name, command, timeout=30):
+def builtin_shell_run(employee_dict, agent_name, command, timeout=30, reason=None):
     """Run a shell command in the agent's workspace; requires the 'shell' capability."""
     del employee_dict
     import subprocess as _subprocess
@@ -695,7 +706,7 @@ def builtin_shell_run(employee_dict, agent_name, command, timeout=30):
         return f"Error: Role '{caller_label}' does not have the 'shell' capability."
     if not isinstance(command, str) or not command.strip():
         return "Error: Command must be a non-empty string."
-    normalized_name, error = _workspace_agent_name(agent_name)
+    normalized_name, error = _workspace_agent_name(agent_name, "shell", "", reason)
     if error:
         return error
     workspace = _m.agent_workspace_store.workspace_root(normalized_name)
@@ -1064,6 +1075,7 @@ SANDBOX_GLOBALS = {
     "builtin_image_generation": builtin_image_generation,
     "agent_think": agent_think,
     "agent_wait": agent_wait,
+    "access_audit_list": access_audit_list,
     "agent_spawn": agent_spawn,
     "subtask_control": subtask_control,
     "subtask_elicit": subtask_elicit,

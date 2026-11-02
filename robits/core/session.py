@@ -1163,6 +1163,10 @@ class Session:
         mentions = self._detect_mentions(message)
         if receiver_key and receiver_key in mentions:
             prompt = f"[Note: you were mentioned in this message]\n{prompt}"
+        from robits.core.access_audit import pop_notice
+        access_notice = pop_notice(receiver_key, getattr(routed.receiver, "name", None))
+        if access_notice:
+            prompt = f"{access_notice}\n{prompt}"
         raw_prompt = prepend_verified_tool_results(
             prompt,
             system_events,

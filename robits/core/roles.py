@@ -83,7 +83,9 @@ def interact(self, model, sender, message):
     turn_action_template = getattr(self, "turn_action_template", "")
     
     guidance = _ON_CLOCK_GUIDANCE if effective_clock == "on" else _OFF_CLOCK_GUIDANCE
-    system_content = dynamic_preprompt + turn_action_template + guidance + format_agent_context(self)
+    from robits.core.access_audit import access_duty_note
+    system_content = (dynamic_preprompt + turn_action_template + guidance
+                      + access_duty_note(self) + format_agent_context(self))
 
     if self.name not in self.conversation_history:
         self.conversation_history[self.name] = [
@@ -269,7 +271,7 @@ class Ops(Role):
             self.__class__.__name__, role_description, employee_dict, group_template_additions
         )
         self.capabilities = {"operator"}
-        self.allowed_tools.update({"tools.*"})
+        self.allowed_tools.update({"tools.*", "org.access_audit"})
 
 
 class HR(Role):

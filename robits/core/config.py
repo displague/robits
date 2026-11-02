@@ -216,6 +216,10 @@ class Config:
         self.subtask_manager = None
         self.mcp_manager = None
         self.mcp_config_path = env.get("ROBITS_MCP_CONFIG", "").strip()
+        # Cross-persona workspace access (#140): audit log outside every workspace, owner notices.
+        self.access_audit_file = env.get("ROBITS_ACCESS_AUDIT_FILE", "").strip() or "var/access_audit.jsonl"
+        self.access_notice_mode = env.get("ROBITS_ACCESS_NOTICE", "immediate").strip().lower() or "immediate"
+        self.access_notices = {}
         self.active_session_transcript_length = 0
 
 
