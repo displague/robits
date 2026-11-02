@@ -68,6 +68,9 @@ def load_personas(path: str | None = None) -> dict[str, dict]:
                 "entries": valid_entries,
                 "preprompt_work": item.get("preprompt_work"),
                 "preprompt_personal": item.get("preprompt_personal"),
+                "tools": item.get("tools"),
+                "tool_budget": item.get("tool_budget"),
+                "max_tool_rounds": item.get("max_tool_rounds"),
             }
     return result
 

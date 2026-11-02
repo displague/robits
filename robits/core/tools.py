@@ -114,11 +114,12 @@ def role_can_use_tool(role, tool):
     if role.__class__.__name__ == "Human":
         return True
     role_name = getattr(role, "name", None)
-    if role_name == "CEO":
+    configured = getattr(role, "tool_ceiling", None) is not None
+    if role_name == "CEO" and not configured:
         return True
     try:
         from robits.core.roles import get_default_human_name
-        if role_name == get_default_human_name():
+        if role_name == get_default_human_name() and not configured:
             return True
     except Exception:
         pass
@@ -559,7 +560,7 @@ class ToolRegistry:
         budget = getattr(role, "tool_budget", None)
         if budget is None:
             budget = _m.tool_budget or None
-        return tools if budget is None else tools[:budget]
+        return tools if not budget else tools[:budget]
 
     def execute(self, name, args, employee_dict, caller=None):
         """Look up and invoke a tool, setting active_tool_caller for the duration."""

@@ -157,6 +157,47 @@ class PersonaToolTests(unittest.TestCase):
                                              for _ in range(config.max_tool_rounds + 1)])
         self.assertEqual(len(calls), config.max_tool_rounds)
 
+    def test_zero_persona_budget_overrides_global_cap_as_unlimited(self):
+        employee_dict = self.build(small={"tools": ["agent.think", "memory.search"], "tool_budget": 0})
+        with patch.object(config, "tool_budget", 1):
+            _, calls = self.generate(employee_dict["small"], [chat_message("Done.")])
+        self.assertEqual(len(calls[0]["tools"]), 2)
+
+    def test_configured_ceo_name_cannot_bypass_tool_grants(self):
+        from robits.core.roles import _apply_persona_tools
+        role = main.SoftwareEngineer({})
+        role.name = "CEO"
+        _apply_persona_tools(role, {"tools": []})
+        tool = main.ToolDefinition(name="builtin.secret", description="", parameters={},
+                                   args=[], required_args=[], func=lambda: "secret")
+        self.assertFalse(main.role_can_use_tool(role, tool))
+
+    def test_legacy_persona_preserves_tool_settings_and_validation(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "personas.yaml"
+            path.write_text("- agent: SE\n  tools: []\n  tool_budget: 1\n  max_tool_rounds: 1\n  memories: []\n")
+            role = main.build_employee_dict(load_personas(str(path)))["SE"]
+            self.assertEqual(role.allowed_tools, set())
+            self.assertEqual((role.tool_budget, role.max_tool_rounds), (1, 1))
+            path.write_text("- agent: SE\n  tools: invalid\n  memories: []\n")
+            with self.assertLogs(level="WARNING"):
+                self.assertNotIn("SE", main.build_employee_dict(load_personas(str(path))))
+
+    def test_responses_round_cap_bounds_requests_without_discarding_a_final_reply(self):
+        employee_dict = self.build(small={"tools": ["agent.think"], "max_tool_rounds": 1})
+        role = employee_dict["small"]
+        requests = []
+        def create(**kwargs):
+            requests.append(kwargs)
+            return SimpleNamespace(id="r1", output=[SimpleNamespace(
+                type="function_call", call_id="c1", name="no_such_tool", arguments="{}")])
+        client = SimpleNamespace(responses=SimpleNamespace(create=create))
+        reply = ResponsesProvider(client, main.tool_registry).generate(role, "fake", "CEO", [])
+        self.assertEqual(reply, "Error: Too many consecutive tool-call rounds.")
+        self.assertEqual(len(requests), 1)
+        client.responses.create = lambda **kwargs: SimpleNamespace(id="r2", output=[], output_text="Done.")
+        self.assertEqual(ResponsesProvider(client, main.tool_registry).generate(role, "fake", "CEO", []), "Done.")
+
     def test_grants_cannot_widen_configured_tools_without_an_operator(self):
         employee_dict = self.build(small={"tools": ["memory.*"]})
         hr = main.HR(employee_dict)

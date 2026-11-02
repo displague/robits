@@ -576,7 +576,8 @@ class ResponsesProvider(ModelProvider):
 
         response = _with_model_retries(lambda: self.client.responses.create(**kwargs))
         _emit_token_usage_event(role, response)
-        for _ in range(_max_tool_rounds(role)):
+        round_limit = _max_tool_rounds(role)
+        for round_index in range(round_limit):
             function_calls = _response_function_calls(response)
             thinking = _extract_thinking_responses(response)
             if thinking:
@@ -624,6 +625,8 @@ class ResponsesProvider(ModelProvider):
                         "output": result,
                     }
                 )
+            if round_index + 1 >= round_limit:
+                break
             previous_response_id = getattr(response, "id", None)
             if previous_response_id:
                 response = _with_model_retries(
