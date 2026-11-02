@@ -10,6 +10,9 @@
 - `parse_tool_instruction` extracts the first valid JSON object or array from a model response.
 - `Session` owns a run ID, participants, turn count, system tool handling, and transcript entries.
 - `RoundRobinScheduler` provides deterministic time-share recipient selection when a message is not directed.
+- In headless mode `Session` has no `Human`; it takes inputs through `deliver()` and
+  sleeps when no persona is due (waits, alarms, off clock, minimum interval, turn
+  budget, error backoff). The clock and sleeper are injectable for tests.
 - `RuntimeEventStream` emits headless session, routing, message, tool, and
   thought events for tests and future TUI observers.
 - Role lifecycle state is tracked in memory for active, paused, and retired

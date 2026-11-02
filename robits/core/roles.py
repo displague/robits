@@ -414,13 +414,15 @@ def _apply_persona_tools(role, info):
         setattr(role, key, value)
 
 
-def build_employee_dict(persona_map=None):
+def build_employee_dict(persona_map=None, headless=False):
     """Construct and return the set of organisation participants.
 
     When ``persona_map`` is provided ({username: {role, full_name, entries}}),
     only the listed personas are instantiated — the persona file defines the
     complete cast.  CEO (Human) is added automatically if not listed.
     Without a persona_map the default cast (CEO, Ops, SE, HR, Samandriel) is used.
+    With ``headless`` no stdin-reading Human is created: listed Human personas
+    are skipped and no CEO is added.
     """
     employee_dict = {}
 
@@ -436,6 +438,12 @@ def build_employee_dict(persona_map=None):
                 logging.warning(
                     "robits: persona %r references unknown role %r — skipping",
                     username, role_key,
+                )
+                continue
+            if headless and RoleClass is Human:
+                import logging
+                logging.warning(
+                    "robits: headless mode skips human persona %r", username,
                 )
                 continue
             instance = RoleClass(employee_dict)
@@ -459,7 +467,7 @@ def build_employee_dict(persona_map=None):
                 )
                 continue
             employee_dict[username] = instance
-        if not any(isinstance(v, Human) for v in employee_dict.values()):
+        if not headless and not any(isinstance(v, Human) for v in employee_dict.values()):
             human_name = get_default_human_name()
             ceo = Human()
             ceo.name = human_name
@@ -473,10 +481,11 @@ def build_employee_dict(persona_map=None):
                 for key in all_keys:
                     ch.setdefault(key, [])
     else:
-        human_name = get_default_human_name()
-        ceo = Human()
-        ceo.name = human_name
-        employee_dict[human_name] = ceo
+        if not headless:
+            human_name = get_default_human_name()
+            ceo = Human()
+            ceo.name = human_name
+            employee_dict[human_name] = ceo
         employee_dict["Ops"] = Ops(employee_dict)
         employee_dict["SE"] = SoftwareEngineer(employee_dict)
         employee_dict["HR"] = HR(employee_dict)
