@@ -43,8 +43,8 @@ an `operation_id` and `inputRequests`. Call `mcp.operation` with matching respon
 IDs to continue. A form response is `{ "action": "accept", "content": {...} }`,
 or action `decline`/`cancel`. Schema correctness does not establish user consent:
 agents must ask their parent for information or authorization they lack.
-URL elicitation and deprecated sampling/roots are not advertised. No OAuth login
-or automatic credential acquisition is implemented.
+URL elicitation and deprecated sampling/roots are not advertised. HTTP servers
+that require OAuth are covered in [OAuth for MCP servers](mcp-oauth.md).
 
 Remote tasks return the same operation handle. `mcp.operation` without responses
 polls tasks/get; responses use tasks/update; cancel uses tasks/cancel. Polling

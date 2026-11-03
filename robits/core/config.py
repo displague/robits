@@ -243,6 +243,8 @@ class Config:
         self.access_audit_file = env.get("ROBITS_ACCESS_AUDIT_FILE", "").strip() or "var/access_audit.jsonl"
         self.access_notice_mode = env.get("ROBITS_ACCESS_NOTICE", "immediate").strip().lower() or "immediate"
         self.access_notices = {}
+        # OAuth credentials for MCP servers (#138): outside every agent workspace, mode 0600.
+        self.credentials_dir = env.get("ROBITS_CREDENTIALS_DIR", "").strip() or "var/credentials"
         self.active_session_transcript_length = 0
 
 
