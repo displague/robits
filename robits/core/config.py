@@ -239,6 +239,10 @@ class Config:
         self.tools_file = env.get("ROBITS_TOOLS_FILE", "").strip() or None
         # Headless loop touches this file each pass; `python -m robits.health` checks its age.
         self.heartbeat_file = env.get("ROBITS_HEARTBEAT_FILE", "").strip() or None
+        # Cross-persona workspace access (#140): audit log outside every workspace, owner notices.
+        self.access_audit_file = env.get("ROBITS_ACCESS_AUDIT_FILE", "").strip() or "var/access_audit.jsonl"
+        self.access_notice_mode = env.get("ROBITS_ACCESS_NOTICE", "immediate").strip().lower() or "immediate"
+        self.access_notices = {}
         self.active_session_transcript_length = 0
 
 

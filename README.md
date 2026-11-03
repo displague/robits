@@ -11,6 +11,7 @@ A Python-based simulation of an AI-driven organisation where agents with distinc
 - [Clock States and Circadian Rhythm](#clock-states-and-circadian-rhythm)
 - [Embedding Search](#embedding-search)
 - [Observability](#observability)
+- [Workspace privacy](#workspace-privacy)
 - [Installation](#installation)
 - [Configuration](#configuration)
 - [Running the Simulation](#running-the-simulation)
@@ -189,11 +190,26 @@ Embeddings are computed lazily at agent wake-up (`_build_wait_summary`) and at s
 
 ## Observability
 
-Sessions emit a `RuntimeEventStream` for: `session.created`, `session.completed`, `message.routed`, `message.recorded`, `tool.executed`, `tool_call.requested`, `tool_call.executed`, `tool_call.failed`, `thought.recorded`, `agent.waited`, `clock.state.changed`, and in headless mode `session.sleeping` (reason, seconds, next wake time per persona), `session.idle_exit` and `session.model_error`. Tests can subscribe to the stream for assertions without a terminal.
+Sessions emit a `RuntimeEventStream` for: `session.created`, `session.completed`, `message.routed`, `message.recorded`, `tool.executed`, `tool_call.requested`, `tool_call.executed`, `tool_call.failed`, `thought.recorded`, `agent.waited`, `clock.state.changed`, and in headless mode `session.sleeping` (reason, seconds, next wake time per persona), `session.idle_exit` and `session.model_error`. Access to another persona's workspace emits `workspace.access` (private visibility). Tests can subscribe to the stream for assertions without a terminal.
 
 ## Sandboxes
 
 Agents carry optional `SandboxMetadata`. The current implementation provides a fakeable abstraction for tests; production backends (kind/Kubernetes) are described in `docs/kind-sandbox-runtime.md`.
+
+## Workspace privacy
+
+Each persona has a private workspace (`var/agents/<name>`). Roles with the `hr` or `operator` capability can open another persona's workspace, through the `agent.files_*` tools, `builtin.file_search` and `builtin.shell_run`. That access is possible but accountable:
+
+- **Reason required.** A call into another persona's workspace must pass `reason`. Without one it is refused.
+- **Audit log.** Each access is appended to `ROBITS_ACCESS_AUDIT_FILE` (default `var/access_audit.jsonl`), outside every workspace. An entry records the caller, the owner, the operation, the path, the time and the reason, never file contents or shell commands. Each access is also written to the JSONL log and emitted as a `workspace.access` event.
+- **Owner notice.** The owner sees a notice on its next turn. `ROBITS_ACCESS_NOTICE` chooses how much it is told:
+  - `immediate` (the default): who, which path, when and the reason;
+  - `digest`: counts per caller and operation only;
+  - `none`: no notice, for example during an investigation. The access is still logged.
+- **Review.** Operators can list recent accesses with `org.access_audit` (filter by `owner` or `caller`). The Ops role has it by default.
+- **Prompt.** Roles that hold this power are told in their system prompt that access is logged and reviewed, and is meant for lifecycle and wellbeing duties only.
+
+This is accountability, not isolation. OS-level separation between personas is #70.
 
 ## Installation
 
@@ -230,6 +246,8 @@ For local models with embedding support, `sqlite-vec` is included in `requiremen
 | `ROBITS_MEMORY_MAX_DEPTH` | `3` | Max recursive digest expansion depth |
 | `ROBITS_MEMORY_MAX_ROWS` | `100` | Max rows per memory tool result |
 | `ROBITS_MEMORY_CACHE_THRESHOLD` | `8192` | Bytes above which memory results are offloaded to workspace |
+| `ROBITS_ACCESS_AUDIT_FILE` | `var/access_audit.jsonl` | Append-only log of access to other personas' workspaces (see [Workspace privacy](#workspace-privacy)) |
+| `ROBITS_ACCESS_NOTICE` | `immediate` | Tell a workspace's owner about access: `immediate`, `digest` or `none` |
 | `ROBITS_DIGEST_INTERVAL` | `0` | Turns between episodic digests (0 = disabled) |
 | `ROBITS_DIGEST_CONTEXT_CHARS` | `0` | Accumulated chars that trigger digestion (0 = disabled) |
 | `ROBITS_DIGEST_ELAPSED_SECONDS` | `0` | Elapsed seconds that trigger digestion (0 = disabled) |
