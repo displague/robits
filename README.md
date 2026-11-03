@@ -11,6 +11,7 @@ A Python-based simulation of an AI-driven organisation where agents with distinc
 - [Clock States and Circadian Rhythm](#clock-states-and-circadian-rhythm)
 - [Embedding Search](#embedding-search)
 - [Observability](#observability)
+- [Workspace privacy](#workspace-privacy)
 - [Installation](#installation)
 - [Configuration](#configuration)
 - [Running the Simulation](#running-the-simulation)
@@ -86,7 +87,7 @@ When `build_employee_dict()` receives the persona map, it instantiates each pers
 
 Seeding is idempotent: if any memory record already exists for the agent, the seed is skipped.
 
-Configure the file path with `ROBITS_PERSONAS_FILE` (defaults to `personas.yaml` in the working directory).
+Configure the path with `ROBITS_PERSONAS_FILE` (defaults to `personas.yaml` in the working directory). It can also name a directory with one persona per file; see [Persona directories and briefings](#persona-directories-and-briefings).
 
 ### Tool allowlists and budgets
 
@@ -110,6 +111,42 @@ Every model-backed role starts with broad default grants, which suits large host
 - `max_tool_rounds` caps consecutive tool-call rounds per model call (default `ROBITS_MAX_TOOL_ROUNDS`).
 
 With a `tools` list, a call to an unknown or disallowed tool, or with bad arguments, gets an error that ends with the tool names the persona may use. The error uses up a round. `tools.grant` and other runtime grants cannot widen the persona beyond its list unless an `operator` role (or the human) makes the grant. Personas without `tools` keep the default grants and plain errors. Subtasks inherit the budget and round cap.
+
+### Persona directories and briefings
+
+`ROBITS_PERSONAS_FILE` can point to a directory instead of a single file, so personas can be added or removed without editing a shared roster:
+
+```text
+personas/
+  riley.yaml            # one persona per *.yaml / *.yml file
+  sam.yaml
+  briefings/
+    release-notes.md
+    tracker.md
+```
+
+Each persona file is a single mapping with the same keys as a `personas.yaml` entry. `username` defaults to the file name, and `memories` is optional:
+
+```yaml
+# personas/sam.yaml
+full_name: Sam Ortiz
+role: SE
+tools: [agent.think, memory.search]
+briefings:
+  - release-notes                       # personas/briefings/release-notes.md
+  - name: on-call                       # or inline
+    summary: Who to page and when
+    text: Page the on-call engineer for outages only.
+```
+
+A **briefing** holds notes on a tool or service the persona uses often: what it's for, the conventions, and the mistakes to avoid. It works like a repo skill:
+- The system prompt carries only a one-line index, `- <name>: <summary>`.
+- The persona reads the full text on demand with `agent.read_briefing(name)`.
+- Small models therefore don't carry every briefing in every turn, and specialists differ in configuration, not code.
+
+Briefing files are Markdown. The summary comes from `summary:` in optional YAML front matter, or else from the first line. A single `personas.yaml` file can use briefings too; names resolve to a `briefings/` directory next to it.
+
+A persona with briefings is granted `agent.read_briefing`. With a `tools` list, it's placed first, so `tool_budget` never drops it. A persona can read only its own briefings. Unknown or malformed briefings log a warning and skip the persona.
 
 ### @mention detection
 
@@ -153,11 +190,26 @@ Embeddings are computed lazily at agent wake-up (`_build_wait_summary`) and at s
 
 ## Observability
 
-Sessions emit a `RuntimeEventStream` for: `session.created`, `session.completed`, `message.routed`, `message.recorded`, `tool.executed`, `tool_call.requested`, `tool_call.executed`, `tool_call.failed`, `thought.recorded`, `agent.waited`, `clock.state.changed`, and in headless mode `session.sleeping` (reason, seconds, next wake time per persona), `session.idle_exit` and `session.model_error`. Tests can subscribe to the stream for assertions without a terminal.
+Sessions emit a `RuntimeEventStream` for: `session.created`, `session.completed`, `message.routed`, `message.recorded`, `tool.executed`, `tool_call.requested`, `tool_call.executed`, `tool_call.failed`, `thought.recorded`, `agent.waited`, `clock.state.changed`, and in headless mode `session.sleeping` (reason, seconds, next wake time per persona), `session.idle_exit` and `session.model_error`. Access to another persona's workspace emits `workspace.access` (private visibility). Tests can subscribe to the stream for assertions without a terminal.
 
 ## Sandboxes
 
 Agents carry optional `SandboxMetadata`. The current implementation provides a fakeable abstraction for tests; production backends (kind/Kubernetes) are described in `docs/kind-sandbox-runtime.md`.
+
+## Workspace privacy
+
+Each persona has a private workspace (`var/agents/<name>`). Roles with the `hr` or `operator` capability can open another persona's workspace, through the `agent.files_*` tools, `builtin.file_search` and `builtin.shell_run`. That access is possible but accountable:
+
+- **Reason required.** A call into another persona's workspace must pass `reason`. Without one it is refused.
+- **Audit log.** Each access is appended to `ROBITS_ACCESS_AUDIT_FILE` (default `var/access_audit.jsonl`), outside every workspace. An entry records the caller, the owner, the operation, the path, the time and the reason, never file contents or shell commands. Each access is also written to the JSONL log and emitted as a `workspace.access` event.
+- **Owner notice.** The owner sees a notice on its next turn. `ROBITS_ACCESS_NOTICE` chooses how much it is told:
+  - `immediate` (the default): who, which path, when and the reason;
+  - `digest`: counts per caller and operation only;
+  - `none`: no notice, for example during an investigation. The access is still logged.
+- **Review.** Operators can list recent accesses with `org.access_audit` (filter by `owner` or `caller`). The Ops role has it by default.
+- **Prompt.** Roles that hold this power are told in their system prompt that access is logged and reviewed, and is meant for lifecycle and wellbeing duties only.
+
+This is accountability, not isolation. OS-level separation between personas is #70.
 
 ## Installation
 
@@ -179,6 +231,7 @@ For local models with embedding support, `sqlite-vec` is included in `requiremen
 | `ROBITS_SPAWN_MODEL` | `ROBITS_CHEAP_MODEL` | Default model for `agent.spawn` sub-agents; overrides `ROBITS_CHEAP_MODEL` for spawned executors (e.g. `functiongemma-270m-it`) |
 | `ROBITS_LOOP_DETECT_THRESHOLD` | `3` | Consecutive identical idle responses (no tool calls, no directed routing) before the session halts with `session.loop_detected`; must be an integer ≥ 2 |
 | `ROBITS_PROVIDER_API` | `responses` | `responses` or `chat` / `chat_completions` |
+| `ROBITS_RESPONSES_STATEFUL` | `auto` | Whether the Responses backend honours `previous_response_id`. `auto` assumes yes only for OpenAI's API (no `OPENAI_BASE_URL`, or `api.openai.com`); otherwise each tool round resends the whole conversation. Set `true` for a stateful local server such as LM Studio to send less per round |
 | `ROBITS_MAX_CONTEXT_TOKENS` | `0` (unlimited) | Trim conversation history to this token budget before each model call (~4 chars/token). Useful for small-context local models (e.g. `3500` for 4k-context models) |
 | `ROBITS_MAX_TOOL_ROUNDS` | `8` | Consecutive tool-call rounds per model call; personas can override with `max_tool_rounds` |
 | `ROBITS_TOOL_BUDGET` | `0` (unlimited) | Most tool schemas sent per round; personas can override with `tool_budget` |
@@ -186,6 +239,7 @@ For local models with embedding support, `sqlite-vec` is included in `requiremen
 | `ROBITS_CLOCK_STATE` | `on` | Base clock state: `on`, `break`, or `off` |
 | `ROBITS_BREAK_SCHEDULE` | — | Scheduled break windows, e.g. `12:00-13:00,15:00-15:30` |
 | `ROBITS_PERSONAS_FILE` | `personas.yaml` | Path to persona seed file |
+| `ROBITS_TOOLS_FILE` | bundled `tools.yaml` | Path to the tool catalogue, e.g. a read-only mounted copy |
 | `ROBITS_CREDENTIALS_DIR` | `var/credentials` | OAuth logins for MCP servers, one `0600` file per identity and server, outside agent workspaces (see [docs/mcp-oauth.md](docs/mcp-oauth.md)) |
 | `ROBITS_EMBEDDING_MODEL` | — | Embedding model name; disables semantic search when unset |
 | `ROBITS_EMBEDDING_BASE_URL` | `OPENAI_BASE_URL` | Embedding endpoint (can differ from chat endpoint) |
@@ -193,6 +247,8 @@ For local models with embedding support, `sqlite-vec` is included in `requiremen
 | `ROBITS_MEMORY_MAX_DEPTH` | `3` | Max recursive digest expansion depth |
 | `ROBITS_MEMORY_MAX_ROWS` | `100` | Max rows per memory tool result |
 | `ROBITS_MEMORY_CACHE_THRESHOLD` | `8192` | Bytes above which memory results are offloaded to workspace |
+| `ROBITS_ACCESS_AUDIT_FILE` | `var/access_audit.jsonl` | Append-only log of access to other personas' workspaces (see [Workspace privacy](#workspace-privacy)) |
+| `ROBITS_ACCESS_NOTICE` | `immediate` | Tell a workspace's owner about access: `immediate`, `digest` or `none` |
 | `ROBITS_DIGEST_INTERVAL` | `0` | Turns between episodic digests (0 = disabled) |
 | `ROBITS_DIGEST_CONTEXT_CHARS` | `0` | Accumulated chars that trigger digestion (0 = disabled) |
 | `ROBITS_DIGEST_ELAPSED_SECONDS` | `0` | Elapsed seconds that trigger digestion (0 = disabled) |
@@ -206,6 +262,7 @@ For local models with embedding support, `sqlite-vec` is included in `requiremen
 | `ROBITS_IDLE_MAX_SLEEP_SECONDS` | `300` | Headless: longest single idle sleep before re-checking (0 = no cap) |
 | `ROBITS_ERROR_BACKOFF_SECONDS` | `5` | Headless: first backoff after a failed turn; doubles per consecutive failure |
 | `ROBITS_MAX_CONSECUTIVE_ERRORS` | `5` | Headless: consecutive failed turns before the run gives up and exits 1 (`0` retries forever) |
+| `ROBITS_HEARTBEAT_FILE` | — | Headless: file touched on every loop pass; `python -m robits.health` checks its age (liveness probe) |
 | `ROBITS_LOCATION` | — | Default location string for agent context |
 | `ROBITS_TIMEZONE` | — | Default timezone (e.g. `America/New_York`) |
 
@@ -233,6 +290,8 @@ python main.py --prompt "Ops, say hello to HR" --turns 1
 - Model failures before any tool attempt retry the same recipient with its reminder and input intact. After a tool attempt, a failed turn exits with `session.error_exit` and `tool_outcome_requires_inspection`, avoiding automatic replay of uncertain side effects.
 - On POSIX, SIGTERM stops after the current turn and exits 0. Windows callers should use `Session.request_stop()` for cooperative shutdown; `os.kill(SIGTERM)` terminates the process directly. JSONL events go to stderr unless `--log` is given.
 
+To run headless in a container or on Kubernetes, see [docs/deploy.md](docs/deploy.md).
+
 Capture to a log file while watching:
 
 ```bash
@@ -245,7 +304,7 @@ python main.py --prompt "Ops, say hello to HR" --turns 1 --log run.log
 
 ### Ollama
 
-Ollama exposes an OpenAI-compatible Responses API at `/v1/responses` (since v0.13.3), but it is **non-stateful**: `previous_response_id` is silently ignored. This breaks the within-turn tool-call continuation in `ResponsesProvider`. Use `ROBITS_PROVIDER_API=chat` with Ollama:
+Ollama exposes an OpenAI-compatible Responses API at `/v1/responses` (since v0.13.3), but it is **non-stateful**: `previous_response_id` is silently ignored. With the default `ROBITS_RESPONSES_STATEFUL=auto`, robits treats any non-OpenAI base URL as stateless and resends the whole conversation on each tool round, so both `ROBITS_PROVIDER_API=responses` and `chat` work with Ollama. Chat Completions is the more widely supported surface across Ollama versions and other local servers:
 
 ```bash
 OPENAI_BASE_URL=http://127.0.0.1:11434/v1/ \
@@ -260,9 +319,11 @@ python run_local.py --prompt "SE, do you have experience with Python or cooking?
 
 Tested with `granite4.1:3b` for tool calling; `granite-embedding:latest` and `embeddinggemma:latest` for embeddings. Models are pulled with `ollama pull <name>`.
 
+Some OpenAI-compatible servers (for example RKLLama on Rockchip NPUs) return tool-call `arguments` as a JSON object instead of a string. Robits accepts both and sends them back as strings.
+
 ### LM Studio
 
-LM Studio's Responses API is stateful and honours `previous_response_id`, so the default `ROBITS_PROVIDER_API=responses` works correctly:
+LM Studio's Responses API is stateful and honours `previous_response_id`. The defaults work; add `ROBITS_RESPONSES_STATEFUL=true` to send only the new tool results each round:
 
 ```bash
 OPENAI_BASE_URL=http://127.0.0.1:1234/v1/ \

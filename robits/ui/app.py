@@ -375,7 +375,7 @@ class RobitsTuiApp(App):
 
         # Initialize a new session
         self.session = Session()
-        load_tools(self.session.system)
+        load_tools(self.session.system, _config.tools_file)
 
         # Point the UI to this active session
         self.selected_session_id = self.session.run_id

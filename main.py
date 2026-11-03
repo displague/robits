@@ -190,7 +190,7 @@ sys.modules[__name__].__class__ = _MainModule
 def run_simulation(initial_message=None, max_turns=None):
     """Initialise the session, load tools, and run the simulation loop."""
     session = Session()
-    load_tools(session.system)
+    load_tools(session.system, _config.tools_file)
     if session.headless:
         # SIGTERM stops after the current turn; run() then returns normally (exit 0).
         # Giving up after max_consecutive_errors failed turns exits 1.

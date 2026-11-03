@@ -176,6 +176,9 @@
   parameters:
     type: object
     properties:
+      reason:
+        type: string
+        description: Required when the workspace belongs to another agent - why the access is necessary. Logged for review; the owner may be told.
       agent_name:
         type: string
         description: Agent that owns the private workspace.
@@ -185,7 +188,7 @@
     required:
       - agent_name
   code: |
-    return workspace_list(employee_dict, agent_name, path=path if path is not None else "")
+    return workspace_list(employee_dict, agent_name, path=path if path is not None else "", reason=reason)
 - name: agent.files_read
   required_capabilities: []
   owner_capability: agent
@@ -193,6 +196,9 @@
   parameters:
     type: object
     properties:
+      reason:
+        type: string
+        description: Required when the workspace belongs to another agent - why the access is necessary. Logged for review; the owner may be told.
       agent_name:
         type: string
         description: Agent that owns the private workspace.
@@ -211,6 +217,7 @@
         agent_name,
         path,
         max_bytes=max_bytes if max_bytes is not None else 65536,
+        reason=reason,
     )
 - name: agent.files_write
   required_capabilities: []
@@ -219,6 +226,9 @@
   parameters:
     type: object
     properties:
+      reason:
+        type: string
+        description: Required when the workspace belongs to another agent - why the access is necessary. Logged for review; the owner may be told.
       agent_name:
         type: string
         description: Agent that owns the private workspace.
@@ -242,6 +252,7 @@
         path,
         content,
         append=append if append is not None else False,
+        reason=reason,
     )
 - name: agent.files_delete
   required_capabilities: []
@@ -250,6 +261,9 @@
   parameters:
     type: object
     properties:
+      reason:
+        type: string
+        description: Required when the workspace belongs to another agent - why the access is necessary. Logged for review; the owner may be told.
       agent_name:
         type: string
         description: Agent that owns the private workspace.
@@ -260,7 +274,7 @@
       - agent_name
       - path
   code: |
-    return workspace_delete(employee_dict, agent_name, path)
+    return workspace_delete(employee_dict, agent_name, path, reason=reason)
 - name: org.chat_read
   required_capabilities: []
   owner_capability: basic
@@ -420,6 +434,22 @@
       - content
   code: |
     return agent_think(employee_dict, content)
+- name: agent.read_briefing
+  grantable: true
+  owner_capability: agent
+  description: >
+    Read one of your briefings: notes on a tool or service you use often.
+    The names and one-line summaries are listed under Briefings in your instructions.
+  parameters:
+    type: object
+    properties:
+      name:
+        type: string
+        description: The briefing name as listed.
+    required:
+      - name
+  code: |
+    return agent_read_briefing(employee_dict, name)
 - name: agent.wait
   grantable: true
   owner_capability: agent
@@ -699,6 +729,29 @@
         include_system=include_system if include_system is not None else True,
         only_allowed=only_allowed if only_allowed is not None else False,
     )
+- name: org.access_audit
+  system_tool: true
+  grantable: false
+  required_capabilities:
+    - operator
+  owner_capability: operator
+  description: >
+    Review recent accesses to agents' private workspaces by other agents: who, whose
+    workspace, which operation and path, when, and the reason given. Never includes file contents.
+  parameters:
+    type: object
+    properties:
+      limit:
+        type: integer
+        description: Most recent entries to return (default 20, max 200).
+      owner:
+        type: string
+        description: Only accesses to this agent's workspace.
+      caller:
+        type: string
+        description: Only accesses made by this agent.
+  code: |
+    return access_audit_list(employee_dict, limit=limit, owner=owner, caller=caller)
 - name: tools.grant
   system_tool: true
   grantable: false
@@ -985,6 +1038,9 @@
   parameters:
     type: object
     properties:
+      reason:
+        type: string
+        description: Required when the workspace belongs to another agent - why the access is necessary. Logged for review; the owner may be told.
       agent_name:
         type: string
         description: Agent that owns the workspace to search.
@@ -1007,6 +1063,7 @@
         query,
         path=path if path is not None else "",
         max_results=max_results if max_results is not None else 10,
+        reason=reason,
     )
 - name: builtin.shell_run
   grantable: true
@@ -1017,6 +1074,9 @@
   parameters:
     type: object
     properties:
+      reason:
+        type: string
+        description: Required when the workspace belongs to another agent - why the access is necessary. Logged for review; the owner may be told.
       agent_name:
         type: string
         description: Agent whose workspace directory the command runs in.
@@ -1035,6 +1095,7 @@
         agent_name,
         command,
         timeout=timeout if timeout is not None else 30,
+        reason=reason,
     )
 - name: builtin.tool_search
   grantable: true

@@ -95,14 +95,24 @@ def _caller_name_for_error():
     return _m.active_tool_caller_name or getattr(_m.active_tool_caller, "name", "unknown caller")
 
 
-def _workspace_agent_name(agent_name):
-    """Validate agent_name and authorise the caller; return (name, None) or (None, error)."""
+def _workspace_agent_name(agent_name, operation="access", path="", reason=None):
+    """Validate agent_name and authorise the caller; return (name, None) or (None, error).
+
+    Access to another persona's workspace needs a reason and is audited (#140).
+    """
     try:
         normalized_name = validate_role_name(agent_name)
     except ValueError as e:
         return None, f"Error: {e}"
     if not _caller_can_act_for_agent(normalized_name):
         return None, f"Error: Role '{_caller_name_for_error()}' cannot access workspace for '{normalized_name}'."
+    caller_name = _m.active_tool_caller_name or getattr(_m.active_tool_caller, "name", None)
+    if caller_name != normalized_name:
+        from robits.core import access_audit
+        error = access_audit.missing_reason_error(reason)
+        if error:
+            return None, error
+        access_audit.record_access(_m.active_tool_caller, caller_name, normalized_name, operation, path, reason)
     return normalized_name, None
 
 

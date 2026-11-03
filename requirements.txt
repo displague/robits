@@ -1,7 +1,4 @@
-openai
-PyYaml
-termcolor
-aiosqlite
+-r requirements-core.txt
+# Optional: vector search over memories (embeddings) and the Textual viewer.
 sqlite-vec
 textual
-jsonschema>=4.18,<5
