@@ -1,0 +1,10 @@
+# Memory DB, agent workspaces, tool proposals and the heartbeat file. Back this up.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: robits-data
+spec:
+  accessModes: [ReadWriteOnce]
+  resources:
+    requests:
+      storage: 1Gi

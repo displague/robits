@@ -7,6 +7,7 @@ from collections import deque
 from contextlib import contextmanager
 from copy import deepcopy
 from dataclasses import dataclass, field
+from pathlib import Path
 from datetime import datetime, time as dtime, timedelta, timezone
 from uuid import uuid4
 
@@ -163,6 +164,17 @@ class ExternalInput:
     name = "external"
     capabilities = frozenset()
     allowed_tools = frozenset()
+
+
+def _touch_heartbeat():
+    """Update ROBITS_HEARTBEAT_FILE's mtime so a liveness probe can see the loop is turning."""
+    path = getattr(_m, "heartbeat_file", None)
+    if not path:
+        return
+    try:
+        Path(path).touch()
+    except OSError:
+        pass
 
 
 def _default_sleeper(seconds, wake_event):
@@ -1163,6 +1175,10 @@ class Session:
         mentions = self._detect_mentions(message)
         if receiver_key and receiver_key in mentions:
             prompt = f"[Note: you were mentioned in this message]\n{prompt}"
+        from robits.core.access_audit import pop_notice
+        access_notice = pop_notice(receiver_key, getattr(routed.receiver, "name", None))
+        if access_notice:
+            prompt = f"{access_notice}\n{prompt}"
         raw_prompt = prepend_verified_tool_results(
             prompt,
             system_events,
@@ -1401,6 +1417,7 @@ class Session:
         self._wake_event.clear()
         if self._stop_requested:
             return None
+        _touch_heartbeat()
         now = self._now()
         if self._backoff_until is not None and now < self._backoff_until:
             return self._idle(now, self._backoff_until, "model_error_backoff", finite)

@@ -83,7 +83,9 @@ def interact(self, model, sender, message):
     turn_action_template = getattr(self, "turn_action_template", "")
     
     guidance = _ON_CLOCK_GUIDANCE if effective_clock == "on" else _OFF_CLOCK_GUIDANCE
-    system_content = dynamic_preprompt + turn_action_template + guidance + format_agent_context(self)
+    from robits.core.access_audit import access_duty_note
+    system_content = (dynamic_preprompt + turn_action_template + guidance
+                      + access_duty_note(self) + format_briefing_index(self) + format_agent_context(self))
 
     if self.name not in self.conversation_history:
         self.conversation_history[self.name] = [
@@ -269,7 +271,7 @@ class Ops(Role):
             self.__class__.__name__, role_description, employee_dict, group_template_additions
         )
         self.capabilities = {"operator"}
-        self.allowed_tools.update({"tools.*"})
+        self.allowed_tools.update({"tools.*", "org.access_audit"})
 
 
 class HR(Role):
@@ -414,6 +416,35 @@ def _apply_persona_tools(role, info):
         setattr(role, key, value)
 
 
+_READ_BRIEFING = "agent.read_briefing"
+
+
+def _apply_persona_briefings(role, info):
+    """Attach a persona's briefings and grant agent.read_briefing; raise ValueError if malformed."""
+    from robits.core.persona import resolve_briefings
+    briefings = resolve_briefings(info.get("briefings"), info.get("briefing_dir"))
+    role.briefings = briefings
+    if not briefings:
+        return
+    role.allowed_tools = set(role.allowed_tools) | {_READ_BRIEFING}
+    ceiling = getattr(role, "tool_ceiling", None)
+    if ceiling is not None and _READ_BRIEFING not in ceiling:
+        # First, so a tool_budget never drops the way to read the briefings.
+        role.tool_ceiling = (_READ_BRIEFING, *ceiling)
+
+
+def format_briefing_index(role):
+    """One line per briefing for the system prompt; the text is read on demand."""
+    briefings = getattr(role, "briefings", None)
+    if not briefings:
+        return ""
+    lines = ["", "=== Briefings ===",
+             "Notes on the tools and services you use most. Before relying on one, "
+             "read it with agent.read_briefing(name):"]
+    lines.extend(f"- {name}: {briefing['summary']}" for name, briefing in briefings.items())
+    return "\n".join(lines) + "\n"
+
+
 def build_employee_dict(persona_map=None, headless=False):
     """Construct and return the set of organisation participants.
 
@@ -463,6 +494,15 @@ def build_employee_dict(persona_map=None, headless=False):
                 import logging
                 logging.warning(
                     "robits: persona %r has invalid tool settings (%s) — skipping",
+                    username, error,
+                )
+                continue
+            try:
+                _apply_persona_briefings(instance, info)
+            except (ValueError, OSError) as error:
+                import logging
+                logging.warning(
+                    "robits: persona %r has invalid briefings (%s) — skipping",
                     username, error,
                 )
                 continue

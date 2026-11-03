@@ -1,0 +1,28 @@
+# robits serves nothing, so no ingress. Egress: DNS, the model endpoint and your MCP
+# servers only. Adjust the selectors to where those run; enforcement needs a CNI with
+# NetworkPolicy support.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: robits
+spec:
+  podSelector:
+    matchLabels: {app.kubernetes.io/name: robits}
+  policyTypes: [Ingress, Egress]
+  egress:
+    - to:
+        - namespaceSelector: {}
+          podSelector:
+            matchLabels: {k8s-app: kube-dns}
+      ports:
+        - {protocol: UDP, port: 53}
+        - {protocol: TCP, port: 53}
+    # Model endpoint: an in-cluster Ollama in namespace "ollama".
+    - to:
+        - namespaceSelector:
+            matchLabels: {kubernetes.io/metadata.name: ollama}
+      ports:
+        - {protocol: TCP, port: 11434}
+    # MCP servers outside the cluster, e.g.:
+    # - to: [{ipBlock: {cidr: 203.0.113.10/32}}]
+    #   ports: [{protocol: TCP, port: 443}]
