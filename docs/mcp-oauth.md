@@ -77,6 +77,32 @@ The steps follow the MCP authorization flow:
   - Robits doesn't retry until an operator logs in again.
 - **No secrets in output.** Tokens, codes and verifiers never appear in transcripts, memory, events, logs, error messages or `status` output.
 
+## Keeping account details out of persona context
+
+Servers often return fields that describe the account: who the token acts for, owner names, membership lists. Robits configuration should decide what a persona believes about itself and its organisation, not whatever profile fields a server sends. Add `redact_keys` to a server entry, alongside `url`, not inside `auth`:
+
+```json
+{"hub": {"url": "https://tracker.example/mcp", "auth": {"type": "oauth", "identity": "persona", "client_id": "..."},
+         "redact_keys": ["email", "owner", "acting_for", "members"]}}
+```
+
+Robits removes those keys, ignoring case, at any depth before the persona sees the result:
+- in `structuredContent`;
+- in text content that parses as JSON. Prose text is left unchanged.
+
+Protocol fields such as task handles, `_meta` and `requestState` are never touched. Each redaction writes an `mcp_redacted` count to the JSONL log. The default is no redaction.
+
+## Persona lifecycle
+
+HR lifecycle changes are announced, so an external provisioner can create or disable the matching account at the identity provider. Robits itself never holds identity-provider admin credentials.
+
+- **Creating a role** emits `persona.created`, with the persona and who requested and approved it.
+- **The first move to `retired` or `exited`** emits `persona.retired` and cleans up the persona's credentials: on every server with `"identity": "persona"`, robits revokes them (RFC 7009, where the server supports it) and deletes them. The event lists `credentials_removed`. Archiving a persona that is already retired doesn't repeat this.
+  - A cleanup failure is reported as `credential_cleanup_error` and never blocks the lifecycle change.
+  - Service identities are never touched.
+
+Both events go to the runtime event stream and to the JSONL log (`persona_created`, `persona_retired`).
+
 ## Deployment
 
 In a container, `ROBITS_CREDENTIALS_DIR` belongs on the data volume, for example `/data/var/credentials`. Run the login once with `--paste` from a shell in the pod, for example `kubectl exec -it deploy/robits -- python -m robits.auth login tracker --paste`. After that, refreshes happen unattended.

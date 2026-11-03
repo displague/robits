@@ -342,6 +342,56 @@ def _server_options(name, options):
     return options
 
 
+def _redact_value(value, keys):
+    """Remove dict keys (case-insensitive) anywhere in value; return (value, removed count)."""
+    if isinstance(value, dict):
+        out, removed = {}, 0
+        for key, item in value.items():
+            if isinstance(key, str) and key.lower() in keys:
+                removed += 1
+                continue
+            out[key], n = _redact_value(item, keys)
+            removed += n
+        return out, removed
+    if isinstance(value, list):
+        out, removed = [], 0
+        for item in value:
+            item, n = _redact_value(item, keys)
+            out.append(item)
+            removed += n
+        return out, removed
+    return value, 0
+
+
+def redact_result(result, keys):
+    """Strip configured account fields from a tool result before a persona sees it.
+
+    Covers structuredContent and JSON text content items; protocol fields
+    (task handles, _meta, requestState) are left alone.
+    """
+    if not keys or not isinstance(result, dict):
+        return result, 0
+    result, removed = dict(result), 0
+    if "structuredContent" in result:
+        result["structuredContent"], removed = _redact_value(result["structuredContent"], keys)
+    if isinstance(result.get("content"), list):
+        items = []
+        for item in result["content"]:
+            if isinstance(item, dict) and item.get("type") == "text" and isinstance(item.get("text"), str):
+                try:
+                    parsed = json.loads(item["text"])
+                except ValueError:
+                    items.append(item)
+                    continue
+                parsed, n = _redact_value(parsed, keys)
+                if n:
+                    item = {**item, "text": json.dumps(parsed)}
+                    removed += n
+            items.append(item)
+        result["content"] = items
+    return result, removed
+
+
 def registry_tool_name(server, remote_name):
     """Return the registry name for a remote tool, as used in grants and persona `tools:` lists."""
     digest = hashlib.sha256(f"{server}:{remote_name}".encode()).hexdigest()[:12]
@@ -357,7 +407,16 @@ def owner(role):
 
 class MCPManager:
     def __init__(self, servers, transport_factory=make_transport):
-        self.servers = {name: transport_factory(**_server_options(name, options))
+        # redact_keys belongs to the manager, not the transport: strip it before building one.
+        self.redact = {}
+        for name, options in servers.items():
+            keys = options.get("redact_keys") if isinstance(options, dict) else None
+            if keys is not None:
+                if not isinstance(keys, list) or not all(isinstance(k, str) and k for k in keys):
+                    raise ValueError(f"MCP server {name}: redact_keys must be a list of field names")
+                self.redact[name] = frozenset(k.lower() for k in keys)
+        self.servers = {name: transport_factory(**_server_options(
+                            name, {k: v for k, v in options.items() if k != "redact_keys"}))
                         for name, options in servers.items()}
         self.pending = {}
         self.registered = {}
@@ -399,14 +458,37 @@ class MCPManager:
                 stream.emit("mcp.call", getattr(role, "runtime_session_id", None), entry, visibility="private")
         try:
             if identity is not None:
-                return transport.request(method, params, notify, identity=identity)
-            return transport.request(method, params, notify)
+                result = transport.request(method, params, notify, identity=identity)
+            else:
+                result = transport.request(method, params, notify)
         except ReloginRequired as exc:
             stream = getattr(role, "runtime_event_stream", None)
             if stream is not None:
                 stream.emit("auth.relogin_required", getattr(role, "runtime_session_id", None),
                             {"server": exc.server, "identity": exc.identity}, visibility="private")
             raise
+        if method != "tools/list" and self.redact.get(server):
+            result, removed = redact_result(result, self.redact[server])
+            if removed:
+                from robits.core.io import get_logger
+                get_logger().write_event("mcp_redacted", server=server, tool=tool, fields=removed)
+        return result
+
+    def forget_identity(self, identity):
+        """Revoke and delete identity's stored credentials on every server; return the servers cleaned."""
+        cleaned = []
+        for name, transport in self.servers.items():
+            if getattr(transport, "identity_mode", None) != "persona" or not identity.startswith("persona:"):
+                continue
+            client = transport.client(identity)
+            if client.store.load(client.path) is not None:
+                client.logout()
+                cleaned.append(name)
+            transport._clients.pop(identity, None)
+            self.identity_tools.pop((name, identity), None)
+            for key in [k for k in self.registered if k[1:] == (name, identity)]:
+                self.registered.pop(key, None)
+        return cleaned
 
     def register(self, registry, role):
         """Discover only for MCP-enabled roles; preserve inputSchema verbatim."""
