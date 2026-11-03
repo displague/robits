@@ -69,6 +69,23 @@ def _parse_break_schedule(raw: str) -> list:
     return windows
 
 
+
+def responses_stateful(setting, base_url):
+    """Return True when previous_response_id can carry Responses state across tool rounds.
+
+    "auto" trusts only OpenAI's own API; other OpenAI-compatible servers (Ollama, gateways)
+    may accept the field and ignore it, so they get the full input replayed each round.
+    """
+    setting = (setting or "auto").strip().lower()
+    if setting in {"1", "true", "yes", "on"}:
+        return True
+    if setting in {"0", "false", "no", "off"}:
+        return False
+    if not base_url:
+        return True
+    from urllib.parse import urlparse
+    return (urlparse(base_url).hostname or "").lower() == "api.openai.com"
+
 class Config:
     """All env-derived settings and mutable runtime state in one injectable object.
 
@@ -102,6 +119,8 @@ class Config:
         except (ValueError, TypeError):
             self.loop_detect_threshold = 3
         self.provider_api = env.get("ROBITS_PROVIDER_API", "responses").strip().lower()
+        # Does the Responses backend keep state for previous_response_id? Ollama ignores it.
+        self.responses_stateful = responses_stateful(env.get("ROBITS_RESPONSES_STATEFUL", "auto"), base_url)
         self.max_context_tokens = max(0, int(env.get("ROBITS_MAX_CONTEXT_TOKENS", "0")))
         # Tool-calling limits; personas may override both (see personas.yaml).
         self.max_tool_rounds = max(1, int(env.get("ROBITS_MAX_TOOL_ROUNDS", "8")))
@@ -216,6 +235,10 @@ class Config:
         self.subtask_manager = None
         self.mcp_manager = None
         self.mcp_config_path = env.get("ROBITS_MCP_CONFIG", "").strip()
+        # Deployments mount config read-only; these point robits at the mounted copies.
+        self.tools_file = env.get("ROBITS_TOOLS_FILE", "").strip() or None
+        # Headless loop touches this file each pass; `python -m robits.health` checks its age.
+        self.heartbeat_file = env.get("ROBITS_HEARTBEAT_FILE", "").strip() or None
         # Cross-persona workspace access (#140): audit log outside every workspace, owner notices.
         self.access_audit_file = env.get("ROBITS_ACCESS_AUDIT_FILE", "").strip() or "var/access_audit.jsonl"
         self.access_notice_mode = env.get("ROBITS_ACCESS_NOTICE", "immediate").strip().lower() or "immediate"

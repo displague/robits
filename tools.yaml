@@ -434,6 +434,22 @@
       - content
   code: |
     return agent_think(employee_dict, content)
+- name: agent.read_briefing
+  grantable: true
+  owner_capability: agent
+  description: >
+    Read one of your briefings: notes on a tool or service you use often.
+    The names and one-line summaries are listed under Briefings in your instructions.
+  parameters:
+    type: object
+    properties:
+      name:
+        type: string
+        description: The briefing name as listed.
+    required:
+      - name
+  code: |
+    return agent_read_briefing(employee_dict, name)
 - name: agent.wait
   grantable: true
   owner_capability: agent

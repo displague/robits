@@ -796,6 +796,19 @@ def agent_think(employee_dict, content):
     return ""
 
 
+def agent_read_briefing(employee_dict, name):
+    """Return the full text of one of the calling persona's briefings."""
+    del employee_dict
+    briefings = getattr(_m.active_tool_caller, "briefings", None) or {}
+    if not briefings:
+        return "Error: You have no briefings."
+    key = str(name or "").strip()
+    briefing = briefings.get(key)
+    if briefing is None:
+        return f"Error: Unknown briefing {key!r}. Your briefings: {', '.join(briefings)}."
+    return briefing["text"]
+
+
 _WAIT_STATE_FILE = ".wait_state.json"
 
 
@@ -1075,6 +1088,7 @@ SANDBOX_GLOBALS = {
     "builtin_image_generation": builtin_image_generation,
     "agent_think": agent_think,
     "agent_wait": agent_wait,
+    "agent_read_briefing": agent_read_briefing,
     "access_audit_list": access_audit_list,
     "agent_spawn": agent_spawn,
     "subtask_control": subtask_control,
