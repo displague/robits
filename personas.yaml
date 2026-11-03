@@ -3,6 +3,7 @@
 # Legacy schema using `agent:` is still supported for backwards compatibility.
 # kind: thought | message | entry | digest
 # Optional: tools (replaces the role's default grants), tool_budget, max_tool_rounds.
+# Optional: briefings (names in briefings/ next to this file, or inline {name, summary, text}).
 # See "Tool allowlists and budgets" in README.md.
 # See robits/core/persona.py for seeding logic.
 

@@ -86,7 +86,7 @@ When `build_employee_dict()` receives the persona map, it instantiates each pers
 
 Seeding is idempotent: if any memory record already exists for the agent, the seed is skipped.
 
-Configure the file path with `ROBITS_PERSONAS_FILE` (defaults to `personas.yaml` in the working directory).
+Configure the path with `ROBITS_PERSONAS_FILE` (defaults to `personas.yaml` in the working directory). It can also name a directory with one persona per file; see [Persona directories and briefings](#persona-directories-and-briefings).
 
 ### Tool allowlists and budgets
 
@@ -110,6 +110,42 @@ Every model-backed role starts with broad default grants, which suits large host
 - `max_tool_rounds` caps consecutive tool-call rounds per model call (default `ROBITS_MAX_TOOL_ROUNDS`).
 
 With a `tools` list, a call to an unknown or disallowed tool, or with bad arguments, gets an error that ends with the tool names the persona may use. The error uses up a round. `tools.grant` and other runtime grants cannot widen the persona beyond its list unless an `operator` role (or the human) makes the grant. Personas without `tools` keep the default grants and plain errors. Subtasks inherit the budget and round cap.
+
+### Persona directories and briefings
+
+`ROBITS_PERSONAS_FILE` can point to a directory instead of a single file, so personas can be added or removed without editing a shared roster:
+
+```text
+personas/
+  riley.yaml            # one persona per *.yaml / *.yml file
+  sam.yaml
+  briefings/
+    release-notes.md
+    tracker.md
+```
+
+Each persona file is a single mapping with the same keys as a `personas.yaml` entry. `username` defaults to the file name, and `memories` is optional:
+
+```yaml
+# personas/sam.yaml
+full_name: Sam Ortiz
+role: SE
+tools: [agent.think, memory.search]
+briefings:
+  - release-notes                       # personas/briefings/release-notes.md
+  - name: on-call                       # or inline
+    summary: Who to page and when
+    text: Page the on-call engineer for outages only.
+```
+
+A **briefing** holds notes on a tool or service the persona uses often: what it's for, the conventions, and the mistakes to avoid. It works like a repo skill:
+- The system prompt carries only a one-line index, `- <name>: <summary>`.
+- The persona reads the full text on demand with `agent.read_briefing(name)`.
+- Small models therefore don't carry every briefing in every turn, and specialists differ in configuration, not code.
+
+Briefing files are Markdown. The summary comes from `summary:` in optional YAML front matter, or else from the first line. A single `personas.yaml` file can use briefings too; names resolve to a `briefings/` directory next to it.
+
+A persona with briefings is granted `agent.read_briefing`. With a `tools` list, it's placed first, so `tool_budget` never drops it. A persona can read only its own briefings. Unknown or malformed briefings log a warning and skip the persona.
 
 ### @mention detection
 
