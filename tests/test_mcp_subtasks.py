@@ -444,7 +444,9 @@ class TransportTests(unittest.TestCase):
             self.assertEqual(lower["mcp-protocol-version"], VERSION)
             self.assertEqual(lower["mcp-param-region"], header_value("line1\nline2"))
             self.assertEqual(body["params"]["_meta"]["io.modelcontextprotocol/protocolVersion"], VERSION)
-            self.assertEqual(len(active_role.runtime_event_stream.events()), 1)
+            events = active_role.runtime_event_stream.events()
+            self.assertEqual(len([e for e in events if e.event_type == "mcp.notification"]), 1)
+            self.assertEqual([e.payload["identity"] for e in events if e.event_type == "mcp.call"], ["static"])
         finally:
             server.shutdown()
             server.server_close()
