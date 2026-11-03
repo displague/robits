@@ -29,7 +29,21 @@ from pathlib import Path
 from urllib.parse import urlencode, urlsplit, urlunsplit
 
 REFRESH_MARGIN_SECONDS = 60
-_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9:._-]{0,63}$")
+_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
+_IDENTITY_KINDS = ("persona", "service")
+
+
+def identity_parts(identity):
+    """Split "default", "persona:<name>" or "service:<name>"; raise OAuthError otherwise."""
+    identity = str(identity or "")
+    if identity == "default":
+        return ("default", None)
+    kind, _, name = identity.partition(":")
+    if kind in _IDENTITY_KINDS and _NAME.match(name):
+        return (kind, name)
+    if identity == "persona":
+        raise OAuthError('"persona" names a mode, not an identity: use persona:<username>')
+    raise OAuthError(f"Invalid identity {identity!r}: use default, persona:<username> or service:<name>")
 _LOOPBACK = {"127.0.0.1", "localhost", "::1"}
 _thread_locks = {}
 _thread_locks_guard = threading.Lock()
@@ -155,10 +169,22 @@ class CredentialStore:
         self.root = Path(root or os.environ.get("ROBITS_CREDENTIALS_DIR", "").strip() or "var/credentials")
 
     def path(self, identity, server):
-        for value, what in ((identity, "identity"), (server, "server")):
-            if not _NAME.match(str(value)):
-                raise OAuthError(f"Invalid {what} name {value!r}")
-        return self.root / identity.replace(":", "_") / f"{server}.json"
+        """<root>/default/<server>.json or <root>/<persona|service>/<name>/<server>.json."""
+        if not _NAME.match(str(server)):
+            raise OAuthError(f"Invalid server name {server!r}")
+        kind, name = identity_parts(identity)
+        directory = self.root / kind if name is None else self.root / kind / name
+        return directory / f"{server}.json"
+
+    def identities(self, server):
+        """Identities with a stored credential for server."""
+        found = []
+        if (self.root / "default" / f"{server}.json").exists():
+            found.append("default")
+        for kind in _IDENTITY_KINDS:
+            for path in sorted((self.root / kind).glob(f"*/{server}.json")):
+                found.append(f"{kind}:{path.parent.name}")
+        return found
 
     def client_path(self, server):
         """Dynamic registrations, one per server, shared by every identity."""
@@ -171,9 +197,18 @@ class CredentialStore:
         except (OSError, ValueError):
             return None
 
+    def _ensure_dir(self, directory):
+        """Create directory and every level below the root with mode 0700."""
+        directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+        current = directory
+        while True:
+            os.chmod(current, 0o700)
+            if current == self.root or self.root not in current.parents:
+                break
+            current = current.parent
+
     def save(self, path, data):
-        path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-        os.chmod(path.parent, 0o700)
+        self._ensure_dir(path.parent)
         tmp = path.with_name(f".{path.name}.{secrets.token_hex(4)}.tmp")
         fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
         try:
@@ -197,7 +232,7 @@ class CredentialStore:
         """Exclusive across threads and processes for one credential file."""
         with _thread_locks_guard:
             thread_lock = _thread_locks.setdefault(str(path), threading.Lock())
-        path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        self._ensure_dir(path.parent)
         with thread_lock:
             fd = os.open(path.with_name(f".{path.name}.lock"), os.O_RDWR | os.O_CREAT, 0o600)
             try:
@@ -222,8 +257,7 @@ class OAuthClient:
             raise OAuthError('auth must be {"type": "oauth", ...}')
         self.server, self.server_url, self.auth = server, server_url, auth
         self.identity = str(auth.get("identity") or "default")
-        if self.identity == "persona":
-            raise OAuthError('"identity": "persona" is not supported yet; name one identity such as "service:team"')
+        identity_parts(self.identity)
         self.store = store or CredentialStore()
         self.path = self.store.path(self.identity, server)
         scopes = auth.get("scopes") or []

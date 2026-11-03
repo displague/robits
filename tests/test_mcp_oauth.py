@@ -37,6 +37,7 @@ class FakeOAuthWorld:
         self.refuse_refresh = False
         self.reject_access_once = set()
         self.mcp_tokens = []
+        self.tools_for = lambda token: [{"name": "echo", "inputSchema": {"type": "object", "properties": {}}}]
         world = self
 
         class Handler(BaseHTTPRequestHandler):
@@ -98,8 +99,8 @@ class FakeOAuthWorld:
                             "WWW-Authenticate": f'Bearer resource_metadata="{world.base}/.well-known/oauth-protected-resource/mcp"'})
                     world.mcp_tokens.append(token)
                     message = json.loads(raw)
-                    result = ({"tools": [{"name": "echo", "inputSchema": {"type": "object", "properties": {}}}]}
-                              if message["method"] == "tools/list" else {"content": [{"type": "text", "text": "ok"}]})
+                    result = ({"tools": world.tools_for(token)} if message["method"] == "tools/list"
+                              else {"content": [{"type": "text", "text": "ok"}]})
                     return self.reply(200, {"jsonrpc": "2.0", "id": message["id"], "result": result})
                 return self.reply(404, {"error": "not_found"})
 
@@ -187,7 +188,7 @@ class LoginTests(OAuthTestCase):
         self.assertEqual(client.status()["status"], "ok")
         self.assertEqual(stat.S_IMODE(client.path.stat().st_mode), 0o600)
         self.assertEqual(stat.S_IMODE(client.path.parent.stat().st_mode), 0o700)
-        self.assertEqual(client.path, self.creds / "service_team" / "tracker.json")
+        self.assertEqual(client.path, self.creds / "service" / "team" / "tracker.json")
 
     def test_wrong_verifier_or_state_is_refused(self):
         client = self.client()
@@ -212,6 +213,7 @@ class LoginTests(OAuthTestCase):
     def test_configuration_errors(self):
         for bad in ({"type": "basic"}, {"type": "oauth"}, {"type": "oauth", "client_id": "http://example.org/c.json"},
                     {"type": "oauth", "registration": "dynamic", "identity": "persona"},
+                    {"type": "oauth", "registration": "dynamic", "identity": "persona:"},
                     {"type": "oauth", "registration": "dynamic", "identity": "../x"}):
             with self.subTest(bad=bad), self.assertRaises(oauth.OAuthError):
                 oauth.OAuthClient("tracker", self.url, bad)
@@ -278,7 +280,7 @@ class TransportTests(OAuthTestCase):
         self.login()
         result = self.transport().request("tools/list", {}, lambda message: None)
         self.assertEqual(result["tools"][0]["name"], "echo")
-        stored = json.loads((self.creds / "service_team" / "tracker.json").read_text())
+        stored = json.loads((self.creds / "service" / "team" / "tracker.json").read_text())
         self.assertEqual(self.world.mcp_tokens, [stored["access_token"]])
 
     def test_401_forces_one_refresh_and_retry(self):
@@ -338,11 +340,11 @@ class CliTests(OAuthTestCase):
         self.assertEqual(auth_cli.main(["--config", str(config), "login", "tracker", "--paste"],
                                        stdin=Browser(), out=out), 0)
         self.assertIn('"status": "ok"', out.getvalue())
-        self.assertTrue((self.creds / "service_team" / "tracker.json").exists())
-        refresh_token = json.loads((self.creds / "service_team" / "tracker.json").read_text())["refresh_token"]
+        self.assertTrue((self.creds / "service" / "team" / "tracker.json").exists())
+        refresh_token = json.loads((self.creds / "service" / "team" / "tracker.json").read_text())["refresh_token"]
         self.assertEqual(auth_cli.main(["--config", str(config), "logout", "tracker"], out=io.StringIO()), 0)
         self.assertEqual(self.world.revoked, [refresh_token])
-        self.assertFalse((self.creds / "service_team" / "tracker.json").exists())
+        self.assertFalse((self.creds / "service" / "team" / "tracker.json").exists())
 
     def test_loopback_login(self):
         client = self.client()

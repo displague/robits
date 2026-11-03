@@ -1,8 +1,11 @@
 """Operator CLI for MCP server OAuth logins (#138). Models never start a login.
 
-    python -m robits.auth login <server> [--paste] [--port N] [--no-browser]
+    python -m robits.auth login <server> [--as IDENTITY] [--paste] [--port N] [--no-browser]
     python -m robits.auth status [<server>]
-    python -m robits.auth logout <server>
+    python -m robits.auth logout <server> [--as IDENTITY]
+
+For a server with "identity": "persona", each persona logs in separately:
+``--as persona:<username>``. Otherwise the configured identity is used.
 
 Servers and their ``auth`` blocks come from ROBITS_MCP_CONFIG (or --config).
 ``login`` opens the authorization URL and waits for the loopback redirect on
@@ -31,13 +34,23 @@ def load_servers(path):
     return json.loads(Path(path).read_text(encoding="utf-8"))
 
 
-def client_for(servers, name, store=None):
+def client_for(servers, name, store=None, identity=None):
     options = servers.get(name)
     if not isinstance(options, dict) or "url" not in options:
         raise SystemExit(f"No HTTP MCP server named {name!r} in the config")
     if not isinstance(options.get("auth"), dict):
         raise SystemExit(f"Server {name!r} has no auth block")
-    return OAuthClient(name, options["url"], options["auth"], store=store)
+    auth = dict(options["auth"])
+    mode = str(auth.get("identity") or "default")
+    if identity:
+        if mode == "persona" and not identity.startswith("persona:"):
+            raise SystemExit(f"{name} acts as each persona: use --as persona:<username>")
+        if mode != "persona" and identity != mode:
+            raise SystemExit(f"{name} always uses {mode}; --as {identity} doesn't apply")
+        auth["identity"] = identity
+    elif mode == "persona":
+        raise SystemExit(f"{name} acts as each persona: pass --as persona:<username>")
+    return OAuthClient(name, options["url"], auth, store=store)
 
 
 def probe(url):
@@ -117,16 +130,18 @@ def main(argv=None, stdin=sys.stdin, out=sys.stdout):
     login_cmd.add_argument("--paste", action="store_true", help="paste the redirect address instead of a loopback listener")
     login_cmd.add_argument("--port", type=int, default=0, help="loopback port (default: random; 8765 with --paste)")
     login_cmd.add_argument("--no-browser", action="store_true")
+    login_cmd.add_argument("--as", dest="identity", help="identity to log in as, e.g. persona:alex_chen")
     status_cmd = commands.add_parser("status", help="show stored logins (no secrets)")
     status_cmd.add_argument("server", nargs="?")
     logout_cmd = commands.add_parser("logout", help="revoke and delete a stored login")
     logout_cmd.add_argument("server")
+    logout_cmd.add_argument("--as", dest="identity", help="identity to log out, e.g. persona:alex_chen")
     args = parser.parse_args(argv)
     servers = load_servers(args.config)
     store = CredentialStore()
     try:
         if args.command == "login":
-            client = client_for(servers, args.server, store)
+            client = client_for(servers, args.server, store, args.identity)
             login(client, servers[args.server]["url"], paste=args.paste, port=args.port,
                   open_browser=not args.no_browser, stdin=stdin, out=out)
             print(json.dumps(client.status(), sort_keys=True), file=out)
@@ -134,10 +149,17 @@ def main(argv=None, stdin=sys.stdin, out=sys.stdout):
             names = [args.server] if args.server else [n for n, o in servers.items()
                                                         if isinstance(o, dict) and isinstance(o.get("auth"), dict)]
             for name in names:
-                print(json.dumps(client_for(servers, name, store).status(), sort_keys=True), file=out)
+                mode = str(servers[name]["auth"].get("identity") or "default")
+                identities = store.identities(name) if mode == "persona" else [mode]
+                if not identities:
+                    print(json.dumps({"server": name, "identity": "persona:*", "status": "not_logged_in"}), file=out)
+                for identity in identities:
+                    print(json.dumps(client_for(servers, name, store, identity if mode == "persona" else None).status(),
+                                     sort_keys=True), file=out)
         else:
-            client_for(servers, args.server, store).logout()
-            print(f"Logged out of {args.server}.", file=out)
+            client = client_for(servers, args.server, store, args.identity)
+            client.logout()
+            print(f"Logged out of {args.server} ({client.identity}).", file=out)
     except OAuthError as error:
         print(f"Error: {error}", file=sys.stderr)
         return 1

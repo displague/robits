@@ -83,27 +83,61 @@ class HttpTransport:
             raise ValueError("MCP timeout must be between 0 and 300 seconds")
         self.url, self.headers, self.timeout = url, headers or {}, timeout
         self.tool_headers = {}
-        self.oauth = None
+        self.auth = None
+        self.oauth = None            # the client for a fixed identity (default or service:<name>)
+        self.identity_mode = None
+        self.service_tools = None
+        self._clients = {}
         if auth is not None:
             from robits.runtime.oauth import OAuthClient
             if not isinstance(auth, dict) or not auth.get("server"):
                 raise ValueError("MCP auth needs the server name (set by MCPManager)")
-            self.oauth = OAuthClient(auth["server"], url, auth)
+            self.auth = auth
+            self.identity_mode = str(auth.get("identity") or "default")
+            service_tools = auth.get("service_tools")
+            if service_tools is not None:
+                if not self.identity_mode.startswith("service:"):
+                    raise ValueError("auth.service_tools is only for a service:<name> identity")
+                if not isinstance(service_tools, list) or not all(isinstance(t, str) and t for t in service_tools):
+                    raise ValueError("auth.service_tools must be a list of remote tool names")
+                self.service_tools = frozenset(service_tools)
+            if self.identity_mode == "persona":
+                OAuthClient(auth["server"], url, {**auth, "identity": "persona:check"})  # validate the block
+            else:
+                self.oauth = self.client(self.identity_mode)
 
-    def request(self, method, params, notify):
-        if self.oauth is None:
+    def client(self, identity):
+        """The OAuth client for one identity on this server (created on first use)."""
+        from robits.runtime.oauth import OAuthClient
+        if identity not in self._clients:
+            self._clients[identity] = OAuthClient(self.auth["server"], self.url, {**self.auth, "identity": identity})
+        return self._clients[identity]
+
+    def identity_for(self, role):
+        """Which identity a call from role uses: the persona's own, or the configured fixed one."""
+        if self.identity_mode != "persona":
+            return self.identity_mode
+        name = getattr(role, "runtime_role_name", None) or getattr(role, "name", None)
+        if not name:
+            from robits.runtime.oauth import OAuthError
+            raise OAuthError(f"{self.auth['server']} acts as the calling persona, but there is no calling persona")
+        return f"persona:{name}"
+
+    def request(self, method, params, notify, identity=None):
+        if self.auth is None:
             return self._post(method, params, notify, {})
         from robits.runtime.oauth import ReloginRequired
-        token = self.oauth.access_token()
+        client = self.client(identity or self.identity_mode)
+        token = client.access_token()
         try:
             return self._post(method, params, notify, {"Authorization": f"Bearer {token}"})
         except _Unauthorized:
-            token = self.oauth.access_token(force_refresh=True, stale=token)
+            token = client.access_token(force_refresh=True, stale=token)
         try:
             return self._post(method, params, notify, {"Authorization": f"Bearer {token}"})
         except _Unauthorized:
-            self.oauth.mark_relogin()
-            raise ReloginRequired(self.oauth.server, self.oauth.identity) from None
+            client.mark_relogin()
+            raise ReloginRequired(client.server, client.identity) from None
 
     def _post(self, method, params, notify, auth_headers):
         request_id = uuid4().hex
@@ -327,6 +361,12 @@ class MCPManager:
                         for name, options in servers.items()}
         self.pending = {}
         self.registered = {}
+        self.server_tools = {}      # server -> registry names it registered (any identity)
+        self.identity_tools = {}    # (server, identity) -> remote tool names that identity was offered
+
+    def _identity(self, server, role):
+        transport = self.servers[server]
+        return transport.identity_for(role) if getattr(transport, "auth", None) is not None else None
 
     def rpc(self, server, method, params, role):
         def notify(message):
@@ -340,8 +380,27 @@ class MCPManager:
             "io.modelcontextprotocol/clientCapabilities": {
                 "elicitation": {"form": {}}, "extensions": {TASKS: {}}}}}
         from robits.runtime.oauth import ReloginRequired
+        transport = self.servers[server]
+        identity = self._identity(server, role)
+        tool = params.get("name") if method == "tools/call" else None
+        if tool is not None and identity is not None:
+            if transport.service_tools is not None and tool not in transport.service_tools:
+                raise PermissionError(f"{server}: {tool} is not one of the tools allowed under {identity}")
+            offered = self.identity_tools.get((server, identity))
+            if offered is not None and tool not in offered:
+                raise PermissionError(f"{server}: {tool} is not offered to {identity}")
+        if method != "tools/list":
+            entry = {"server": server, "method": method, "tool": tool, "identity": identity or "static",
+                     "agent": owner(role)[1]}
+            from robits.core.io import get_logger
+            get_logger().write_event("mcp_call", **entry)
+            stream = getattr(role, "runtime_event_stream", None)
+            if stream is not None:
+                stream.emit("mcp.call", getattr(role, "runtime_session_id", None), entry, visibility="private")
         try:
-            return self.servers[server].request(method, params, notify)
+            if identity is not None:
+                return transport.request(method, params, notify, identity=identity)
+            return transport.request(method, params, notify)
         except ReloginRequired as exc:
             stream = getattr(role, "runtime_event_stream", None)
             if stream is not None:
@@ -354,15 +413,31 @@ class MCPManager:
         from robits.core.tools import ToolDefinition
         if "mcp" not in getattr(role, "capabilities", set()):
             return
+        from robits.runtime.oauth import OAuthError
         for server in self.servers:
-            key = (registry, server)
+            transport = self.servers[server]
+            try:
+                identity = self._identity(server, role)
+            except OAuthError:
+                continue
+            # Discovery runs once per identity: different users may be offered different tools.
+            key = (registry, server, identity)
             if key in self.registered and all(name in registry for name in self.registered[key]):
                 continue
-            definitions, cursor, seen = [], None, set()
-            for _ in range(100):
-                result = self.rpc(server, "tools/list", {"cursor": cursor} if cursor else {}, role)
+            definitions, offered = [], set()
+            try:
+                pages = self._list_pages(server, role)
+            except OAuthError:
+                # Not logged in (or relogin_required): skip this server for this role; the
+                # rpc already emitted auth.relogin_required. Other servers still register.
+                continue
+            for result in pages:
                 for remote in result.get("tools", []):
                     original = remote["name"]
+                    if transport is not None and getattr(transport, "service_tools", None) is not None \
+                            and original not in transport.service_tools:
+                        continue
+                    offered.add(original)
                     name = registry_tool_name(server, original)
                     schema = remote.get("inputSchema", {"type": "object", "properties": {}})
                     if schema.get("type") != "object":
@@ -386,21 +461,35 @@ class MCPManager:
                         name, remote.get("description", original), schema,
                         list(schema.get("properties", {})), schema.get("required", []), make_call(server, original, schema),
                         namespace="mcp", required_capabilities=("mcp",), raw_arguments=True))
-                cursor = result.get("nextCursor")
-                if not cursor:
-                    break
-                if cursor in seen:
-                    raise ValueError("MCP tools/list cursor repeated")
-                seen.add(cursor)
-            else:
-                raise ValueError("MCP tool discovery page budget exceeded")
+            mine = self.server_tools.setdefault(server, set())
+            fresh = []
             for tool in definitions:
+                if tool.name in mine and tool.name in registry:
+                    continue  # already registered by another identity on this server
                 if tool.name in registry or tool.openai_name in registry:
                     raise ValueError(f"MCP tool collision: {tool.name}")
-            for tool in definitions:
+                fresh.append(tool)
+            for tool in fresh:
                 registry._tools[tool.name] = tool
                 registry._aliases[tool.openai_name] = tool.name
+                mine.add(tool.name)
             self.registered[key] = [tool.name for tool in definitions]
+            if identity is not None:
+                self.identity_tools[(server, identity)] = offered
+
+    def _list_pages(self, server, role):
+        """All tools/list pages for the role's identity (bounded, cursor loops refused)."""
+        pages, cursor, seen = [], None, set()
+        for _ in range(100):
+            result = self.rpc(server, "tools/list", {"cursor": cursor} if cursor else {}, role)
+            pages.append(result)
+            cursor = result.get("nextCursor")
+            if not cursor:
+                return pages
+            if cursor in seen:
+                raise ValueError("MCP tools/list cursor repeated")
+            seen.add(cursor)
+        raise ValueError("MCP tool discovery page budget exceeded")
 
     def call(self, server, tool, arguments, role):
         params = {"name": tool, "arguments": arguments}
