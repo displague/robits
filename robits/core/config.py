@@ -235,6 +235,10 @@ class Config:
         self.subtask_manager = None
         self.mcp_manager = None
         self.mcp_config_path = env.get("ROBITS_MCP_CONFIG", "").strip()
+        # Deployments mount config read-only; these point robits at the mounted copies.
+        self.tools_file = env.get("ROBITS_TOOLS_FILE", "").strip() or None
+        # Headless loop touches this file each pass; `python -m robits.health` checks its age.
+        self.heartbeat_file = env.get("ROBITS_HEARTBEAT_FILE", "").strip() or None
         self.active_session_transcript_length = 0
 
 

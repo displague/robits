@@ -1,0 +1,32 @@
+# Single-pod robits example. Copy this directory into your own repository, replace
+# config/ with your roster and settings, and create the Secret (see secret.example.yaml).
+#   kubectl create namespace robits
+#   kubectl -n robits apply -f secret.example.yaml   # after filling it in
+#   kubectl apply -k .
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: robits
+labels:
+  - pairs: {app.kubernetes.io/name: robits}
+    includeSelectors: true
+resources:
+  - pvc.yaml
+  - deployment.yaml
+  - networkpolicy.yaml
+configMapGenerator:
+  - name: robits-config
+    files:
+      - config/personas.yaml
+    literals:
+      # Any OpenAI-compatible endpoint. Chat Completions is the widest-supported API
+      # on local servers; ROBITS_PROVIDER_API=responses also works (see docs/deploy.md).
+      - OPENAI_BASE_URL=http://ollama.ollama.svc.cluster.local:11434/v1/
+      - ROBITS_MODEL=granite4.1:3b
+      - ROBITS_PROVIDER_API=chat
+      - ROBITS_TIMEZONE=UTC
+      - ROBITS_MAX_TURNS_PER_HOUR=20
+      - ROBITS_MAX_TOOL_ROUNDS=4
+images:
+  - name: robits
+    newName: ghcr.io/displague/robits
+    newTag: "0.2.0"

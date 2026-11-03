@@ -1,0 +1,6 @@
+# Runtime dependencies for headless use (the container image installs only these).
+openai
+PyYaml
+termcolor
+aiosqlite
+jsonschema>=4.18,<5
