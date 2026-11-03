@@ -56,6 +56,35 @@ def _response_text(response):
     return "".join(chunks)
 
 
+def _parse_tool_arguments(raw):
+    """Parse tool-call arguments. The spec sends a JSON string; some local servers send an object."""
+    if isinstance(raw, dict):
+        return raw
+    args = json.loads(raw or "{}")
+    if not isinstance(args, dict):
+        raise json.JSONDecodeError("arguments must be a JSON object", str(raw), 0)
+    return args
+
+
+def _arguments_text(raw):
+    """Return tool-call arguments as the JSON string the spec expects."""
+    return raw if isinstance(raw, str) and raw else json.dumps(raw or {})
+
+
+def _assistant_message(message):
+    """Dump an assistant message for the next request, with arguments as JSON strings."""
+    # warnings=False: the SDK types arguments as str and warns when a server sent an object.
+    try:
+        dumped = message.model_dump(warnings=False)
+    except TypeError:
+        dumped = message.model_dump()
+    for call in dumped.get("tool_calls") or []:
+        function = call.get("function") or {}
+        if "arguments" in function:
+            function["arguments"] = _arguments_text(function["arguments"])
+    return dumped
+
+
 def _response_function_calls(response):
     """Return all function_call output items from a Responses API response."""
     calls = []
@@ -511,13 +540,13 @@ class ChatCompletionsProvider(ModelProvider):
                 return content
             if employee_dict is None:
                 return "Error: Tool call requested but no employee dictionary is available."
-            kwargs["messages"] = list(kwargs["messages"]) + [message.model_dump()]
+            kwargs["messages"] = list(kwargs["messages"]) + [_assistant_message(message)]
             tool_results = []
             for call in tool_calls:
                 tool_name = call.function.name
                 call_id = call.id
                 try:
-                    args = json.loads(call.function.arguments or "{}")
+                    args = _parse_tool_arguments(call.function.arguments)
                 except json.JSONDecodeError as error:
                     payload = {
                         "agent": getattr(role, "name", None),
@@ -544,15 +573,46 @@ class ChatCompletionsProvider(ModelProvider):
         return "Error: Too many consecutive tool-call rounds."
 
 
-class ResponsesProvider(ModelProvider):
-    """ModelProvider backed by the OpenAI Responses API (stateful multi-turn)."""
+def _replay_items(response):
+    """Turn a response's output into input items for a backend that keeps no state.
 
-    def __init__(self, api_client, registry=None):
+    Function calls and assistant text are kept; reasoning items are dropped because
+    non-OpenAI servers may reject them and they carry no state the model needs.
+    """
+    items = []
+    for item in getattr(response, "output", []) or []:
+        kind = getattr(item, "type", None)
+        if kind == "function_call":
+            items.append({
+                "type": "function_call",
+                "call_id": getattr(item, "call_id", None) or getattr(item, "id", ""),
+                "name": getattr(item, "name", ""),
+                "arguments": _arguments_text(getattr(item, "arguments", "")),
+            })
+        elif kind == "message":
+            text = "".join(getattr(part, "text", "") or "" for part in getattr(item, "content", []) or [])
+            if text:
+                items.append({"role": "assistant", "content": text})
+    return items
+
+
+class ResponsesProvider(ModelProvider):
+    """ModelProvider backed by the OpenAI Responses API.
+
+    With a stateful backend, tool rounds chain previous_response_id and send only the new
+    function_call_output items. Otherwise (ROBITS_RESPONSES_STATEFUL, see config) each round
+    replays the whole conversation, as ChatCompletionsProvider does.
+    """
+
+    stateful = None  # None: use the configured ROBITS_RESPONSES_STATEFUL
+
+    def __init__(self, api_client, registry=None, stateful=None):
         self.client = api_client
         self.registry = registry if registry is not None else _m.tool_registry
+        self.stateful = stateful
 
     def generate(self, role, model, sender, messages):
-        """Run a responses agentic loop, chaining previous_response_id for state continuity."""
+        """Run a responses agentic loop until a text reply is produced."""
         role.runtime_model = model
         employee_dict = getattr(role, "employee_dict", None)
         tools = self.registry.as_responses_tools(role)
@@ -576,6 +636,7 @@ class ResponsesProvider(ModelProvider):
 
         response = _with_model_retries(lambda: self.client.responses.create(**kwargs))
         _emit_token_usage_event(role, response)
+        conversation = list(messages)
         round_limit = _max_tool_rounds(role)
         for round_index in range(round_limit):
             function_calls = _response_function_calls(response)
@@ -599,7 +660,7 @@ class ResponsesProvider(ModelProvider):
                     "tool_name": tool_name,
                 }
                 try:
-                    args = json.loads(getattr(call, "arguments", "") or "{}")
+                    args = _parse_tool_arguments(getattr(call, "arguments", ""))
                 except json.JSONDecodeError as error:
                     payload["arguments"] = getattr(call, "arguments", "")
                     payload["error"] = f"Invalid tool arguments JSON: {error}"
@@ -628,19 +689,15 @@ class ResponsesProvider(ModelProvider):
             if round_index + 1 >= round_limit:
                 break
             previous_response_id = getattr(response, "id", None)
-            if previous_response_id:
-                response = _with_model_retries(
-                    lambda: self.client.responses.create(
-                        model=model,
-                        input=outputs,
-                        previous_response_id=previous_response_id,
-                    )
-                )
-                _emit_token_usage_event(role, response)
+            stateful = self.stateful if self.stateful is not None else getattr(_m, "responses_stateful", True)
+            if stateful and previous_response_id:
+                # Tools and sampling settings are not inherited from the previous response.
+                request = {**kwargs, "input": outputs, "previous_response_id": previous_response_id}
             else:
-                kwargs["input"] = messages + outputs
-                response = _with_model_retries(lambda: self.client.responses.create(**kwargs))
-                _emit_token_usage_event(role, response)
+                conversation = conversation + _replay_items(response) + outputs
+                request = {**kwargs, "input": conversation}
+            response = _with_model_retries(lambda: self.client.responses.create(**request))
+            _emit_token_usage_event(role, response)
         return "Error: Too many consecutive tool-call rounds."
 
 
