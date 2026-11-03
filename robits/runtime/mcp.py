@@ -61,10 +61,20 @@ def header_paths(schema):
     return paths
 
 
-class HttpTransport:
-    """Bounded POST transport, including in-request SSE progress notifications."""
+class _Unauthorized(Exception):
+    def __init__(self, www_authenticate):
+        super().__init__("MCP HTTP status 401")
+        self.www_authenticate = www_authenticate
 
-    def __init__(self, url, headers=None, timeout=30):
+
+class HttpTransport:
+    """Bounded POST transport, including in-request SSE progress notifications.
+
+    With ``auth`` ({"type": "oauth", ...}) requests carry an OAuth bearer token
+    from robits.runtime.oauth; a 401 forces one refresh and one retry.
+    """
+
+    def __init__(self, url, headers=None, timeout=30, auth=None):
         from urllib.parse import urlsplit
         parsed = urlsplit(url)
         if parsed.scheme not in {"http", "https"} or not parsed.hostname or parsed.username:
@@ -73,11 +83,32 @@ class HttpTransport:
             raise ValueError("MCP timeout must be between 0 and 300 seconds")
         self.url, self.headers, self.timeout = url, headers or {}, timeout
         self.tool_headers = {}
+        self.oauth = None
+        if auth is not None:
+            from robits.runtime.oauth import OAuthClient
+            if not isinstance(auth, dict) or not auth.get("server"):
+                raise ValueError("MCP auth needs the server name (set by MCPManager)")
+            self.oauth = OAuthClient(auth["server"], url, auth)
 
     def request(self, method, params, notify):
+        if self.oauth is None:
+            return self._post(method, params, notify, {})
+        from robits.runtime.oauth import ReloginRequired
+        token = self.oauth.access_token()
+        try:
+            return self._post(method, params, notify, {"Authorization": f"Bearer {token}"})
+        except _Unauthorized:
+            token = self.oauth.access_token(force_refresh=True, stale=token)
+        try:
+            return self._post(method, params, notify, {"Authorization": f"Bearer {token}"})
+        except _Unauthorized:
+            self.oauth.mark_relogin()
+            raise ReloginRequired(self.oauth.server, self.oauth.identity) from None
+
+    def _post(self, method, params, notify, auth_headers):
         request_id = uuid4().hex
         body = {"jsonrpc": "2.0", "id": request_id, "method": method, "params": params}
-        headers = {**self.headers, "Content-Type": "application/json",
+        headers = {**self.headers, **auth_headers, "Content-Type": "application/json",
                    "Accept": "application/json, text/event-stream",
                    "MCP-Protocol-Version": VERSION, "Mcp-Method": method}
         if method in {"tools/call", "prompts/get", "resources/read"}:
@@ -122,6 +153,8 @@ class HttpTransport:
                 target += "?" + parsed.query
             connection.request("POST", target, body=json.dumps(body).encode(), headers=headers)
             response = connection.getresponse()
+            if response.status == 401:
+                raise _Unauthorized(response.headers.get("WWW-Authenticate", ""))
             if not 200 <= response.status < 300:
                 raise ValueError(f"MCP HTTP status {response.status}; redirects are disabled")
             if "text/event-stream" not in response.headers.get("Content-Type", ""):
@@ -260,7 +293,19 @@ class StdioTransport:
 
 
 def make_transport(**options):
-    return StdioTransport(**options) if "command" in options else HttpTransport(**options)
+    if "command" in options:
+        if "auth" in options:
+            raise ValueError("MCP auth is supported for HTTP servers only")
+        return StdioTransport(**options)
+    return HttpTransport(**options)
+
+
+def _server_options(name, options):
+    """Tell an OAuth-enabled transport which server it is (for its credential file)."""
+    auth = options.get("auth") if isinstance(options, dict) else None
+    if isinstance(auth, dict):
+        return {**options, "auth": {**auth, "server": name}}
+    return options
 
 
 def registry_tool_name(server, remote_name):
@@ -278,7 +323,8 @@ def owner(role):
 
 class MCPManager:
     def __init__(self, servers, transport_factory=make_transport):
-        self.servers = {name: transport_factory(**options) for name, options in servers.items()}
+        self.servers = {name: transport_factory(**_server_options(name, options))
+                        for name, options in servers.items()}
         self.pending = {}
         self.registered = {}
 
@@ -293,7 +339,15 @@ class MCPManager:
             "io.modelcontextprotocol/clientInfo": {"name": "robits", "version": "1"},
             "io.modelcontextprotocol/clientCapabilities": {
                 "elicitation": {"form": {}}, "extensions": {TASKS: {}}}}}
-        return self.servers[server].request(method, params, notify)
+        from robits.runtime.oauth import ReloginRequired
+        try:
+            return self.servers[server].request(method, params, notify)
+        except ReloginRequired as exc:
+            stream = getattr(role, "runtime_event_stream", None)
+            if stream is not None:
+                stream.emit("auth.relogin_required", getattr(role, "runtime_session_id", None),
+                            {"server": exc.server, "identity": exc.identity}, visibility="private")
+            raise
 
     def register(self, registry, role):
         """Discover only for MCP-enabled roles; preserve inputSchema verbatim."""

@@ -186,6 +186,7 @@ For local models with embedding support, `sqlite-vec` is included in `requiremen
 | `ROBITS_CLOCK_STATE` | `on` | Base clock state: `on`, `break`, or `off` |
 | `ROBITS_BREAK_SCHEDULE` | — | Scheduled break windows, e.g. `12:00-13:00,15:00-15:30` |
 | `ROBITS_PERSONAS_FILE` | `personas.yaml` | Path to persona seed file |
+| `ROBITS_CREDENTIALS_DIR` | `var/credentials` | OAuth logins for MCP servers, one `0600` file per identity and server, outside agent workspaces (see [docs/mcp-oauth.md](docs/mcp-oauth.md)) |
 | `ROBITS_EMBEDDING_MODEL` | — | Embedding model name; disables semantic search when unset |
 | `ROBITS_EMBEDDING_BASE_URL` | `OPENAI_BASE_URL` | Embedding endpoint (can differ from chat endpoint) |
 | `ROBITS_EMBEDDING_API_KEY` | `OPENAI_API_KEY` | Embedding API key |
