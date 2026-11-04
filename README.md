@@ -112,6 +112,38 @@ Every model-backed role starts with broad default grants, which suits large host
 
 With a `tools` list, a call to an unknown or disallowed tool, or with bad arguments, gets an error that ends with the tool names the persona may use. The error uses up a round. `tools.grant` and other runtime grants cannot widen the persona beyond its list unless an `operator` role (or the human) makes the grant. Personas without `tools` keep the default grants and plain errors. Subtasks inherit the budget and round cap.
 
+### Small local models
+
+Small models (2–4B parameters on CPU or NPU) do much better with a short prompt, a few tools and no hidden thinking eating the output budget. Three persona settings, alongside a short `tools` list:
+
+```yaml
+- username: sam_small
+  role: SE
+  tools: [agent.think, agent.wait, memory.search]
+  prompt_profile: compact     # short turn rules, plain-text state line (default: ROBITS_PROMPT_PROFILE)
+  reasoning_effort: none      # none | low | medium | high (default: ROBITS_REASONING_EFFORT)
+  max_tokens: 400             # output cap per model call
+  memories: []
+```
+
+- **`prompt_profile: compact`** replaces the long turn rules with a few direct lines, including "answer from the conversation; don't ask for more context". It renders the runtime state as one short line instead of JSON.
+- **`reasoning_effort: none`** turns off thinking on servers that support it, such as Ollama. Models that think by default can otherwise use the whole `max_tokens` budget on reasoning and return an empty reply. robits sends `reasoning_effort` on the Chat Completions API and `reasoning.effort` on the Responses API.
+- **Every profile mentions only the tools the persona is offered.** Instructions for delegation (`agent.focus`/`agent.spawn`), memory recall, silent thinking, waiting and the tool-authoring manual (`tools.propose`) appear only when those tools are in the persona's list.
+
+**What helped most.** One small model (gemma4:e2b via Ollama) was measured with `scripts/small_model_eval.py` on four scripted tasks, three runs each: answering from given facts, taking a break with `agent.wait`, a short status line, and recalling the previous turn.
+
+| Configuration | Prompt | Tasks | Clean replies | Time |
+|---|---|---|---|---|
+| Default SE (25 tool schemas) | ~5.8k tok | 2/12 | 3/12 | 9.4 min |
+| Thinking off, 25 tools | ~5.8k tok | 2/12 | 1/12 | 7.6 min |
+| Standard prompt, thinking off, 3 tools | ~1.3k tok | 12/12 | 8/12 | 1.8 min |
+| Compact, 3 tools | ~0.8k tok | 12/12 | 12/12 | 2.1 min |
+| **Compact, thinking off, 3 tools** | ~0.8k tok | **12/12** | **12/12** | **1.1 min** |
+
+- **The tool list matters most.** With 25 schemas, the model often returned nothing or called tools that don't exist.
+- **The compact profile fixes behaviour.** The standard rule "use memory.search before answering" made the model search instead of answering from facts it had just been given.
+- **Turning thinking off** halved the time at the same quality.
+
 ### Persona directories and briefings
 
 `ROBITS_PERSONAS_FILE` can point to a directory instead of a single file, so personas can be added or removed without editing a shared roster:
@@ -234,6 +266,8 @@ For local models with embedding support, `sqlite-vec` is included in `requiremen
 | `ROBITS_RESPONSES_STATEFUL` | `auto` | Whether the Responses backend honours `previous_response_id`. `auto` assumes yes only for OpenAI's API (no `OPENAI_BASE_URL`, or `api.openai.com`); otherwise each tool round resends the whole conversation. Set `true` for a stateful local server such as LM Studio to send less per round |
 | `ROBITS_MAX_CONTEXT_TOKENS` | `0` (unlimited) | Trim conversation history to this token budget before each model call (~4 chars/token). Useful for small-context local models (e.g. `3500` for 4k-context models) |
 | `ROBITS_MAX_TOOL_ROUNDS` | `8` | Consecutive tool-call rounds per model call; personas can override with `max_tool_rounds` |
+| `ROBITS_PROMPT_PROFILE` | `standard` | `standard` or `compact` (short rules and state for small models; personas can override with `prompt_profile`) |
+| `ROBITS_REASONING_EFFORT` | — | `none`, `low`, `medium` or `high`, sent to the model on both APIs; `none` turns thinking off where supported. Personas can override with `reasoning_effort` |
 | `ROBITS_TOOL_BUDGET` | `0` (unlimited) | Most tool schemas sent per round; personas can override with `tool_budget` |
 | `ROBITS_MEMORY_DB` | `~/.local/share/robits/memory.db` | SQLite path for memory storage |
 | `ROBITS_CLOCK_STATE` | `on` | Base clock state: `on`, `break`, or `off` |
