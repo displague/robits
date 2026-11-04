@@ -1465,7 +1465,7 @@ class Session:
                 return message, sender, None
             if target is None and others:
                 self._pending_replies.remove((message, sender))
-                return message, sender, others[0]
+                return message, sender, self._next_in_rotation(others)
         if (last_response or "").strip():
             target = self._parse_directed(last_response)[0]
             if (target in due) if target is not None else bool(due):
@@ -1485,13 +1485,23 @@ class Session:
             wake_at = clock_change
         return self._idle(now, wake_at, "nothing_due" if due else "no_persona_due", finite)
 
+    def _next_in_rotation(self, candidates):
+        """The first of candidates in the scheduler's rotation order, starting from its current position."""
+        names = self.scheduler.participant_names
+        for offset in range(len(names)):
+            name = names[(self.scheduler.index + offset) % len(names)]
+            if name in candidates:
+                return name
+        return candidates[0]
+
     def _persona_wake_times(self, now, last_response=""):
         """Return {name: datetime or None}: when each persona next has a reason to take a turn."""
-        pending = list(self._inbox)
-        pending.extend(message for message, _sender in self._pending_replies)
+        # (target, author): an undirected pending reply is a reason to wake anyone but its author.
+        pending = [(self._parse_directed(message)[0], None) for message in self._inbox]
+        pending.extend((self._parse_directed(message)[0], self._role_to_key.get(id(sender)))
+                       for message, sender in self._pending_replies)
         if (last_response or "").strip():
-            pending.append(last_response)
-        targets = [self._parse_directed(message)[0] for message in pending]
+            pending.append((self._parse_directed(last_response)[0], None))
         interval = timedelta(seconds=_m.min_turn_interval_seconds)
         wake_times = {}
         for name in self.scheduler.participant_names:
@@ -1504,7 +1514,8 @@ class Session:
             wu = getattr(role, "waiting_until", None)
             alarm_at = next_alarm_at(role)
             reasons = [t for t in (wu, alarm_at) if t is not None]
-            if None in targets or name in targets or (self._retry_turn is not None and self._retry_turn[2] == name):
+            addressed = any(target == name or (target is None and author != name) for target, author in pending)
+            if addressed or (self._retry_turn is not None and self._retry_turn[2] == name):
                 reasons.append(now)
             ready = [now]
             if wu is not None:

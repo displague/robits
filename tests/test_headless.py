@@ -509,5 +509,27 @@ class SigtermTests(HeadlessTestCase):
         self.assertEqual(b.received, [])
 
 
+class HeadlessReplyRoutingReviewTests(HeadlessTestCase):
+    def test_undirected_reply_does_not_spin_while_the_only_listener_waits(self):
+        a = FakeRole("A", ["hello", ""])
+        b = FakeRole("B", ["ok"])
+        b.waiting_until = self.clock.now + timedelta(hours=1)
+        s = self.session({"A": a, "B": b})
+        self.run_quiet(s, initial_message="A: go", max_turns=2)
+        zero = [n for n in self.sleeper.calls if not n]
+        self.assertLess(len(zero), 3, "no zero-second busy loop")
+        self.assertIn("hello", str(b.received), "B hears it once its wait ends")
+        self.assertNotIn("hello", str(a.received), "never fed back to its author")
+
+    def test_undirected_replies_follow_the_rotation(self):
+        a = FakeRole("A", ["a1", "a2", "a3"])
+        b = FakeRole("B", ["b1", "b2", "b3"])
+        c = FakeRole("C", ["c1", "c2", "c3"])
+        s = self.session({"A": a, "B": b, "C": c})
+        self.run_quiet(s, initial_message="go", max_turns=6)
+        self.assertTrue(c.received, "the third persona gets a turn")
+        self.assertGreaterEqual(min(len(a.received), len(b.received), len(c.received)), 1)
+
+
 if __name__ == "__main__":
     unittest.main()
