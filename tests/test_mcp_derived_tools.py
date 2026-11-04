@@ -134,11 +134,16 @@ class DerivedToolTests(unittest.TestCase):
         self.assertNotEqual(base, key(SimpleNamespace(name="sam", capabilities={"mcp"}, runtime_session_id="s2")))
         self.assertNotEqual(base, key(SimpleNamespace(name="kim", capabilities={"mcp"}, runtime_session_id="s1")))
 
-    def test_alias_shadowing_a_remote_tool_is_refused(self):
-        manager = MCPManager({"tracker": {"url": "http://tracker/mcp", "derived_tools": {"execute": DERIVED["post"]}}},
+    def test_alias_shadowing_a_remote_tool_is_skipped_and_other_servers_still_register(self):
+        manager = MCPManager({"tracker": {"url": "http://tracker/mcp", "derived_tools": {"execute": DERIVED["post"]}},
+                              "other": {"url": "http://other/mcp", "derived_tools": DERIVED}},
                              transport_factory=lambda **o: FakeTransport())
-        with self.assertRaises(ValueError):
-            manager.register(ToolRegistry(), self.role)
+        registry = ToolRegistry()
+        with self.assertLogs(level="WARNING"):
+            manager.register(registry, self.role)
+        tool = registry._tools[registry_tool_name("tracker", "execute")]
+        self.assertNotEqual(tool.parameters, POST_SCHEMA, "the real tool wins")
+        self.assertIn(registry_tool_name("other", "post"), registry)
 
 
 if __name__ == "__main__":

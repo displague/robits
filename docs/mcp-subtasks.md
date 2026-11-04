@@ -153,8 +153,8 @@ flat, purpose-built tool, and robits translates each call into the backing tool'
 | `via` | The backing tool on the same server. The derived tool is registered only when that tool is offered to the caller's identity. |
 | `arguments` | Fixed fields sent to the backing tool. |
 | `wrap` | When set, the model's arguments go under this key; otherwise they are merged into the fixed fields. A call that tries to set a fixed field is refused. |
-| `idempotency_key` | When set, robits adds this field with a key derived from the identity, the persona, the session, the tool name and the arguments. A repeat of the same call in a session sends the same key, so servers that honour it don't apply it twice. A later session, or another persona, gets a new key. The model can't set this field. |
+| `idempotency_key` | When set, robits adds this field with a key derived from the identity, the persona, the session, the tool name and the arguments. A repeat of the same call in a session sends the same key, so servers that honour it don't apply it twice. A later session, or another persona, gets a new key. The model can't set this field. Within one long session, a deliberate identical second call is also treated as a repeat. |
 | `input_schema` | The flat JSON Schema the model sees. Calls are validated against it before anything is sent. |
 
 A persona names the derived tool like any MCP tool (`mcp:tracker.post_update`) and doesn't need the
-backing `execute` in its list. A derived tool may not share a name with a tool the server offers.
+backing `execute` in its list. If a derived tool shares a name with a tool the server offers, the server's tool wins and robits logs a warning.

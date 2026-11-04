@@ -6,8 +6,10 @@ interpreted or exposed to the model. No legacy initialize handshake is used.
 """
 import hashlib
 import json
+import logging
 import re
 import time
+import uuid
 from pathlib import Path
 from uuid import uuid4
 
@@ -392,6 +394,7 @@ def redact_result(result, keys):
     return result, removed
 
 
+_PROCESS_NONCE = uuid.uuid4().hex  # key scope for roles used outside a session
 _DERIVED_NAME = re.compile(r"^[A-Za-z0-9_.-]{1,64}$")
 
 
@@ -568,7 +571,6 @@ class MCPManager:
                         try:
                             self.servers[server].tool_headers[original] = header_paths(schema)
                         except ValueError as exc:
-                            import logging
                             logging.warning("Skipping MCP tool %s: %s", original, exc)
                             continue
                     def make_call(server_name, tool_name, input_schema):
@@ -585,7 +587,8 @@ class MCPManager:
                         namespace="mcp", required_capabilities=("mcp",), raw_arguments=True))
             for alias, spec in self.derived.get(server, {}).items():
                 if alias in offered:
-                    raise ValueError(f"MCP server {server}: derived tool {alias} shadows a tool the server offers")
+                    logging.warning("Skipping derived MCP tool %s on %s: the server offers a tool of that name", alias, server)
+                    continue
                 if spec["via"] not in offered:
                     continue  # the backing tool isn't available to this identity
                 schema = spec["input_schema"]
@@ -642,7 +645,7 @@ class MCPManager:
                     # Scoped to the session and caller: a retry of the same call in this session reuses
                     # the key; the same arguments in a later session, or from another persona, don't.
                     scope = [self._identity(server, role) or "static", getattr(role, "name", None),
-                             getattr(role, "runtime_session_id", None), alias, payload]
+                             getattr(role, "runtime_session_id", None) or _PROCESS_NONCE, alias, payload]
                     digest = hashlib.sha256(json.dumps(scope, sort_keys=True, default=str).encode()).hexdigest()
                     payload[key_field] = f"robits-{digest[:32]}"
                 backing = dict(fixed)
