@@ -184,6 +184,32 @@ class HeadlessRunTests(HeadlessTestCase):
         self.assertEqual(session.turns_completed, 3)
 
 
+class ReplyRoutingTests(HeadlessTestCase):
+    def test_lone_persona_never_hears_its_own_reply(self):
+        a = FakeRole("A", ["my own words", "unused"])
+        session = self.session({"A": a})
+        self.run_quiet(session, initial_message="go", max_turns=3)
+        self.assertEqual(len(a.received), 1)
+        self.assertEqual(len(self.events(session, "reply.undelivered")), 1)
+
+    def test_reply_goes_to_another_persona_not_back_to_its_author(self):
+        a = FakeRole("A", ["status is green", ""])
+        b = FakeRole("B", ["thanks"])
+        session = self.session({"A": a, "B": b})
+        self.run_quiet(session, initial_message="A: report please", max_turns=2)
+        self.assertEqual(len(a.received), 1)
+        self.assertEqual(len(b.received), 1)
+        self.assertIn("status is green", b.received[0][1])
+
+    def test_round_limit_error_is_recorded_not_relayed(self):
+        a = FakeRole("A", ["Error: Too many consecutive tool-call rounds."])
+        b = FakeRole("B", ["unused"])
+        session = self.session({"A": a, "B": b})
+        self.run_quiet(session, initial_message="A: do the thing", max_turns=2)
+        self.assertEqual(b.received, [])
+        self.assertEqual(len(self.events(session, "turn.incomplete")), 1)
+
+
 class IdleSchedulingTests(HeadlessTestCase):
     def test_retry_stays_with_original_recipient(self):
         a = FakeRole("A", [RuntimeError("down"), ""])
@@ -374,6 +400,7 @@ class IdleSchedulingTests(HeadlessTestCase):
     def test_min_turn_interval_spaces_a_personas_turns(self):
         a = FakeRole("A", ["one", "two"])
         session = self.session({"A": a})
+        session.deliver("again")  # a second input; a lone persona's own reply is not fed back to it
         with patch.object(_config, "min_turn_interval_seconds", 60.0):
             self.run_quiet(session, initial_message="go", max_turns=2)
         self.assertEqual(self.sleeper.calls, [60.0])
