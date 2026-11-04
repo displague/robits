@@ -38,6 +38,8 @@ class FakeOAuthWorld:
         self.reject_access_once = set()
         self.mcp_tokens = []
         self.tools_for = lambda token: [{"name": "echo", "inputSchema": {"type": "object", "properties": {}}}]
+        self.auth_methods = None          # e.g. ["client_secret_post", "client_secret_basic"]
+        self.clients = {}                 # client_id -> {"name", "method", "secret"}
         world = self
 
         class Handler(BaseHTTPRequestHandler):
@@ -66,7 +68,8 @@ class FakeOAuthWorld:
                         "token_endpoint": world.base + "/as/token",
                         "registration_endpoint": world.base + "/as/register",
                         "revocation_endpoint": world.base + "/as/revoke",
-                        "code_challenge_methods_supported": ["S256"]})
+                        "code_challenge_methods_supported": ["S256"],
+                        **({"token_endpoint_auth_methods_supported": world.auth_methods} if world.auth_methods else {})})
                 if parts.path == "/as/authorize":
                     params = {k: v[0] for k, v in parse_qs(parts.query).items()}
                     world.authorize_params.append(params)
@@ -82,12 +85,25 @@ class FakeOAuthWorld:
                 path = urlsplit(self.path).path
                 if path == "/as/register":
                     world.registrations += 1
-                    return self.reply(201, {"client_id": f"dyn-{world.registrations}"})
+                    request = json.loads(raw)
+                    method = request.get("token_endpoint_auth_method", "none")
+                    if world.auth_methods and method not in world.auth_methods:
+                        return self.reply(400, {"error": "invalid_client_metadata"})
+                    client_id = f"dyn-{world.registrations}"
+                    client = {"name": request.get("client_name"), "method": method}
+                    reply = {"client_id": client_id, "token_endpoint_auth_method": method}
+                    if method != "none":
+                        client["secret"] = reply["client_secret"] = world.mint("cs")
+                    world.clients[client_id] = client
+                    return self.reply(201, reply)
+                form = {k: v[0] for k, v in parse_qs(raw.decode()).items()}
+                if path in ("/as/token", "/as/revoke") and not world.client_ok(form, self.headers.get("Authorization")):
+                    return self.reply(401, {"error": "invalid_client"})
                 if path == "/as/revoke":
-                    world.revoked.append(parse_qs(raw.decode())["token"][0])
+                    world.revoked.append(form["token"])
                     return self.reply(200, {})
                 if path == "/as/token":
-                    return self.reply(*world.token({k: v[0] for k, v in parse_qs(raw.decode()).items()}))
+                    return self.reply(*world.token(form))
                 if path == "/mcp":
                     header = self.headers.get("Authorization", "")
                     token = header[7:] if header.startswith("Bearer ") else None
@@ -112,6 +128,18 @@ class FakeOAuthWorld:
     def close(self):
         self.server.shutdown()
         self.server.server_close()
+
+    def client_ok(self, form, authorization):
+        """Confidential clients must authenticate with their registered method."""
+        client = self.clients.get(form.get("client_id"))
+        if client is None or client["method"] == "none":
+            return True
+        if client["method"] == "client_secret_post":
+            return form.get("client_secret") == client["secret"]
+        if client["method"] == "client_secret_basic" and (authorization or "").startswith("Basic "):
+            user, _, secret = base64.b64decode(authorization[6:]).decode().partition(":")
+            return user == form.get("client_id") and secret == client["secret"]
+        return False
 
     def mint(self, kind):
         value = f"{kind}-{secrets.token_hex(8)}"

@@ -158,6 +158,7 @@ def discover(server_url, www_authenticate=None):
         "token_endpoint": metadata["token_endpoint"],
         "registration_endpoint": metadata.get("registration_endpoint"),
         "revocation_endpoint": metadata.get("revocation_endpoint"),
+        "token_endpoint_auth_methods": metadata.get("token_endpoint_auth_methods_supported"),
         "resource": resource,
     }
 
@@ -186,10 +187,14 @@ class CredentialStore:
                 found.append(f"{kind}:{path.parent.name}")
         return found
 
-    def client_path(self, server):
-        """Dynamic registrations, one per server, shared by every identity."""
+    def client_path(self, server, identity=None):
+        """Dynamic registrations: one per server, or one per identity when identity is given."""
         self.path("default", server)  # validates the server name
-        return self.root / "_clients" / f"{server}.json"
+        if identity is None:
+            return self.root / "_clients" / f"{server}.json"
+        kind, name = identity_parts(identity)
+        directory = self.root / "_clients" / server / kind
+        return directory / f"{name or 'default'}.json"
 
     def load(self, path):
         try:
@@ -243,6 +248,37 @@ class CredentialStore:
                 os.close(fd)
 
 
+_AUTH_METHODS = ("none", "client_secret_post", "client_secret_basic")
+
+
+def _auth_method(configured, supported):
+    """Token endpoint auth method for a new registration: configured, else what the server allows."""
+    if configured:
+        if configured not in _AUTH_METHODS:
+            raise OAuthError(f"auth.token_endpoint_auth_method must be one of {', '.join(_AUTH_METHODS)}")
+        return configured
+    if not supported or "none" in supported:
+        return "none"
+    for method in ("client_secret_post", "client_secret_basic"):
+        if method in supported:
+            return method
+    raise OAuthError("Authorization server supports none of: " + ", ".join(_AUTH_METHODS))
+
+
+def _client_auth(form, client):
+    """Add client authentication to a token-endpoint form; return (form, headers)."""
+    form = {**form, "client_id": client["client_id"]}
+    method = client.get("auth_method") or "none"
+    secret = client.get("client_secret")
+    if method == "client_secret_post" and secret:
+        return {**form, "client_secret": secret}, {}
+    if method == "client_secret_basic" and secret:
+        from urllib.parse import quote
+        raw = f"{quote(client['client_id'], safe='')}:{quote(secret, safe='')}".encode()
+        return form, {"Authorization": "Basic " + base64.b64encode(raw).decode()}
+    return form, {}
+
+
 def _pkce():
     verifier = base64.urlsafe_b64encode(secrets.token_bytes(48)).rstrip(b"=").decode()
     challenge = base64.urlsafe_b64encode(hashlib.sha256(verifier.encode()).digest()).rstrip(b"=").decode()
@@ -270,29 +306,53 @@ class OAuthClient:
             raise OAuthError('auth needs client_id (a metadata document URL) or "registration": "dynamic"')
 
     # --- client identification -------------------------------------------------
-    def client_id(self, metadata, redirect_uri):
+    def client(self, metadata, redirect_uri):
+        """The OAuth client to use: {client_id, client_secret?, auth_method}.
+
+        A metadata-document client_id is used as is (a public client). Otherwise the client
+        is registered dynamically (RFC 7591) once per server, or once per identity with
+        auth.client_per_identity, which servers that treat each client as its own agent need.
+        Servers that don't accept public clients get a confidential registration
+        (client_secret_post or client_secret_basic), and the issued secret is stored with
+        the 0600 credentials.
+        """
         if self.auth.get("client_id"):
-            return self.auth["client_id"]
-        path = self.store.client_path(self.server)
+            return {"client_id": self.auth["client_id"], "auth_method": "none"}
+        per_identity = bool(self.auth.get("client_per_identity"))
+        path = self.store.client_path(self.server, self.identity if per_identity else None)
         with self.store.lock(path):
             client = self.store.load(path)
             if client and client.get("issuer") == metadata["issuer"]:
-                return client["client_id"]
+                return client
             endpoint = metadata.get("registration_endpoint")
             if not endpoint:
                 raise OAuthError("Authorization server offers no dynamic client registration")
+            method = _auth_method(self.auth.get("token_endpoint_auth_method"),
+                                  metadata.get("token_endpoint_auth_methods"))
+            name = str(self.auth.get("client_name") or "robits")
+            if per_identity:
+                name = f"{name} ({self.identity})"
             status, _, body = http_request("POST", _require_url(endpoint, "registration_endpoint"), json_body={
-                "client_name": "robits",
+                "client_name": name,
                 "redirect_uris": [redirect_uri],
                 "grant_types": ["authorization_code", "refresh_token"],
                 "response_types": ["code"],
-                "token_endpoint_auth_method": "none",
+                "token_endpoint_auth_method": method,
             })
             data = _json(status, body, "Client registration")
             if status not in (200, 201) or not data.get("client_id"):
-                raise OAuthError(f"Client registration failed (HTTP {status})")
-            self.store.save(path, {"issuer": metadata["issuer"], "client_id": data["client_id"]})
-            return data["client_id"]
+                raise OAuthError(f"Client registration failed (HTTP {status}): {data.get('error', '')}".strip())
+            if method != "none" and not data.get("client_secret"):
+                raise OAuthError(f"Client registration returned no client_secret for {method}")
+            client = {"issuer": metadata["issuer"], "client_id": data["client_id"], "auth_method":
+                      data.get("token_endpoint_auth_method", method)}
+            if data.get("client_secret"):
+                client["client_secret"] = data["client_secret"]
+            self.store.save(path, client)
+            return client
+
+    def client_id(self, metadata, redirect_uri):
+        return self.client(metadata, redirect_uri)["client_id"]
 
     # --- login ------------------------------------------------------------------
     def begin_login(self, redirect_uri, www_authenticate=None):
@@ -300,14 +360,15 @@ class OAuthClient:
         metadata = discover(self.server_url, www_authenticate)
         verifier, challenge = _pkce()
         state = secrets.token_urlsafe(24)
-        client_id = self.client_id(metadata, redirect_uri)
+        client = self.client(metadata, redirect_uri)
+        client_id = client["client_id"]
         params = {"response_type": "code", "client_id": client_id, "redirect_uri": redirect_uri,
                   "state": state, "code_challenge": challenge, "code_challenge_method": "S256",
                   "resource": metadata["resource"]}
         if self.scope:
             params["scope"] = self.scope
         separator = "&" if "?" in metadata["authorization_endpoint"] else "?"
-        pending = {"metadata": metadata, "client_id": client_id, "verifier": verifier,
+        pending = {"metadata": metadata, "client_id": client_id, "client": client, "verifier": verifier,
                    "state": state, "redirect_uri": redirect_uri}
         return metadata["authorization_endpoint"] + separator + urlencode(params), pending
 
@@ -315,24 +376,26 @@ class OAuthClient:
         if not secrets.compare_digest(str(state or ""), pending["state"]):
             raise OAuthError("Login state mismatch; start the login again")
         metadata = pending["metadata"]
-        status, _, body = http_request("POST", metadata["token_endpoint"], form={
+        client = pending.get("client") or {"client_id": pending["client_id"]}
+        form, headers = _client_auth({
             "grant_type": "authorization_code", "code": code, "redirect_uri": pending["redirect_uri"],
-            "client_id": pending["client_id"], "code_verifier": pending["verifier"],
-            "resource": metadata["resource"]})
+            "code_verifier": pending["verifier"], "resource": metadata["resource"]}, client)
+        status, _, body = http_request("POST", metadata["token_endpoint"], form=form, headers=headers)
         tokens = _json(status, body, "Token request")
         if status != 200 or not tokens.get("access_token"):
             raise OAuthError(f"Token request failed: {tokens.get('error', f'HTTP {status}')}")
         with self.store.lock(self.path):
-            self.store.save(self.path, self._record(metadata, pending["client_id"], tokens, None))
+            self.store.save(self.path, self._record(metadata, client, tokens, None))
 
-    def _record(self, metadata, client_id, tokens, previous):
+    def _record(self, metadata, client, tokens, previous):
         refresh = tokens.get("refresh_token") or (previous or {}).get("refresh_token")
         expires_in = tokens.get("expires_in")
         return {
             "status": "ok", "server": self.server, "identity": self.identity,
             "issuer": metadata["issuer"], "token_endpoint": metadata["token_endpoint"],
             "revocation_endpoint": metadata.get("revocation_endpoint"),
-            "resource": metadata["resource"], "client_id": client_id,
+            "resource": metadata["resource"], "client_id": client["client_id"],
+            "auth_method": client.get("auth_method", "none"), "client_secret": client.get("client_secret"),
             "access_token": tokens["access_token"], "refresh_token": refresh,
             "expires_at": time.time() + float(expires_in) if expires_in else None,
             "scope": tokens.get("scope", self.scope), "updated_at": time.time(),
@@ -362,16 +425,16 @@ class OAuthClient:
     def _refresh(self, record):
         if not record.get("refresh_token"):
             self._mark_relogin(record)
-        status, _, body = http_request("POST", record["token_endpoint"], form={
-            "grant_type": "refresh_token", "refresh_token": record["refresh_token"],
-            "client_id": record["client_id"], "resource": record["resource"]})
+        form, headers = _client_auth({"grant_type": "refresh_token", "refresh_token": record["refresh_token"],
+                                      "resource": record["resource"]}, record)
+        status, _, body = http_request("POST", record["token_endpoint"], form=form, headers=headers)
         try:
             tokens = _json(status, body, "Token refresh")
         except OAuthError:
             tokens = {}
         if status == 200 and tokens.get("access_token"):
             metadata = {k: record.get(k) for k in ("issuer", "token_endpoint", "revocation_endpoint", "resource")}
-            updated = self._record(metadata, record["client_id"], tokens, record)
+            updated = self._record(metadata, record, tokens, record)
             # Persist a rotated refresh token before anyone uses the new access token.
             self.store.save(self.path, updated)
             return updated["access_token"]
@@ -409,9 +472,10 @@ class OAuthClient:
             record = self.store.load(self.path)
             if record and record.get("revocation_endpoint") and record.get("refresh_token"):
                 try:
-                    http_request("POST", _require_url(record["revocation_endpoint"], "revocation_endpoint"), form={
-                        "token": record["refresh_token"], "token_type_hint": "refresh_token",
-                        "client_id": record["client_id"]})
+                    form, headers = _client_auth({"token": record["refresh_token"],
+                                                  "token_type_hint": "refresh_token"}, record)
+                    http_request("POST", _require_url(record["revocation_endpoint"], "revocation_endpoint"),
+                                 form=form, headers=headers)
                 except OAuthError:
                     pass
             self.store.delete(self.path)
