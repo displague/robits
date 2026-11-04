@@ -154,3 +154,23 @@ def compact_context(role):
     if context.get("agent_name"):
         parts.append(f"You are {context['agent_name']}")
     return ". ".join(parts) + ".\n"
+
+
+def unavailable_tools_note(role):
+    """Name the tools in a persona's list that aren't registered right now.
+
+    MCP tools only exist once their server has been discovered, which needs a login and
+    sometimes the server's approval. Without this note a small model may claim results from
+    tools it was never given.
+    """
+    ceiling = getattr(role, "tool_ceiling", None)
+    registry = getattr(_m, "tool_registry", None)
+    if not ceiling or registry is None:
+        return ""
+    labels = getattr(role, "tool_labels", {}) or {}
+    missing = [labels.get(name, name) for name in ceiling
+               if "*" not in name and name not in registry]
+    if not missing:
+        return ""
+    return ("Unavailable right now: " + ", ".join(missing) + ". If a task needs them, say you could not "
+            "do it and why; do not describe results you did not get.\n")
