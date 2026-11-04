@@ -90,6 +90,9 @@ def _parse_persona_items(items: list, briefing_dir: Path) -> dict[str, dict]:
             "tool_budget": item.get("tool_budget"),
             "max_tool_rounds": item.get("max_tool_rounds"),
             "briefings": item.get("briefings"),
+            "prompt_profile": item.get("prompt_profile"),
+            "reasoning_effort": item.get("reasoning_effort"),
+            "max_tokens": item.get("max_tokens"),
             "briefing_dir": str(briefing_dir),
         }
     return result

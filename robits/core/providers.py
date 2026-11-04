@@ -482,6 +482,11 @@ class ChatCompletionsProvider(ModelProvider):
         if tools:
             kwargs["tools"] = tools
             kwargs["tool_choice"] = "auto"
+        effort = getattr(role, "reasoning_effort", None) or _m._reasoning_effort_env
+        if effort in {"none", "low", "medium", "high"}:
+            # "none" turns thinking off on servers that support it (e.g. Ollama); thinking can
+            # otherwise use up a small output budget and leave an empty reply.
+            kwargs["reasoning_effort"] = effort
 
         for _ in range(_max_tool_rounds(role)):
             if getattr(role, "runtime_task_id", None):
@@ -631,7 +636,7 @@ class ResponsesProvider(ModelProvider):
             kwargs["tools"] = tools
             kwargs["tool_choice"] = "auto"
         effort = getattr(role, "reasoning_effort", None) or _m._reasoning_effort_env
-        if effort and effort in {"low", "medium", "high"}:
+        if effort and effort in {"none", "low", "medium", "high"}:
             kwargs["reasoning"] = {"effort": effort}
 
         response = _with_model_retries(lambda: self.client.responses.create(**kwargs))

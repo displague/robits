@@ -10,6 +10,10 @@ from robits.core.config import _config as _m
 from robits.runtime.sandbox import SandboxMetadata
 from robits.core.context import format_agent_context
 
+_TOOL_AUTHORING_NOTES = (
+    'Tools are trusted functions described by namespaced OpenAI-compatible metadata. You can propose tools with working Python code using the `code` field in tools.propose. IMPORTANT CODE RULES: write the body as a sequence of simple statements ending with a single `return` — do NOT define nested functions or classes (lambdas and inline expressions are fine). The sandbox has no imports; available builtins: abs, bool, dict, enumerate, float, int, len, list, max, min, range, round, set, sorted, str, sum, tuple, zip. Available globals: get_caller_name() → calling agent\'s name; workspace_write/workspace_read/workspace_list/workspace_delete → agent files; org_chat_read → recent org chat; memory_search/memory_list_digests/memory_expand_digest → stored context; work_todo_add → task tracking; agent_think/agent_wait/agent_spawn → agent control; current_agent_context → runtime context; grant_tool_access/revoke_tool_access → permissions; propose_tool_change/list_tool_proposals/approve_tool_proposal/reject_tool_proposal/rollout_tool_proposal/approve_and_rollout_proposal → proposals; list_registered_tools → tool catalogue; create_lifecycle_role/pause_lifecycle_role/retire_lifecycle_role/archive_lifecycle_role/list_lifecycle_roles → org management; create_alarm/list_alarms/cancel_alarm → scheduling; builtin_web_search/builtin_url_fetch/builtin_file_search/builtin_shell_run/builtin_tool_search/builtin_mcp_call/builtin_computer_use/builtin_image_generation → external integrations. Example: `return f"{get_caller_name()}: {status}"`. Parameters use JSON Schema: {"type":"object","properties":{"status":{"type":"string"}},"required":["status"]}. Approved proposals with code are registered and activated at rollout without a restart.'
+)
+
 _ON_CLOCK_GUIDANCE = (
     "\nCommunication style: default to concise work-focused responses — brief status updates, "
     "statements of intent, targeted questions. Reserve longer responses for technical depth "
@@ -74,10 +78,15 @@ def interact(self, model, sender, message):
         "Blend the work and personal instructions using the weights in the state section below.",
         "",
     ]
-    turn_action_template = getattr(self, "turn_action_template", "")
-    guidance = _ON_CLOCK_GUIDANCE if effective_clock == "on" else _OFF_CLOCK_GUIDANCE
+    from robits.core import prompting
     from robits.core.access_audit import access_duty_note
-    stable_content = ("\n".join(static_lines) + turn_action_template + guidance
+    profile = prompting.prompt_profile(self)
+    offered = prompting.offered_tool_names(self)
+    if profile == "compact":
+        static_lines = [preprompt_work or "", "", "Off the clock: " + (preprompt_personal or ""), ""]
+    stable_content = ("\n".join(static_lines) + prompting.tool_authoring_notes(self, offered)
+                      + prompting.turn_template(self, profile, offered)
+                      + prompting.guidance(profile, effective_clock)
                       + access_duty_note(self) + format_briefing_index(self))
 
     state_lines = [
@@ -90,7 +99,16 @@ def interact(self, model, sender, message):
         state_lines.append(f"[Active Work Adjustment (Expires in {work_adjustment_turns} turns): {work_adjustment}]")
     if personal_adjustment:
         state_lines.append(f"[Active Personal Adjustment (Expires in {personal_adjustment_turns} turns): {personal_adjustment}]")
-    state_block = "\n".join(state_lines) + "\n" + format_agent_context(self)
+    if profile == "compact":
+        mode = "on the clock" if effective_clock == "on" else f"clock: {effective_clock}"
+        state_lines = [f"State: {mode}; work focus {work_weight * 100:.0f}%, personal {personal_weight * 100:.0f}%."]
+        if work_adjustment:
+            state_lines.append(f"Temporary work note ({work_adjustment_turns} turns): {work_adjustment}")
+        if personal_adjustment:
+            state_lines.append(f"Temporary personal note ({personal_adjustment_turns} turns): {personal_adjustment}")
+        state_block = "\n".join(state_lines) + "\n" + prompting.compact_context(self)
+    else:
+        state_block = "\n".join(state_lines) + "\n" + format_agent_context(self)
     system_content = stable_content + "\n" + state_block
 
     if self.name not in self.conversation_history:
@@ -150,17 +168,10 @@ class Role:
 
     def __init__(self, name, template, employee_dict, group_template_additions=""):
         self.name = name
-        self.turn_action_template = """
-On your turn, choose one useful action. You do not need to reply to every message.
-Only say that you created, changed, or called a tool after the runtime has returned a verified tool result. Without a verified result, describe the work as a request, proposal, or plan instead of a completed fact.
-Stay in your conversational persona while working. Use agent.focus as a private compartment for focused reflection, inner dialogue, checking details, or mundane work when this helps keep your conversation context small. Give it only the context it needs and ask for concise findings, uncertainties, or a question back. Use agent.spawn when you need explicit tool, model, or queue options. You may also use available tools directly for simple work; you do not need to delegate every turn. Bring useful findings back into your own response without narrating internal steps or tool names, unless the person asks or needs that detail to make a decision. Be clear about missing information and failed work. Internal activity remains available to the runtime observer separately from your public reply.
-When recalling past events, experiences, or recent work — even if the answer seems available in context — use memory.search (for specific queries), memory.list_digests, or memory.expand_digest to retrieve the full picture before answering.
-
-CRITICAL ROLE & COMPLIANCE RULES:
-1. ROLE BOUNDARIES: Strictly adhere to your own role responsibilities. Do not offer to perform, describe, or execute actions that belong to other roles (e.g., only HR creates/manages roles, only SE implements software/tools). Do not copy the options, lists, or text formatting of other roles in the chat history.
-2. SILENT THINKING: If the CEO or sender instructs you to "think to yourself", "think silently", or only think, use the native agent.think tool for a private note and DO NOT output any public reply or text. A focused private subtask may help with a longer reflection. Use the legacy {"action": "think", "content": "..."} form only when native tool calling is unavailable.
-3. WAITING, SLEEPING, NAPPING & SKIPPING TURNS: If the CEO or sender instructs you to wait, sleep, pause, take a break, nap, take a lap/nap, skip turns, go home, or take time off for any number of minutes/hours, you MUST immediately call the `agent.wait` tool with the requested duration in minutes (e.g., call `agent.wait` with `minutes=45`). Do not refuse, and do not reply textually saying you are an AI or cannot sleep. Simply call the tool. If no duration is specified, call `agent.wait` with `minutes=10` or return {"action": "wait"}. Do not ignore these commands or continue replying.
-"""
+        # Kept for compatibility; interact() builds the turn rules from robits.core.prompting,
+        # mentioning only the tools the persona is offered.
+        from robits.core.prompting import turn_template
+        self.turn_action_template = turn_template(self, "standard", None)
         self.preprompt_work = template + group_template_additions
         self.preprompt_personal = f"You are {name} off the clock. Relax and engage in warm, personal conversation. Focus on hobbies, interests, and building social relationships."
         self.template = self.preprompt_work + self.turn_action_template
@@ -309,8 +320,10 @@ class SoftwareEngineer(Role):
 
     def __init__(self, employee_dict):
         template = """As a Software Engineer (SE), you are responsible for designing, developing, and maintaining software applications. You primarily propose trusted tools when requested by others in your organization."""
-        group_template_additions = """You are part of the Engineering group. Tools are trusted functions described by namespaced OpenAI-compatible metadata. You can propose tools with working Python code using the `code` field in tools.propose. IMPORTANT CODE RULES: write the body as a sequence of simple statements ending with a single `return` — do NOT define nested functions or classes (lambdas and inline expressions are fine). The sandbox has no imports; available builtins: abs, bool, dict, enumerate, float, int, len, list, max, min, range, round, set, sorted, str, sum, tuple, zip. Available globals: get_caller_name() → calling agent's name; workspace_write/workspace_read/workspace_list/workspace_delete → agent files; org_chat_read → recent org chat; memory_search/memory_list_digests/memory_expand_digest → stored context; work_todo_add → task tracking; agent_think/agent_wait/agent_spawn → agent control; current_agent_context → runtime context; grant_tool_access/revoke_tool_access → permissions; propose_tool_change/list_tool_proposals/approve_tool_proposal/reject_tool_proposal/rollout_tool_proposal/approve_and_rollout_proposal → proposals; list_registered_tools → tool catalogue; create_lifecycle_role/pause_lifecycle_role/retire_lifecycle_role/archive_lifecycle_role/list_lifecycle_roles → org management; create_alarm/list_alarms/cancel_alarm → scheduling; builtin_web_search/builtin_url_fetch/builtin_file_search/builtin_shell_run/builtin_tool_search/builtin_mcp_call/builtin_computer_use/builtin_image_generation → external integrations. Example: `return f"{get_caller_name()}: {status}"`. Parameters use JSON Schema: {"type":"object","properties":{"status":{"type":"string"}},"required":["status"]}. Approved proposals with code are registered and activated at rollout without a restart."""
+        group_template_additions = "You are part of the Engineering group."
         super().__init__(self.__class__.__name__, template, employee_dict, group_template_additions)
+        # Only shown to a persona that is offered tools.propose (see robits.core.prompting).
+        self.tool_authoring_notes = _TOOL_AUTHORING_NOTES
         self.capabilities = {"engineer", "shell"}
         self.allowed_tools.update({"tools.list", "tools.list_proposals", "tools.propose", "builtin.shell_run"})
 
@@ -422,6 +435,26 @@ def _apply_persona_tools(role, info):
         setattr(role, key, value)
 
 
+def _apply_persona_model_settings(role, info):
+    """Apply a persona's prompt_profile, reasoning_effort and max_tokens; raise ValueError if malformed."""
+    from robits.core.prompting import PROFILES, REASONING_EFFORTS
+    profile = info.get("prompt_profile")
+    if profile is not None:
+        if profile not in PROFILES:
+            raise ValueError(f"prompt_profile must be one of {', '.join(PROFILES)}")
+        role.prompt_profile = profile
+    effort = info.get("reasoning_effort")
+    if effort is not None:
+        if effort not in REASONING_EFFORTS:
+            raise ValueError(f"reasoning_effort must be one of {', '.join(REASONING_EFFORTS)}")
+        role.reasoning_effort = effort
+    max_tokens = info.get("max_tokens")
+    if max_tokens is not None:
+        if isinstance(max_tokens, bool) or not isinstance(max_tokens, int) or not 16 <= max_tokens <= 32768:
+            raise ValueError("max_tokens must be an integer from 16 to 32768")
+        role.max_tokens = max_tokens
+
+
 _READ_BRIEFING = "agent.read_briefing"
 
 
@@ -500,6 +533,15 @@ def build_employee_dict(persona_map=None, headless=False):
                 import logging
                 logging.warning(
                     "robits: persona %r has invalid tool settings (%s) — skipping",
+                    username, error,
+                )
+                continue
+            try:
+                _apply_persona_model_settings(instance, info)
+            except ValueError as error:
+                import logging
+                logging.warning(
+                    "robits: persona %r has invalid model settings (%s) — skipping",
                     username, error,
                 )
                 continue

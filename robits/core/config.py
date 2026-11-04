@@ -219,6 +219,8 @@ class Config:
         self._reasoning_effort_env = (
             env.get("ROBITS_REASONING_EFFORT", "").strip().lower() or None
         )
+        # standard | compact: compact trims the turn rules and state for small local models.
+        self.prompt_profile = env.get("ROBITS_PROMPT_PROFILE", "standard").strip().lower() or "standard"
         _raw_clock = env.get("ROBITS_CLOCK_STATE", "on").strip().lower()
         self.clock_state = _raw_clock if _raw_clock in {"on", "off", "break"} else "on"
         self.default_location = env.get("ROBITS_LOCATION", "").strip()
