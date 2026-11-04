@@ -101,6 +101,45 @@ class DerivedToolTests(unittest.TestCase):
         offered = [t for t in self.registry._tools.values() if t.name in sam.allowed_tools]
         self.assertEqual([t.name for t in offered], [self.name], "the generic execute is not offered")
 
+    def test_unwrapped_arguments_cannot_override_fixed_fields(self):
+        open_schema = {"type": "object", "properties": {"text": {"type": "string"}}}
+        manager = MCPManager({"tracker": {"url": "http://tracker/mcp", "derived_tools": {"post": {
+            "via": "execute", "arguments": {"name": "post_update"}, "description": "x",
+            "input_schema": open_schema}}}}, transport_factory=lambda **o: self.transport)
+        registry = ToolRegistry()
+        manager.register(registry, self.role)
+        call = registry._tools[registry_tool_name("tracker", "post")].func
+        self.assertIn("may not set name", call({}, {"text": "hi", "name": "delete_all"}))
+        self.assertEqual(self.transport.calls, [])
+        call({}, {"text": "hi"})
+        self.assertEqual(self.transport.calls[-1]["arguments"], {"name": "post_update", "text": "hi"})
+
+    def test_model_cannot_choose_the_idempotency_key(self):
+        loose = {**POST_SCHEMA, "additionalProperties": True}
+        manager = MCPManager({"tracker": {"url": "http://tracker/mcp", "derived_tools": {"post": {
+            **DERIVED["post"], "input_schema": loose}}}}, transport_factory=lambda **o: self.transport)
+        registry = ToolRegistry()
+        manager.register(registry, self.role)
+        result = registry._tools[registry_tool_name("tracker", "post")].func(
+            {}, {"channel": "ops", "text": "x", "idempotency_key": "mine"})
+        self.assertIn("may not set idempotency_key", result)
+
+    def test_key_differs_across_sessions_and_personas(self):
+        def key(role):
+            with patch.object(config, "active_tool_caller", role):
+                self.run_tool(channel="ops", text="A")
+            return self.transport.calls[-1]["arguments"]["arguments"]["idempotency_key"]
+        base = key(SimpleNamespace(name="sam", capabilities={"mcp"}, runtime_session_id="s1"))
+        self.assertEqual(base, key(SimpleNamespace(name="sam", capabilities={"mcp"}, runtime_session_id="s1")))
+        self.assertNotEqual(base, key(SimpleNamespace(name="sam", capabilities={"mcp"}, runtime_session_id="s2")))
+        self.assertNotEqual(base, key(SimpleNamespace(name="kim", capabilities={"mcp"}, runtime_session_id="s1")))
+
+    def test_alias_shadowing_a_remote_tool_is_refused(self):
+        manager = MCPManager({"tracker": {"url": "http://tracker/mcp", "derived_tools": {"execute": DERIVED["post"]}}},
+                             transport_factory=lambda **o: FakeTransport())
+        with self.assertRaises(ValueError):
+            manager.register(ToolRegistry(), self.role)
+
 
 if __name__ == "__main__":
     unittest.main()

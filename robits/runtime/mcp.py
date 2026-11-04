@@ -584,6 +584,8 @@ class MCPManager:
                         list(schema.get("properties", {})), schema.get("required", []), make_call(server, original, schema),
                         namespace="mcp", required_capabilities=("mcp",), raw_arguments=True))
             for alias, spec in self.derived.get(server, {}).items():
+                if alias in offered:
+                    raise ValueError(f"MCP server {server}: derived tool {alias} shadows a tool the server offers")
                 if spec["via"] not in offered:
                     continue  # the backing tool isn't available to this identity
                 schema = spec["input_schema"]
@@ -629,12 +631,21 @@ class MCPManager:
                 validate_json(arguments, spec["input_schema"])
                 role = config.active_tool_caller
                 payload = dict(arguments)
+                fixed = dict(spec.get("arguments") or {})
                 key_field = spec.get("idempotency_key")
+                # The model may not set the fixed fields (unwrapped) or the idempotency key.
+                reserved = (set() if spec.get("wrap") else set(fixed)) | ({key_field} if key_field else set())
+                overlap = sorted(set(payload) & reserved)
+                if overlap:
+                    raise ValueError(f"arguments may not set {', '.join(overlap)}")
                 if key_field:
-                    identity = self._identity(server, role) or "static"
-                    digest = hashlib.sha256(json.dumps([identity, alias, payload], sort_keys=True).encode()).hexdigest()
+                    # Scoped to the session and caller: a retry of the same call in this session reuses
+                    # the key; the same arguments in a later session, or from another persona, don't.
+                    scope = [self._identity(server, role) or "static", getattr(role, "name", None),
+                             getattr(role, "runtime_session_id", None), alias, payload]
+                    digest = hashlib.sha256(json.dumps(scope, sort_keys=True, default=str).encode()).hexdigest()
                     payload[key_field] = f"robits-{digest[:32]}"
-                backing = dict(spec.get("arguments") or {})
+                backing = dict(fixed)
                 if spec.get("wrap"):
                     backing[spec["wrap"]] = payload
                 else:
