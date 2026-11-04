@@ -127,3 +127,34 @@ Live behavioral checks should use ordinary requests in an established persona,
 observe tool/subtask events separately, and check the outward reply and follow-up
 for continuity and accurate facts. Explicit "call agent.spawn" prompts remain
 protocol diagnostics rather than evidence of natural conversational behavior.
+
+
+## Derived tools
+
+Some servers expose a small set of generic tools: a search, a describe-operations tool and one
+`execute(name, arguments)` that runs any operation. Small models handle a nested generic call poorly.
+In one test, a 2B model left out `name` on every `execute` call. A **derived tool** gives the model a
+flat, purpose-built tool, and robits translates each call into the backing tool's call:
+
+```json
+{"tracker": {"url": "https://tracker.example/mcp",
+  "derived_tools": {"post_update": {
+    "via": "execute",
+    "arguments": {"name": "post_update"},
+    "wrap": "arguments",
+    "idempotency_key": "idempotency_key",
+    "description": "Post a short status update.",
+    "input_schema": {"type": "object", "additionalProperties": false,
+                     "properties": {"text": {"type": "string"}}, "required": ["text"]}}}}}
+```
+
+| Key | Meaning |
+|---|---|
+| `via` | The backing tool on the same server. The derived tool is registered only when that tool is offered to the caller's identity. |
+| `arguments` | Fixed fields sent to the backing tool. |
+| `wrap` | When set, the model's arguments go under this key; otherwise they are merged into the fixed fields. |
+| `idempotency_key` | When set, robits adds this field with a key derived from the identity, the tool name and the arguments. A retry with the same arguments sends the same key, so servers that honour it don't apply it twice. |
+| `input_schema` | The flat JSON Schema the model sees. Calls are validated against it before anything is sent. |
+
+A persona names the derived tool like any MCP tool (`mcp:tracker.post_update`) and doesn't need the
+backing `execute` in its list.
