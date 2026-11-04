@@ -107,6 +107,9 @@ class PrepromptTests(unittest.TestCase):
         self.assertIn("Work Persona Instructions", system_content)
         self.assertIn("Focus on software architecture.", system_content)
         self.assertIn("Play video games.", system_content)
+        # Stable instructions come before the per-turn state (cacheable prefix).
+        self.assertLess(system_content.index("Play video games."),
+                        system_content.index("=== Persona Circadian Rhythm & State ==="))
 
     def test_agent_adjust_preprompt_and_decay(self):
         employee_dict = build_employee_dict()
