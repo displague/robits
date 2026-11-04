@@ -24,7 +24,7 @@ Some HTTP MCP servers need OAuth 2.1. An entry in `ROBITS_MCP_CONFIG` can carry 
 | `scopes` | Scopes to request. Optional. |
 | `token_endpoint_auth_method` | For dynamic registration: `none`, `client_secret_post` or `client_secret_basic`. By default robits picks from the server's `token_endpoint_auth_methods_supported`: `none` when allowed, otherwise a secret method. The issued `client_secret` is stored with the 0600 credentials and sent on token, refresh and revocation requests. |
 | `client_per_identity` | `true` registers one client per identity instead of one per server. Use it for servers that treat each OAuth client as a separate agent, so each persona counts on its own. |
-| `client_name` | The registered client name (default `robits`). With `client_per_identity` the identity is appended, for example `robits (persona:alex_chen)`. |
+| `client_name` | The registered client name (default `robits`). With `client_per_identity` the identity is appended, for example `robits (persona alex_chen)`. Characters outside letters, digits, spaces and `()._-` become spaces, because identity providers restrict client names. |
 | `identity` | Whose tokens calls carry: `persona` (each calling persona's own), `service:<name>` (one shared identity), or `default`. See [Identities](#identities). |
 | `service_tools` | With `service:<name>` only: the remote tools that may run under it. Others on that server aren't offered and are refused. |
 

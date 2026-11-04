@@ -70,7 +70,7 @@ class ClientPerIdentityTests(IdentityTestCase):
         self.login_as("persona:bob", auth)
         self.login_as("persona:alice", auth)   # reuses alice's client
         names = sorted(c["name"] for c in self.world.clients.values())
-        self.assertEqual(names, ["team (persona:alice)", "team (persona:bob)"])
+        self.assertEqual(names, ["team (persona alice)", "team (persona bob)"])
         alice = json.loads(oauth.CredentialStore().path("persona:alice", "hub").read_text())
         bob = json.loads(oauth.CredentialStore().path("persona:bob", "hub").read_text())
         self.assertNotEqual(alice["client_id"], bob["client_id"])
@@ -78,6 +78,13 @@ class ClientPerIdentityTests(IdentityTestCase):
         manager = MCPManager({"hub": {"url": self.url, "auth": auth}})
         manager.rpc("hub", "tools/call", {"name": "echo", "arguments": {}}, persona("bob"))
         self.assertEqual(self.world.mcp_tokens[-1], bob["access_token"])
+
+    def test_client_name_uses_a_conservative_charset(self):
+        auth = {**self.persona_auth, "client_per_identity": True, "client_name": "ops: team #1"}
+        self.login_as("persona:alice", auth)
+        name = next(iter(self.world.clients.values()))["name"]
+        self.assertEqual(name, "ops team 1 (persona alice)")
+        self.assertRegex(name, r"^[\w ()._-]{2,128}$")
 
     def test_shared_client_by_default(self):
         self.login_as("persona:alice")
