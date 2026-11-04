@@ -109,6 +109,7 @@ def interact(self, model, sender, message):
         state_block = "\n".join(state_lines) + "\n" + prompting.compact_context(self)
     else:
         state_block = "\n".join(state_lines) + "\n" + format_agent_context(self)
+    state_block += prompting.unavailable_tools_note(self)
     system_content = stable_content + "\n" + state_block
 
     if self.name not in self.conversation_history:
@@ -406,6 +407,7 @@ def _apply_persona_tools(role, info):
         if isinstance(tools, str) or not isinstance(tools, list):
             raise ValueError("tools must be a list of tool names or namespace.* patterns")
         ceiling = []
+        labels = {}
         for grant in tools:
             if not isinstance(grant, str) or not grant.strip():
                 raise ValueError("tools entries must be non-empty strings")
@@ -417,11 +419,13 @@ def _apply_persona_tools(role, info):
                 if not server or not remote or remote == "*":
                     raise ValueError(f"{grant!r} must name one MCP tool as mcp:<server>.<tool>")
                 grant = registry_tool_name(server, remote)
+                labels[grant] = f"{server}.{remote}"
             normalized = _normalize_tool_grant(grant)
             if normalized not in ceiling:
                 ceiling.append(normalized)
         # Replaces the role's default grants rather than adding to them.
         role.tool_ceiling = tuple(ceiling)
+        role.tool_labels = labels       # readable names for MCP registry names
         role.allowed_tools = set(ceiling)
         # Selecting MCP tools by name is the opt-in; discovery needs the capability.
         if any(grant.startswith("mcp.") for grant in ceiling):

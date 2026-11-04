@@ -355,6 +355,19 @@ def _emit_role_tool_event(role, event_type, payload):
     """Emit a tool event to the role's event stream and persist it to the memory store."""
     event_stream = getattr(role, "runtime_event_stream", None)
     session_id = getattr(role, "runtime_session_id", None)
+    if event_type in {"tool_call.executed", "tool_call.failed"}:
+        # Operators reading the JSONL log see what a run actually did: tool and outcome only,
+        # never arguments or results (they can hold private data).
+        try:
+            from robits.core.io import get_logger
+            entry = {"agent": getattr(role, "runtime_role_name", None) or getattr(role, "name", None),
+                     "tool": payload.get("tool_name", "").replace("__", "."),
+                     "status": "ok" if event_type == "tool_call.executed" else "failed"}
+            if event_type == "tool_call.failed":
+                entry["error"] = str(payload.get("result", ""))[:160]
+            get_logger().write_event("tool_call", **entry)
+        except Exception:
+            pass
     private_action = payload.get("tool_name", "").replace("__", ".") in _PRIVATE_TASK_TOOLS | {"agent.think"}
     if event_stream is not None and session_id is not None:
         event_stream.emit(event_type, session_id, payload,
