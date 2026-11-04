@@ -77,9 +77,18 @@ What the example contains:
 
 ## Per-persona credentials
 
-Today all personas share the process's credentials: the model API key and the MCP headers in
-`ROBITS_MCP_CONFIG`. Separate OAuth identities per persona are planned in #138. Until then, give each
-MCP server the narrowest token the whole roster needs.
+The model API key is shared by the whole process. MCP servers that use OAuth can give each persona
+its own identity, or use a shared service identity limited to listed tools. See
+[OAuth for MCP servers](mcp-oauth.md).
+- **Logging in:** run it once per persona from a shell in the pod:
+  `python -m robits.auth login <server> --as persona:<user> --paste`.
+- **Where tokens live:** `ROBITS_CREDENTIALS_DIR`, on the data volume.
+- **Retiring a persona** revokes and deletes its credentials and emits `persona.retired`, which a provisioner
+  can use to disable the account.
+- **Account fields:** `redact_keys` keeps them out of persona context.
+
+Servers with static `headers` still share one credential, so give each of those servers the narrowest
+token the whole roster needs.
 
 ## Backups
 

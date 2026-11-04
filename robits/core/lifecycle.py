@@ -116,6 +116,48 @@ def _workspace_agent_name(agent_name, operation="access", path="", reason=None):
     return normalized_name, None
 
 
+_GONE_STATES = ("retired", "exited")
+
+
+def _announce_lifecycle(role, action, previous_state, lifecycle_state, requested_by, approved_by, reason):
+    """Emit persona.created / persona.retired for external provisioners (#138).
+
+    The first move into retired or exited also revokes and deletes the persona's
+    credentials on MCP servers that act as each persona. Failures are logged and
+    never block the lifecycle change.
+    """
+    if action == "create":
+        event_type = "persona.created"
+    elif lifecycle_state in _GONE_STATES and previous_state not in _GONE_STATES:
+        event_type = "persona.retired"
+    else:
+        return
+    payload = {"persona": role.name, "action": action, "lifecycle_state": lifecycle_state,
+               "requested_by": requested_by, "approved_by": approved_by, "reason": reason}
+    if event_type == "persona.retired":
+        payload["credentials_removed"] = []
+        try:
+            manager = getattr(_m, "mcp_manager", None)
+            if manager is None and getattr(_m, "mcp_config_path", ""):
+                from robits.runtime.mcp import get_manager
+                manager = get_manager()
+            if manager is not None:
+                payload["credentials_removed"] = manager.forget_identity(f"persona:{role.name}")
+        except Exception as error:  # never block retirement on credential cleanup
+            payload["credential_cleanup_error"] = error.__class__.__name__
+    try:
+        from robits.core.io import get_logger
+        get_logger().write_event(event_type.replace(".", "_"), **payload)
+    except Exception:
+        pass
+    caller = _m.active_tool_caller
+    for source in (caller, role):
+        stream = getattr(source, "runtime_event_stream", None)
+        if stream is not None:
+            stream.emit(event_type, getattr(source, "runtime_session_id", None), payload, visibility="public")
+            break
+
+
 def record_lifecycle_event(
     role,
     action,
@@ -135,8 +177,10 @@ def record_lifecycle_event(
     )
     if not hasattr(role, "lifecycle_events"):
         role.lifecycle_events = []
+    previous_state = getattr(role, "lifecycle_state", None)
     role.lifecycle_events.append(event)
     role.lifecycle_state = lifecycle_state
+    _announce_lifecycle(role, action, previous_state, lifecycle_state, requested_by, approved_by, reason)
     if _m.memory_store is not None:
         try:
             _m.memory_store.upsert_agent(
