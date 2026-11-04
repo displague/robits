@@ -60,32 +60,38 @@ def interact(self, model, sender, message):
         work_weight = 0.3 + 0.4 * phase_weight
     personal_weight = 1.0 - work_weight
     
-    preprompt_lines = []
-    preprompt_lines.append("=== Persona Circadian Rhythm & State ===")
-    preprompt_lines.append(f"Active clock state: {effective_clock}")
-    preprompt_lines.append(f"Circadian phase: {phase_val:.2f}")
-    preprompt_lines.append(f"Persona blend weighting: Work Mode = {work_weight * 100:.0f}%, Personal Mode = {personal_weight * 100:.0f}%")
-    preprompt_lines.append("")
-    
-    preprompt_lines.append(f"--- Work Persona Instructions (Weight: {work_weight * 100:.0f}%) ---")
-    preprompt_lines.append(preprompt_work or "")
-    if work_adjustment:
-        preprompt_lines.append(f"[Active Work Adjustment (Expires in {work_adjustment_turns} turns): {work_adjustment}]")
-    preprompt_lines.append("")
-    
-    preprompt_lines.append(f"--- Personal Persona Instructions (Weight: {personal_weight * 100:.0f}%) ---")
-    preprompt_lines.append(preprompt_personal or "")
-    if personal_adjustment:
-        preprompt_lines.append(f"[Active Personal Adjustment (Expires in {personal_adjustment_turns} turns): {personal_adjustment}]")
-    preprompt_lines.append("")
-    
-    dynamic_preprompt = "\n".join(preprompt_lines)
+    # Prompt caching: local servers reuse the longest unchanged token prefix of a request.
+    # Stable parts (persona instructions, templates, briefing index) come first; everything
+    # that changes between turns (clock, phase, weights, adjustments, runtime context with its
+    # timestamp) comes last in the system message, so a change there leaves the stable part cached.
+    static_lines = [
+        "--- Work Persona Instructions ---",
+        preprompt_work or "",
+        "",
+        "--- Personal Persona Instructions ---",
+        preprompt_personal or "",
+        "",
+        "Blend the work and personal instructions using the weights in the state section below.",
+        "",
+    ]
     turn_action_template = getattr(self, "turn_action_template", "")
-    
     guidance = _ON_CLOCK_GUIDANCE if effective_clock == "on" else _OFF_CLOCK_GUIDANCE
     from robits.core.access_audit import access_duty_note
-    system_content = (dynamic_preprompt + turn_action_template + guidance
-                      + access_duty_note(self) + format_briefing_index(self) + format_agent_context(self))
+    stable_content = ("\n".join(static_lines) + turn_action_template + guidance
+                      + access_duty_note(self) + format_briefing_index(self))
+
+    state_lines = [
+        "=== Persona Circadian Rhythm & State ===",
+        f"Active clock state: {effective_clock}",
+        f"Circadian phase: {phase_val:.2f}",
+        f"Persona blend weighting: Work Mode = {work_weight * 100:.0f}%, Personal Mode = {personal_weight * 100:.0f}%",
+    ]
+    if work_adjustment:
+        state_lines.append(f"[Active Work Adjustment (Expires in {work_adjustment_turns} turns): {work_adjustment}]")
+    if personal_adjustment:
+        state_lines.append(f"[Active Personal Adjustment (Expires in {personal_adjustment_turns} turns): {personal_adjustment}]")
+    state_block = "\n".join(state_lines) + "\n" + format_agent_context(self)
+    system_content = stable_content + "\n" + state_block
 
     if self.name not in self.conversation_history:
         self.conversation_history[self.name] = [
