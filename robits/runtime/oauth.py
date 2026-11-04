@@ -331,7 +331,9 @@ class OAuthClient:
                                   metadata.get("token_endpoint_auth_methods"))
             name = str(self.auth.get("client_name") or "robits")
             if per_identity:
-                name = f"{name} ({self.identity})"
+                name = f"{name} ({self.identity.replace(':', ' ')})"
+            # Identity providers restrict client_name (e.g. letters, digits, spaces and "()._-").
+            name = re.sub(r"\s+", " ", re.sub(r"[^\w ()._-]", " ", name)).strip()[:128] or "robits"
             status, _, body = http_request("POST", _require_url(endpoint, "registration_endpoint"), json_body={
                 "client_name": name,
                 "redirect_uris": [redirect_uri],
