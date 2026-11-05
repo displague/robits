@@ -6,8 +6,10 @@ interpreted or exposed to the model. No legacy initialize handshake is used.
 """
 import hashlib
 import json
+import logging
 import re
 import time
+import uuid
 from pathlib import Path
 from uuid import uuid4
 
@@ -392,6 +394,44 @@ def redact_result(result, keys):
     return result, removed
 
 
+_PROCESS_NONCE = uuid.uuid4().hex  # key scope for roles used outside a session
+_DERIVED_NAME = re.compile(r"^[A-Za-z0-9_.-]{1,64}$")
+
+
+def _derived_tools(server, spec):
+    """Validate a server's derived_tools: flat tools backed by another tool on the same server.
+
+    {"post_update": {"via": "execute", "arguments": {"name": "post_update"}, "wrap": "arguments",
+                     "idempotency_key": "idempotency_key", "description": "...",
+                     "input_schema": {"type": "object", "properties": {...}, "required": [...]}}}
+    """
+    if spec is None:
+        return {}
+    if not isinstance(spec, dict):
+        raise ValueError(f"MCP server {server}: derived_tools must map tool names to specs")
+    out = {}
+    for alias, item in spec.items():
+        if not _DERIVED_NAME.match(str(alias)) or not isinstance(item, dict):
+            raise ValueError(f"MCP server {server}: invalid derived tool {alias!r}")
+        via = item.get("via")
+        schema = item.get("input_schema")
+        if not isinstance(via, str) or not via:
+            raise ValueError(f"MCP server {server}: derived tool {alias} needs via (the backing tool)")
+        if not isinstance(schema, dict) or schema.get("type") != "object":
+            raise ValueError(f"MCP server {server}: derived tool {alias} needs an object input_schema")
+        fixed = item.get("arguments") or {}
+        wrap = item.get("wrap")
+        key = item.get("idempotency_key")
+        if not isinstance(fixed, dict) or (wrap is not None and not isinstance(wrap, str)) \
+                or (key is not None and not isinstance(key, str)):
+            raise ValueError(f"MCP server {server}: derived tool {alias} has a malformed arguments/wrap/idempotency_key")
+        from jsonschema.validators import validator_for
+        validator_for(schema).check_schema(schema)
+        out[alias] = {"via": via, "input_schema": schema, "arguments": fixed, "wrap": wrap,
+                      "idempotency_key": key, "description": str(item.get("description") or alias)}
+    return out
+
+
 def registry_tool_name(server, remote_name):
     """Return the registry name for a remote tool, as used in grants and persona `tools:` lists."""
     digest = hashlib.sha256(f"{server}:{remote_name}".encode()).hexdigest()[:12]
@@ -415,8 +455,11 @@ class MCPManager:
                 if not isinstance(keys, list) or not all(isinstance(k, str) and k for k in keys):
                     raise ValueError(f"MCP server {name}: redact_keys must be a list of field names")
                 self.redact[name] = frozenset(k.lower() for k in keys)
+        self.derived = {name: _derived_tools(name, options.get("derived_tools"))
+                        for name, options in servers.items() if isinstance(options, dict)}
+        manager_keys = {"redact_keys", "derived_tools"}
         self.servers = {name: transport_factory(**_server_options(
-                            name, {k: v for k, v in options.items() if k != "redact_keys"}))
+                            name, {k: v for k, v in options.items() if k not in manager_keys}))
                         for name, options in servers.items()}
         self.pending = {}
         self.registered = {}
@@ -528,7 +571,6 @@ class MCPManager:
                         try:
                             self.servers[server].tool_headers[original] = header_paths(schema)
                         except ValueError as exc:
-                            import logging
                             logging.warning("Skipping MCP tool %s: %s", original, exc)
                             continue
                     def make_call(server_name, tool_name, input_schema):
@@ -543,6 +585,18 @@ class MCPManager:
                         name, remote.get("description", original), schema,
                         list(schema.get("properties", {})), schema.get("required", []), make_call(server, original, schema),
                         namespace="mcp", required_capabilities=("mcp",), raw_arguments=True))
+            for alias, spec in self.derived.get(server, {}).items():
+                if alias in offered:
+                    logging.warning("Skipping derived MCP tool %s on %s: the server offers a tool of that name", alias, server)
+                    continue
+                if spec["via"] not in offered:
+                    continue  # the backing tool isn't available to this identity
+                schema = spec["input_schema"]
+                definitions.append(ToolDefinition(
+                    registry_tool_name(server, alias), spec["description"], schema,
+                    list(schema.get("properties", {})), schema.get("required", []),
+                    self._derived_call(server, alias, spec), namespace="mcp", required_capabilities=("mcp",),
+                    raw_arguments=True))
             mine = self.server_tools.setdefault(server, set())
             fresh = []
             for tool in definitions:
@@ -572,6 +626,37 @@ class MCPManager:
                 raise ValueError("MCP tools/list cursor repeated")
             seen.add(cursor)
         raise ValueError("MCP tool discovery page budget exceeded")
+
+    def _derived_call(self, server, alias, spec):
+        """A flat tool that calls spec["via"] with fixed fields and the model's arguments wrapped."""
+        def call(employee_dict, arguments):
+            try:
+                validate_json(arguments, spec["input_schema"])
+                role = config.active_tool_caller
+                payload = dict(arguments)
+                fixed = dict(spec.get("arguments") or {})
+                key_field = spec.get("idempotency_key")
+                # The model may not set the fixed fields (unwrapped) or the idempotency key.
+                reserved = (set() if spec.get("wrap") else set(fixed)) | ({key_field} if key_field else set())
+                overlap = sorted(set(payload) & reserved)
+                if overlap:
+                    raise ValueError(f"arguments may not set {', '.join(overlap)}")
+                if key_field:
+                    # Scoped to the session and caller: a retry of the same call in this session reuses
+                    # the key; the same arguments in a later session, or from another persona, don't.
+                    scope = [self._identity(server, role) or "static", getattr(role, "name", None),
+                             getattr(role, "runtime_session_id", None) or _PROCESS_NONCE, alias, payload]
+                    digest = hashlib.sha256(json.dumps(scope, sort_keys=True, default=str).encode()).hexdigest()
+                    payload[key_field] = f"robits-{digest[:32]}"
+                backing = dict(fixed)
+                if spec.get("wrap"):
+                    backing[spec["wrap"]] = payload
+                else:
+                    backing.update(payload)
+                return json.dumps(self.call(server, spec["via"], backing, role))
+            except Exception as exc:
+                return f"Error: {exc}"
+        return call
 
     def call(self, server, tool, arguments, role):
         params = {"name": tool, "arguments": arguments}
