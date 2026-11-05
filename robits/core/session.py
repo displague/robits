@@ -177,6 +177,12 @@ def _touch_heartbeat():
         pass
 
 
+_INCOMPLETE_TURN_ERRORS = (
+    "Error: Too many consecutive tool-call rounds.",
+    "Error: Subtask model round budget exceeded.",
+)
+
+
 def _default_sleeper(seconds, wake_event):
     """Block until wake_event is set or seconds elapse (None = until woken).
 
@@ -1296,7 +1302,12 @@ class Session:
                     turn_at = self._now()
                     self._turn_times.append(turn_at)
                     self._last_turn_at[self._role_to_key.get(id(self.last_receiver))] = turn_at
-                    if (last_response or "").strip():
+                    if (last_response or "").strip().startswith(_INCOMPLETE_TURN_ERRORS):
+                        # A runtime limit, not something the persona said: record it, don't relay it.
+                        self.event_stream.emit("turn.incomplete", self.run_id, {
+                            "agent": self._role_to_key.get(id(self.last_receiver)), "reason": last_response.strip()})
+                        get_logger().write_event("turn_incomplete", reason=last_response.strip())
+                    elif (last_response or "").strip():
                         pending_reply = last_response
                         # Freeze a DM return address before another input changes
                         # the transcript used by route_message's reply shortcut.
@@ -1439,11 +1450,22 @@ class Session:
             if (target in due) if target is not None else bool(due):
                 del self._inbox[index]
                 return message, self._external, None
-        for index, (message, sender) in enumerate(self._pending_replies):
+        for index, (message, sender) in enumerate(list(self._pending_replies)):
             target = self._parse_directed(message)[0]
-            if (target in due) if target is not None else bool(due):
-                del self._pending_replies[index]
+            author = self._role_to_key.get(id(sender))
+            others = [name for name in due if name != author]
+            if target is not None and target == author or target is None and not others and len(
+                    self.scheduler.participant_names) <= 1:
+                # Nobody else to hear it (or addressed to its own author): never feed a reply back to its author.
+                self._pending_replies.remove((message, sender))
+                self.event_stream.emit("reply.undelivered", self.run_id, {"agent": author})
+                continue
+            if target is not None and target in due:
+                self._pending_replies.remove((message, sender))
                 return message, sender, None
+            if target is None and others:
+                self._pending_replies.remove((message, sender))
+                return message, sender, self._next_in_rotation(others)
         if (last_response or "").strip():
             target = self._parse_directed(last_response)[0]
             if (target in due) if target is not None else bool(due):
@@ -1463,13 +1485,23 @@ class Session:
             wake_at = clock_change
         return self._idle(now, wake_at, "nothing_due" if due else "no_persona_due", finite)
 
+    def _next_in_rotation(self, candidates):
+        """The first of candidates in the scheduler's rotation order, starting from its current position."""
+        names = self.scheduler.participant_names
+        for offset in range(len(names)):
+            name = names[(self.scheduler.index + offset) % len(names)]
+            if name in candidates:
+                return name
+        return candidates[0]
+
     def _persona_wake_times(self, now, last_response=""):
         """Return {name: datetime or None}: when each persona next has a reason to take a turn."""
-        pending = list(self._inbox)
-        pending.extend(message for message, _sender in self._pending_replies)
+        # (target, author): an undirected pending reply is a reason to wake anyone but its author.
+        pending = [(self._parse_directed(message)[0], None) for message in self._inbox]
+        pending.extend((self._parse_directed(message)[0], self._role_to_key.get(id(sender)))
+                       for message, sender in self._pending_replies)
         if (last_response or "").strip():
-            pending.append(last_response)
-        targets = [self._parse_directed(message)[0] for message in pending]
+            pending.append((self._parse_directed(last_response)[0], None))
         interval = timedelta(seconds=_m.min_turn_interval_seconds)
         wake_times = {}
         for name in self.scheduler.participant_names:
@@ -1482,7 +1514,8 @@ class Session:
             wu = getattr(role, "waiting_until", None)
             alarm_at = next_alarm_at(role)
             reasons = [t for t in (wu, alarm_at) if t is not None]
-            if None in targets or name in targets or (self._retry_turn is not None and self._retry_turn[2] == name):
+            addressed = any(target == name or (target is None and author != name) for target, author in pending)
+            if addressed or (self._retry_turn is not None and self._retry_turn[2] == name):
                 reasons.append(now)
             ready = [now]
             if wu is not None:
