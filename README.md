@@ -15,6 +15,7 @@ A Python-based simulation of an AI-driven organisation where agents with distinc
 - [Installation](#installation)
 - [Configuration](#configuration)
 - [Running the Simulation](#running-the-simulation)
+- [Phone lines](#phone-lines)
 - [Local Models (Ollama / LMStudio)](#local-models-ollama--lmstudio)
 - [Testing](#testing)
 
@@ -331,6 +332,17 @@ Capture to a log file while watching:
 ```bash
 python main.py --prompt "Ops, say hello to HR" --turns 1 --log run.log
 ```
+
+## Phone lines
+
+`robits.voice` (optional: `pip install -r requirements-voice.txt`) lets people call your personas. A line is one persona, or a group call with several where the caller addresses one by name ("Alex, what's the lead?"); names speech recognition mishears can be mapped back per line. Each persona speaks with its own `voice:` from the persona file; the call is an ordinary robits session, so personas keep their prompts, memories, briefings and tools. Speech recognition and synthesis are any OpenAI-compatible endpoints.
+
+```bash
+ROBITS_VOICE_LINES=lines.yaml ROBITS_VOICE_STT_URL=http://127.0.0.1:8000/v1 \
+ROBITS_VOICE_TTS_URL=http://127.0.0.1:8880/v1 python -m robits.voice
+```
+
+The server takes WebRTC offers, hangups and texts from a telephony connector over HTTP. See [docs/voice.md](docs/voice.md).
 
 ## Local Models (Ollama / LMStudio)
 
