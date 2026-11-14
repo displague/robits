@@ -37,7 +37,9 @@ class PromptTestCase(unittest.TestCase):
         role.runtime_clock_state = "on"
         with redirect_stdout(StringIO()):
             role.interact("CEO", "hello")
-        return self.requests[-1][0]["content"]
+        # What the model reads before the caller's words: the system message, then the per-turn
+        # state sent ahead of the newest message.
+        return self.requests[-1][0]["content"] + "\n" + self.requests[-1][-1]["content"]
 
 
 class ToolAwareInstructionTests(PromptTestCase):

@@ -34,7 +34,7 @@ class UnavailableToolTests(unittest.TestCase):
     def system(self):
         with redirect_stdout(StringIO()):
             self.org["ada"].interact("ops", "hello")
-        return self.requests[-1][0]["content"]
+        return self.requests[-1][0]["content"] + "\n" + self.requests[-1][-1]["content"]
 
     def test_missing_mcp_tool_is_named_by_its_readable_name(self):
         prompt = self.system()

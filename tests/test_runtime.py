@@ -5106,8 +5106,8 @@ class ContextTrimTests(unittest.TestCase):
         sent = captured[0]
         self.assertEqual(sent[0]["role"], "system")
         self.assertLess(len(sent), len(history))
-        # Most recent message must always be present
-        self.assertTrue(any(m.get("content") == "new msg" for m in sent))
+        # Most recent message must always be present (after the per-turn state)
+        self.assertTrue(sent[-1]["content"].endswith("new msg"))
 
     def test_trimming_does_not_mutate_conversation_history(self):
         """Trimming is applied only to the messages sent to generate(), not stored history."""

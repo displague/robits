@@ -100,16 +100,17 @@ class PrepromptTests(unittest.TestCase):
         self.assertTrue(calls)
         messages = calls[-1][0][3]  # messages argument
         system_content = messages[0]["content"]
+        state = messages[-1]["content"]
 
-        self.assertIn("=== Persona Circadian Rhythm & State ===", system_content)
-        self.assertIn("Active clock state: on", system_content)
-        self.assertIn("Circadian phase: 0.50", system_content)
+        self.assertIn("=== Persona Circadian Rhythm & State ===", state)
+        self.assertIn("Active clock state: on", state)
+        self.assertIn("Circadian phase: 0.50", state)
+        self.assertTrue(state.endswith("Hello"))
         self.assertIn("Work Persona Instructions", system_content)
         self.assertIn("Focus on software architecture.", system_content)
         self.assertIn("Play video games.", system_content)
-        # Stable instructions come before the per-turn state (cacheable prefix).
-        self.assertLess(system_content.index("Play video games."),
-                        system_content.index("=== Persona Circadian Rhythm & State ==="))
+        # The per-turn state stays out of the system message (a stable, cacheable prefix).
+        self.assertNotIn("Circadian phase", system_content)
 
     def test_agent_adjust_preprompt_and_decay(self):
         employee_dict = build_employee_dict()
