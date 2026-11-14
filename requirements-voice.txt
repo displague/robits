@@ -1,0 +1,6 @@
+# Optional: phone lines for personas (robits.voice). Installs Pipecat with WebRTC and Silero VAD;
+# speech-to-text and text-to-speech are OpenAI-compatible HTTP services you point it at.
+-r requirements-core.txt
+pipecat-ai[webrtc,silero,openai]==1.16.0
+fastapi
+uvicorn

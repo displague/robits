@@ -2,7 +2,8 @@
 # Headless robits: non-root, read-only root filesystem, all state on /data.
 #   docker build -t robits .
 #   docker run --read-only -v robits-data:/data -e OPENAI_BASE_URL=... robits
-# Optional extras: --build-arg EXTRAS="sqlite-vec" (vector memory search).
+# Optional extras: --build-arg EXTRAS="sqlite-vec" (vector memory search),
+#   --build-arg EXTRAS="-r requirements-voice.txt" (phone lines: python -m robits.voice; see docs/voice.md).
 ARG PYTHON_IMAGE=python:3.12-slim-bookworm@sha256:e697c81897302a4c4333bade000d98038fbb21eb064f8ee1fd42d02ebcd9d337
 FROM ${PYTHON_IMAGE}
 
@@ -13,7 +14,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1
 
 WORKDIR /app
-COPY requirements-core.txt ./
+COPY requirements-core.txt requirements-voice.txt ./
 RUN pip install -r requirements-core.txt ${EXTRAS}
 COPY main.py tools.yaml personas.yaml ./
 COPY robits/ robits/
