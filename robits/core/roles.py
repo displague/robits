@@ -67,7 +67,7 @@ def interact(self, model, sender, message):
     # Prompt caching: local servers reuse the longest unchanged token prefix of a request.
     # The system message holds only stable parts (persona instructions, templates, briefing
     # index). Everything that changes between turns (clock, phase, weights, adjustments, runtime
-    # context with its timestamp) is added to the newest user message instead: in the system
+    # context with its timestamp) goes ahead of the newest user message instead: in the system
     # message it would change the prefix every minute and force the whole conversation after it to
     # be processed again.
     static_lines = [
@@ -174,24 +174,19 @@ def _context_window(role, messages):
     return [system_msg] + rest[start:]
 
 
-# Marks the state block that follows a message as robits' own, so a small model doesn't take it for
-# part of what the sender said (and answer it).
-STATE_LABEL = "(Context for you, not part of the message above:)"
-
-
 def _with_state(messages, state_block):
-    """The per-turn state after the newest user message's text (only in what is sent; the stored
-    history keeps the message as it was). After, not ahead: on the next turn the message is sent
-    without it, and a prompt cache then keeps everything up to the end of the message's text and
-    recomputes only the state block and the reply. Without a user message it closes the system
-    message."""
+    """The per-turn state ahead of the newest user message (only in what is sent; the stored
+    history keeps the message as it was), so the message is the last thing the model reads.
+    After the message, small models took the state for part of it and answered it on calls ("the
+    state on the clock"). Ahead costs a prefix cache only the last exchange: on the next turn the
+    message is sent without the state, so the cache keeps everything before it. Without a user
+    message it closes the system message."""
     if not state_block:
         return messages
     for i in range(len(messages) - 1, 0, -1):
         if messages[i].get("role") == "user" and isinstance(messages[i].get("content"), str):
             sent = list(messages)
-            sent[i] = {**messages[i], "content": messages[i]["content"] + "\n\n" + STATE_LABEL + "\n"
-                       + state_block.strip("\n")}
+            sent[i] = {**messages[i], "content": state_block.strip("\n") + "\n\n" + messages[i]["content"]}
             return sent
     sent = list(messages)
     sent[0] = {**messages[0], "content": messages[0]["content"] + "\n" + state_block}
