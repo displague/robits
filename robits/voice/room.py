@@ -49,6 +49,10 @@ class Room:
         self.session = session or (session_factory or _new_session)(line, self.caller.name)
         self.last = None
         self.closed = False
+        # The call note is the same on every turn of the call, so it goes in each persona's system
+        # message (where a model server's prompt cache keeps it) rather than ahead of every message.
+        for key in line.personas:
+            self.session.participants[key].situation_note = self._note(key)
 
     # --- who answers -------------------------------------------------------------------------
 
@@ -107,7 +111,7 @@ class Room:
     # --- turns -------------------------------------------------------------------------------
 
     def _turn(self, key, words, sender):
-        response = self.session.step(f"{self._note(key)}\n{words}", sender=sender, receiver_name=key)
+        response = self.session.step(words, sender=sender, receiver_name=key)
         self.last = key
         return Reply(key, self._names(key), self._unaddressed(key, speech.speakable(response or "")),
                      self.line.voices.get(key))
@@ -159,6 +163,8 @@ class Room:
 
     def close(self):
         self.closed = True
+        for key in self.line.personas:
+            self.session.participants[key].__dict__.pop("situation_note", None)
         try:
             self.session.close()
         except Exception:

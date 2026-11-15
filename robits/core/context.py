@@ -90,11 +90,16 @@ def format_agent_context(role=None):
     )
 
 
-def format_org_chat_context(transcript, limit):
-    """Format the most recent `limit` non-directed transcript entries as an org-chat snippet."""
+def format_org_chat_context(transcript, limit, receiver=None):
+    """Format the most recent `limit` non-directed transcript entries as an org-chat snippet.
+
+    Entries addressed to `receiver` are left out: they are already in its own conversation.
+    Entries it sent to others stay, since its history holds only its own words, not the reply.
+    """
     if not transcript or limit == 0:
         return ""
-    public = [e for e in transcript if not getattr(e, "directed", False)]
+    public = [e for e in transcript if not getattr(e, "directed", False)
+              and (receiver is None or e.receiver != receiver)]
     recent = public[-limit:]
     lines = []
     for e in recent:
