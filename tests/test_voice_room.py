@@ -110,8 +110,11 @@ class RoomTest(unittest.TestCase):
         replies = self.say(room, "Alex, are you there?")
         self.assertEqual([(r.persona, r.text) for r in replies], [("sam_ortiz", "Hello, editor here.")])
         self.assertEqual(self.alex.received, [])
-        self.assertIn("phone call", self.sam.received[0][1])
-        self.assertEqual(self.sam.received[0][0], "caller")
+        self.assertEqual(self.sam.received[0], ("caller", "Alex, are you there?"))
+        # The call note rides in the persona's system message for the call, not in every message.
+        self.assertIn("phone call", self.sam.situation_note)
+        room.close()
+        self.assertFalse(hasattr(self.sam, "situation_note"))
 
     def test_group_line_answers_the_named_persona_then_keeps_talking_to_them(self):
         room = self.room(self.lines()["team"], alex=["Hi."], sam=["The lead is the vote.", "Tomorrow."])
@@ -156,7 +159,7 @@ class RoomTest(unittest.TestCase):
                          [("alex_chen", "What is new with the operations?")])
         self.assertEqual([r.text for r in self.say(room, "And the records?")], ["I haven't read it."])
         self.assertEqual(self.sam.received, [])
-        self.assertIn("never address the others", self.alex.received[0][1])
+        self.assertIn("never address the others", self.alex.situation_note)
 
     def test_heard_as_words_reach_the_persona_they_name(self):
         room = self.room(self.lines()["quiet"], alex=["Hi."], sam=["The vote.", "Friday."])

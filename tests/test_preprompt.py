@@ -105,7 +105,7 @@ class PrepromptTests(unittest.TestCase):
         self.assertIn("=== Persona Circadian Rhythm & State ===", state)
         self.assertIn("Active clock state: on", state)
         self.assertIn("Circadian phase: 0.50", state)
-        self.assertTrue(state.endswith("Hello"))
+        self.assertTrue(state.startswith("Hello"))
         self.assertIn("Work Persona Instructions", system_content)
         self.assertIn("Focus on software architecture.", system_content)
         self.assertIn("Play video games.", system_content)

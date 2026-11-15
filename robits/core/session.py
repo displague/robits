@@ -1190,7 +1190,8 @@ class Session:
             system_events,
         )
         effective_org_lines = _m.org_chat_context_lines if self._effective_clock_state() == "on" else 0
-        org_context = format_org_chat_context(self.transcript, effective_org_lines)
+        org_context = format_org_chat_context(self.transcript, effective_org_lines,
+                                              receiver=getattr(routed.receiver, "name", None))
         model_prompt = org_context + raw_prompt if org_context else raw_prompt
         self.prepare_agent_runtime(routed.receiver)
         
