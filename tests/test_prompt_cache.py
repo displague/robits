@@ -11,6 +11,7 @@ import main
 from robits.core.config import _config as config
 
 STATE = "=== Persona Circadian Rhythm & State ==="
+STATE_LABEL = "(Context for you, not part of the message above:)"
 
 
 class PromptCacheTests(unittest.TestCase):
@@ -45,8 +46,8 @@ class PromptCacheTests(unittest.TestCase):
         self.turn("first question")
         self.turn("second question")
         first, second = self.requests[0][-1]["content"], self.requests[1][-1]["content"]
-        self.assertTrue(first.startswith("first question\n\n" + STATE))
-        self.assertTrue(second.startswith("second question\n\n" + STATE))
+        self.assertTrue(first.startswith("first question\n\n" + STATE_LABEL + "\n" + STATE))
+        self.assertTrue(second.startswith("second question\n\n" + STATE_LABEL + "\n" + STATE))
         self.assertIn("current_datetime_utc", second)
         earlier = [m["content"] for m in self.requests[1][1:-1]]
         self.assertEqual(earlier, ["first question", "reply 1"], "earlier turns are sent as they were")

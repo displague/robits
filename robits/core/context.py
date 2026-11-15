@@ -94,6 +94,7 @@ def format_org_chat_context(transcript, limit, receiver=None):
     """Format the most recent `limit` non-directed transcript entries as an org-chat snippet.
 
     Entries addressed to `receiver` are left out: they are already in its own conversation.
+    Entries it sent to others stay, since its history holds only its own words, not the reply.
     """
     if not transcript or limit == 0:
         return ""

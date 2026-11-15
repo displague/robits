@@ -174,6 +174,11 @@ def _context_window(role, messages):
     return [system_msg] + rest[start:]
 
 
+# Marks the state block that follows a message as robits' own, so a small model doesn't take it for
+# part of what the sender said (and answer it).
+STATE_LABEL = "(Context for you, not part of the message above:)"
+
+
 def _with_state(messages, state_block):
     """The per-turn state after the newest user message's text (only in what is sent; the stored
     history keeps the message as it was). After, not ahead: on the next turn the message is sent
@@ -185,7 +190,8 @@ def _with_state(messages, state_block):
     for i in range(len(messages) - 1, 0, -1):
         if messages[i].get("role") == "user" and isinstance(messages[i].get("content"), str):
             sent = list(messages)
-            sent[i] = {**messages[i], "content": messages[i]["content"] + "\n\n" + state_block.strip("\n")}
+            sent[i] = {**messages[i], "content": messages[i]["content"] + "\n\n" + STATE_LABEL + "\n"
+                       + state_block.strip("\n")}
             return sent
     sent = list(messages)
     sent[0] = {**messages[0], "content": messages[0]["content"] + "\n" + state_block}
