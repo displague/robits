@@ -65,9 +65,11 @@ def interact(self, model, sender, message):
     personal_weight = 1.0 - work_weight
     
     # Prompt caching: local servers reuse the longest unchanged token prefix of a request.
-    # Stable parts (persona instructions, templates, briefing index) come first; everything
-    # that changes between turns (clock, phase, weights, adjustments, runtime context with its
-    # timestamp) comes last in the system message, so a change there leaves the stable part cached.
+    # The system message holds only stable parts (persona instructions, templates, briefing
+    # index). Everything that changes between turns (clock, phase, weights, adjustments, runtime
+    # context with its timestamp) is sent ahead of the newest user message instead: in the system
+    # message it would change the prefix every minute and force the whole conversation after it to
+    # be processed again.
     static_lines = [
         "--- Work Persona Instructions ---",
         preprompt_work or "",
@@ -110,7 +112,7 @@ def interact(self, model, sender, message):
     else:
         state_block = "\n".join(state_lines) + "\n" + format_agent_context(self)
     state_block += prompting.unavailable_tools_note(self)
-    system_content = stable_content + "\n" + state_block
+    system_content = stable_content
 
     if self.name not in self.conversation_history:
         self.conversation_history[self.name] = [
@@ -124,19 +126,8 @@ def interact(self, model, sender, message):
     if message is not None and message != "":
         messages.append({"role": "user", "content": message, "name": sender})
 
-    send_messages = messages
-    if _m.max_context_tokens > 0 and len(messages) > 1:
-        budget = _m.max_context_tokens * 4  # ~4 chars per token
-        system_msg = messages[0]
-        kept = []
-        chars = len(json.dumps(system_msg))
-        for msg in reversed(messages[1:]):
-            msg_chars = len(json.dumps(msg))
-            if chars + msg_chars > budget and kept:
-                break
-            kept.insert(0, msg)
-            chars += msg_chars
-        send_messages = [system_msg] + kept
+    send_messages = _context_window(self, messages)
+    send_messages = _with_state(send_messages, state_block)
 
     from robits.core.io import get_logger
     import json as _json
@@ -152,6 +143,46 @@ def interact(self, model, sender, message):
         self.conversation_history[self.name].append(message)
 
     return message["content"]
+
+
+def _context_window(role, messages):
+    """The messages to send under ROBITS_MAX_CONTEXT_TOKENS (~4 characters per token).
+
+    Over budget, the oldest turns are dropped down to 60% of it, and that starting point is kept
+    on later turns until the budget is reached again: dropping one turn per turn would change the
+    start of the conversation, and with it the cached prefix, on every turn.
+    """
+    if _m.max_context_tokens <= 0 or len(messages) <= 1:
+        return messages
+    budget = _m.max_context_tokens * 4
+    system_msg, rest = messages[0], messages[1:]
+    starts = role.__dict__.setdefault("_context_start", {})
+    start = min(starts.get(role.name, 0), len(rest) - 1)
+
+    def size(msgs):
+        return len(json.dumps(system_msg)) + sum(len(json.dumps(m)) for m in msgs)
+
+    if size(rest[start:]) > budget:
+        start = len(rest) - 1  # always keep the newest message
+        while start > 0 and size(rest[start - 1:]) <= budget * 0.6:
+            start -= 1
+    starts[role.name] = start
+    return [system_msg] + rest[start:]
+
+
+def _with_state(messages, state_block):
+    """The per-turn state ahead of the newest user message (only in what is sent; the stored
+    history keeps the message as it was). Without a user message it closes the system message."""
+    if not state_block:
+        return messages
+    for i in range(len(messages) - 1, 0, -1):
+        if messages[i].get("role") == "user" and isinstance(messages[i].get("content"), str):
+            sent = list(messages)
+            sent[i] = {**messages[i], "content": state_block.rstrip("\n") + "\n\n" + messages[i]["content"]}
+            return sent
+    sent = list(messages)
+    sent[0] = {**messages[0], "content": messages[0]["content"] + "\n" + state_block}
+    return sent
 
 
 def interact_cheap(self, sender, message):

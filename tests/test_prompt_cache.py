@@ -1,4 +1,5 @@
 """The system message keeps its stable part first, so local servers can reuse their prompt cache."""
+import json
 import time
 import unittest
 from contextlib import redirect_stdout
@@ -31,22 +32,40 @@ class PromptCacheTests(unittest.TestCase):
         with redirect_stdout(StringIO()):
             self.se.interact("CEO", text)
 
-    def test_per_turn_state_comes_after_the_stable_prompt(self):
+    def test_the_system_message_does_not_change_between_turns(self):
         self.turn("first question")
         time.sleep(1.1)  # the runtime context's timestamp changes between turns
         self.turn("second question")
         s1, s2 = self.requests[0][0]["content"], self.requests[1][0]["content"]
-        self.assertNotEqual(s1, s2, "the timestamp changed")
-        stable1, stable2 = s1[:s1.index(STATE)], s2[:s2.index(STATE)]
-        self.assertEqual(stable1, stable2, "everything before the state section is identical")
-        self.assertIn("current_datetime_utc", s1[s1.index(STATE):])
-        self.assertNotIn("Circadian phase", stable1)
-        self.assertGreater(len(stable1), len(s1) - len(stable1), "most of the system prompt is cacheable")
+        self.assertEqual(s1, s2, "clock, phase and time stay out of the system message")
+        self.assertNotIn(STATE, s1)
+        self.assertNotIn("current_datetime_utc", s1)
 
-    def test_user_messages_are_untouched(self):
+    def test_state_is_sent_ahead_of_the_newest_message_only(self):
         self.turn("first question")
-        self.assertEqual(self.requests[0][-1]["content"], "first question")
+        self.turn("second question")
+        first, second = self.requests[0][-1]["content"], self.requests[1][-1]["content"]
+        self.assertTrue(first.startswith(STATE) and first.endswith("first question"))
+        self.assertTrue(second.startswith(STATE) and second.endswith("second question"))
+        self.assertIn("current_datetime_utc", second)
+        earlier = [m["content"] for m in self.requests[1][1:-1]]
+        self.assertEqual(earlier, ["first question", "reply 1"], "earlier turns are sent as they were")
+
+    def test_user_messages_are_stored_untouched(self):
+        self.turn("first question")
         self.assertEqual(self.se.conversation_history[self.se.name][-2]["content"], "first question")
+
+    def test_trimming_keeps_its_starting_point_until_the_budget_is_reached_again(self):
+        config.max_context_tokens = 1000  # ~4000 characters: the system message and several turns
+        for i in range(20):
+            self.turn(f"question {i} " + "x" * 200)
+        starts = [next(m["content"] for m in r if m["role"] == "user") for r in self.requests]
+        firsts = [s[s.index("question"):].split()[1] if "question" in s else s for s in starts]
+        changes = sum(1 for a, b in zip(firsts, firsts[1:]) if a != b)
+        self.assertGreater(len(set(firsts)), 1, "old turns were dropped")
+        self.assertLess(changes, 5, "the starting point moves in steps, not on every turn")
+        for r in self.requests:
+            self.assertLessEqual(sum(len(json.dumps(m)) for m in r), 4000 + 1500)  # + the newest message's state
 
 
 if __name__ == "__main__":
