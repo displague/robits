@@ -547,3 +547,84 @@ class TransportTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ToolExchangeHistoryTests(unittest.TestCase):
+    """A public tool exchange is kept as it was sent, so the next turn's prompt keeps the prefix."""
+
+    def setUp(self):
+        import yaml
+        self.registry = ToolRegistry()
+        with open("tools.yaml", encoding="utf-8") as stream:
+            for definition in yaml.safe_load(stream):
+                self.registry.register_definition(definition)
+        self.role = main.Role("Rowan", "You are Rowan.", {})
+        self.role.allowed_tools = {"agent.*"}
+        self.role.runtime_session_id = "exchange-session"
+        self.requests = []
+
+    def run_turns(self, responses, *texts):
+        from contextlib import redirect_stdout
+        from io import StringIO
+
+        def create(**kwargs):
+            self.requests.append(json.loads(json.dumps(kwargs["messages"], default=str)))
+            return responses.pop(0)
+        client = SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=create)))
+        with patch.multiple(config, client=client, model_provider=ChatCompletionsProvider(client, self.registry),
+                            tool_registry=self.registry, agent_workspace_store=None, _org_workspace=None,
+                            memory_store=None, mcp_manager=None), redirect_stdout(StringIO()):
+            session = main.Session(participants={"CEO": FakeRoleForExchange("CEO"), "Rowan": self.role},
+                                   run_id="exchange-session", system=main.System({}, self.registry))
+            try:
+                for text in texts:
+                    session.step(f"Rowan, {text}")
+            finally:
+                session.close()
+
+    def test_the_next_turn_replays_the_tool_exchange_as_sent(self):
+        self.run_turns([message(tool="agent__context"), message("It is the afternoon."), message("Sure.")],
+                       "what time is it?", "thanks.")
+        history = self.role.conversation_history["Rowan"]
+        roles = [m["role"] for m in history]
+        at = roles.index("tool")
+        self.assertEqual(roles[at - 1:at + 2], ["assistant", "tool", "assistant"])
+        self.assertTrue(history[at - 1].get("tool_calls"))
+        self.assertEqual(history[at + 1]["content"], "It is the afternoon.")
+        self.assertFalse(any(m["role"] == "system" and "Verified runtime results" in (m.get("content") or "")
+                             for m in history), "the results are not added again as a system note")
+        answered, following = self.requests[1], self.requests[2]
+        # Everything the answering request held, up to the tool result, starts the next request.
+        tool_at = max(i for i, m in enumerate(answered) if m["role"] == "tool")
+        strip = lambda ms: [{k: m.get(k) for k in ("role", "tool_calls", "tool_call_id")} for m in ms]
+        self.assertEqual(strip(following[1:tool_at + 1]), strip(answered[1:tool_at + 1]))
+        self.assertEqual(following[tool_at]["content"], answered[tool_at]["content"])
+
+    def test_trimming_never_starts_on_a_tool_result(self):
+        self.role.conversation_history["Rowan"] = [
+            {"role": "system", "content": "s"},
+            {"role": "user", "content": "x" * 400},
+            {"role": "assistant", "content": None, "tool_calls": [{"id": "c", "type": "function",
+                                                                    "function": {"name": "a", "arguments": "{}"}}]},
+            {"role": "tool", "tool_call_id": "c", "content": "r" * 50},
+            {"role": "assistant", "content": "done"},
+            {"role": "user", "content": "next"},
+        ]
+        from robits.core.roles import _context_window
+        with patch.object(config, "max_context_tokens", 60):
+            sent = _context_window(self.role, self.role.conversation_history["Rowan"])
+        self.assertNotEqual(sent[1]["role"], "tool")
+
+
+class FakeRoleForExchange:
+    def __init__(self, name):
+        self.name = name
+        self.lifecycle_state = "active"
+        self.alarms = []
+        self.waiting_until = None
+
+    def interact(self, sender=None, prompt=None):
+        return ""
+
+    def update_group_conversations(self, message):
+        pass
