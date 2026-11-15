@@ -1077,6 +1077,7 @@ class Session:
         role.runtime_event_stream = self.event_stream
         role.runtime_session_id = self.run_id
         role.runtime_tool_results = []
+        role.runtime_tool_exchange_stored = False
         role.runtime_thinking = None
         effective_clock = self._effective_clock_state()
         role.runtime_clock_state = effective_clock
@@ -1222,7 +1223,9 @@ class Session:
         native_tool_events = list(getattr(routed.receiver, "runtime_tool_results", []))
         if native_tool_events:
             system_events.extend(native_tool_events)
-            deliver_verified_tool_results(routed.receiver, native_tool_events)
+            # Already in the receiver's history as the tool calls and results it saw.
+            if not getattr(routed.receiver, "runtime_tool_exchange_stored", False):
+                deliver_verified_tool_results(routed.receiver, native_tool_events)
         response, response_events = self.process_agent_action(response, sender=routed.receiver)
         if response_events:
             system_events.extend(response_events)

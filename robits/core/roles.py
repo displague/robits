@@ -139,11 +139,19 @@ def interact(self, model, sender, message):
     _last_user = next((m["content"][:200] for m in reversed(send_messages) if m.get("role") == "user"), "")
     get_logger().write_event("agent_prompt", agent=self.name, message_count=len(send_messages), context_chars=_ctx_chars, last_user=_last_user)
 
+    self.runtime_tool_exchange = []
     content = _m.model_provider.generate(self, model, sender, send_messages)
+    exchange = getattr(self, "runtime_tool_exchange", None) or []
+    self.runtime_tool_exchange = []
     message = {"role": "assistant", "content": content or "", "name": self.name}
 
     message["content"] = message["content"].strip()
     if message["content"] != "":
+        if exchange:
+            # The tool calls and results go in as they were sent, ahead of the answer, so the next
+            # turn's prompt matches this one's up to here (a prefix cache then keeps it).
+            self.conversation_history[self.name].extend(exchange)
+            self.runtime_tool_exchange_stored = True
         self.conversation_history[self.name].append(message)
 
     return message["content"]
@@ -170,6 +178,9 @@ def _context_window(role, messages):
         start = len(rest) - 1  # always keep the newest message
         while start > 0 and size(rest[start - 1:]) <= budget * 0.6:
             start -= 1
+    # Never start on tool results whose tool call was dropped: chat APIs refuse them.
+    while start < len(rest) - 1 and rest[start].get("role") == "tool":
+        start += 1
     starts[role.name] = start
     return [system_msg] + rest[start:]
 

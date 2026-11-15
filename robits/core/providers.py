@@ -396,6 +396,18 @@ def _record_role_tool_result(role, result):
     role.runtime_tool_results.append(result)
 
 
+def _has_private_tool_call(registry, messages):
+    """True when any tool call in messages is private work (agent.think or a private task tool),
+    whose arguments and results never go into the conversation history as they were."""
+    for message in messages:
+        for call in message.get("tool_calls") or []:
+            name = (call.get("function") or {}).get("name", "")
+            canonical = registry.resolve_name(name)
+            if canonical == "agent.think" or canonical in _PRIVATE_TASK_TOOLS:
+                return True
+    return False
+
+
 def _retain_tool_handoff(registry, role, tool_name, arguments, result, event_type):
     """Keep concise facts for later turns, without replaying private work inputs."""
     canonical = registry.resolve_name(tool_name)
@@ -501,6 +513,7 @@ class ChatCompletionsProvider(ModelProvider):
             # otherwise use up a small output budget and leave an empty reply.
             kwargs["reasoning_effort"] = effort
 
+        sent_count = len(kwargs["messages"])
         for _ in range(_max_tool_rounds(role)):
             if getattr(role, "runtime_task_id", None):
                 role.runtime_model_rounds = getattr(role, "runtime_model_rounds", 0) + 1
@@ -555,6 +568,11 @@ class ChatCompletionsProvider(ModelProvider):
                             role.runtime_chat_messages = msgs
                             return ""
                         continue
+                # The tool calls and results as the model saw them, for the conversation history:
+                # replayed as sent, the next turn's prompt keeps this one's cached prefix.
+                exchange = list(kwargs["messages"][sent_count:])
+                if not _has_private_tool_call(self.registry, exchange):
+                    role.runtime_tool_exchange = exchange
                 return content
             if employee_dict is None:
                 return "Error: Tool call requested but no employee dictionary is available."
