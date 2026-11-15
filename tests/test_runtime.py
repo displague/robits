@@ -2999,6 +2999,16 @@ class OrgChatContextTests(unittest.TestCase):
         self.assertIn("to carol", result)
         self.assertEqual(main.format_org_chat_context(entries[:1], 5, receiver="Bob"), "")
 
+    def test_only_entries_after_the_receivers_latest_turn(self):
+        entries = [
+            main.TranscriptEntry(1, "Alice", "Carol", "before bob", "x"),
+            main.TranscriptEntry(2, "Alice", "Bob", "to bob", "from bob"),
+            main.TranscriptEntry(3, "Alice", "Carol", "after bob", "y"),
+        ]
+        result = main.format_org_chat_context(entries, 5, receiver="Bob")
+        self.assertNotIn("before bob", result)  # Bob was sent it with turn 2's recap
+        self.assertIn("after bob", result)
+
     def test_prompt_truncated_at_400_chars(self):
         long_prompt = "x" * 600
         entries = [main.TranscriptEntry(1, "A", "B", long_prompt, "")]
@@ -3057,8 +3067,8 @@ class OrgChatContextTests(unittest.TestCase):
         try:
             session = main.Session(participants={"A": a, "B": b})
             # seed transcript with one entry manually
-            session.transcript.append(main.TranscriptEntry(1, "A", "C", "seed prompt", "seed response"))
-            session.transcript.append(main.TranscriptEntry(2, "A", "B", "own prompt", "own response"))
+            session.transcript.append(main.TranscriptEntry(1, "A", "B", "own prompt", "own response"))
+            session.transcript.append(main.TranscriptEntry(2, "A", "C", "seed prompt", "seed response"))
             session.turns_completed = 2
             session.last_receiver = a
             session.step("hello")
@@ -5120,7 +5130,7 @@ class ContextTrimTests(unittest.TestCase):
         self.assertEqual(sent[0]["role"], "system")
         self.assertLess(len(sent), len(history))
         # Most recent message must always be present (after the per-turn state)
-        self.assertTrue(sent[-1]["content"].startswith("new msg"))
+        self.assertTrue(sent[-1]["content"].endswith("new msg"))
 
     def test_trimming_does_not_mutate_conversation_history(self):
         """Trimming is applied only to the messages sent to generate(), not stored history."""

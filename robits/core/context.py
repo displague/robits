@@ -93,13 +93,18 @@ def format_agent_context(role=None):
 def format_org_chat_context(transcript, limit, receiver=None):
     """Format the most recent `limit` non-directed transcript entries as an org-chat snippet.
 
-    Entries addressed to `receiver` are left out: they are already in its own conversation.
-    Entries it sent to others stay, since its history holds only its own words, not the reply.
+    With a `receiver`, only entries after its own latest turn: up to that turn it already has its
+    own exchanges and the recap it was sent then, so repeating them grew every new message with
+    the whole exchange so far. Entries that recap left out (past `limit`, or none sent while the
+    clock was off) are not sent again either; org_chat_read has the full log.
     """
     if not transcript or limit == 0:
         return ""
-    public = [e for e in transcript if not getattr(e, "directed", False)
-              and (receiver is None or e.receiver != receiver)]
+    entries = list(transcript)
+    if receiver is not None:
+        last = max((i for i, e in enumerate(entries) if e.receiver == receiver), default=-1)
+        entries = entries[last + 1:]
+    public = [e for e in entries if not getattr(e, "directed", False)]
     recent = public[-limit:]
     lines = []
     for e in recent:

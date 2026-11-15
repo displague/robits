@@ -11,7 +11,6 @@ import main
 from robits.core.config import _config as config
 
 STATE = "=== Persona Circadian Rhythm & State ==="
-STATE_LABEL = "(Context for you, not part of the message above:)"
 
 
 class PromptCacheTests(unittest.TestCase):
@@ -42,12 +41,12 @@ class PromptCacheTests(unittest.TestCase):
         self.assertNotIn(STATE, s1)
         self.assertNotIn("current_datetime_utc", s1)
 
-    def test_state_is_sent_after_the_newest_message_only(self):
+    def test_state_is_sent_ahead_of_the_newest_message_only(self):
         self.turn("first question")
         self.turn("second question")
         first, second = self.requests[0][-1]["content"], self.requests[1][-1]["content"]
-        self.assertTrue(first.startswith("first question\n\n" + STATE_LABEL + "\n" + STATE))
-        self.assertTrue(second.startswith("second question\n\n" + STATE_LABEL + "\n" + STATE))
+        self.assertTrue(first.startswith(STATE) and first.endswith("first question"))
+        self.assertTrue(second.startswith(STATE) and second.endswith("second question"))
         self.assertIn("current_datetime_utc", second)
         earlier = [m["content"] for m in self.requests[1][1:-1]]
         self.assertEqual(earlier, ["first question", "reply 1"], "earlier turns are sent as they were")
