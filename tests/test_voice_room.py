@@ -7,7 +7,7 @@ from unittest.mock import patch
 import main
 from robits.core.config import _config
 from robits.voice import lines, speech
-from robits.voice.room import Room
+from robits.voice.room import TOOL_CUE, Room, split_sentences
 
 PERSONAS = {
     "alex_chen": {"role": "SE", "full_name": "Alex Chen", "voice": "nova"},
@@ -27,7 +27,21 @@ class FakeRole:
 
     def interact(self, sender=None, prompt=None):
         self.received.append((sender, prompt))
-        return self.responses.pop(0) if self.responses else ""
+        response = self.responses.pop(0) if self.responses else ""
+        if isinstance(response, list):   # a streamed reply: deltas, and ("tool", names) between rounds
+            listen = getattr(self, "runtime_text_stream", None)
+            text = ""
+            for part in response:
+                if isinstance(part, tuple):
+                    text = ""
+                    if listen:
+                        listen(*part)
+                else:
+                    text += part
+                    if listen:
+                        listen("text", part)
+            return text
+        return response
 
 
 class LineFileTest(unittest.TestCase):
@@ -76,7 +90,7 @@ class SpeakableTest(unittest.TestCase):
         self.assertTrue(note.startswith("[") and note.endswith("]"))
 
 
-class RoomTest(unittest.TestCase):
+class RoomBase(unittest.TestCase):
     def setUp(self):
         for name, value in {"memory_store": None, "agent_workspace_store": None, "_org_workspace": None,
                             "headless": True, "break_schedule": []}.items():
@@ -105,6 +119,8 @@ class RoomTest(unittest.TestCase):
             "editor": {"persona": "sam_ortiz"},
         }}, PERSONAS)
 
+
+class RoomTest(RoomBase):
     def test_persona_line_always_answers_with_its_persona(self):
         room = self.room(self.lines()["editor"], sam=["Hello, editor here.", "Yes."])
         replies = self.say(room, "Alex, are you there?")
@@ -172,6 +188,63 @@ class RoomTest(unittest.TestCase):
         room = self.room(self.lines()["editor"], sam=[""])
         self.assertEqual(self.say(room, "   "), [])
         self.assertEqual(self.say(room, "Hello"), [])
+
+
+class SentenceTest(unittest.TestCase):
+    def test_sentences_end_at_punctuation_and_a_space(self):
+        self.assertEqual(split_sentences("One. Two? Three! Fou"), (["One.", "Two?", "Three!"], "Fou"))
+        self.assertEqual(split_sentences("It's done.\"  Next"), (["It's done.\""], "Next"))
+
+    def test_abbreviations_and_initials_do_not_end_a_sentence(self):
+        self.assertEqual(split_sentences("Gov. Ruiz met Dr. Lee in the U.S. capital. More"),
+                         (["Gov. Ruiz met Dr. Lee in the U.S. capital."], "More"))
+        self.assertEqual(split_sentences("Version 3.5 shipped. "), (["Version 3.5 shipped."], ""))
+
+
+class StreamingRoomTest(RoomBase):
+    """Room.say(text, on_speech): sentences go out as the persona writes them."""
+
+    def stream(self, room, text):
+        heard = []
+        with redirect_stdout(StringIO()):
+            replies = room.say(text, heard.append)
+        return heard, replies
+
+    def test_sentences_are_spoken_as_they_are_written(self):
+        room = self.room(self.lines()["editor"], sam=[["The vote ", "passed. Gov. Ruiz ", "signed it", " today."]])
+        heard, replies = self.stream(room, "News?")
+        self.assertEqual([(h.persona, h.text, h.spoken) for h in heard],
+                         [("sam_ortiz", "The vote passed.", True), ("sam_ortiz", "Gov. Ruiz signed it today.", True)])
+        self.assertEqual([(r.text, r.spoken) for r in replies], [("The vote passed. Gov. Ruiz signed it today.", True)])
+        self.assertFalse(hasattr(self.sam, "runtime_text_stream"))
+
+    def test_an_opening_name_is_dropped_from_the_first_sentence(self):
+        room = self.room(self.lines()["quiet"], alex=[["Alex Chen, I'm on ", "it. Soon."]])
+        heard, _ = self.stream(room, "Status?")
+        self.assertEqual([h.text for h in heard], ["I'm on it.", "Soon."])
+
+    def test_a_tool_round_gets_a_cue_once_before_anything_is_said(self):
+        room = self.room(self.lines()["editor"], sam=[[("tool", ["read"]), ("tool", ["read"]), "Found it."]])
+        heard, replies = self.stream(room, "Check the record?")
+        self.assertEqual([h.text for h in heard], [TOOL_CUE, "Found it."])
+        self.assertTrue(replies[0].spoken)
+
+    def test_text_before_a_tool_round_is_spoken_and_needs_no_cue(self):
+        room = self.room(self.lines()["editor"], sam=[["Let me look", ("tool", ["read"]), "It runs Friday."]])
+        heard, _ = self.stream(room, "When?")
+        self.assertEqual([h.text for h in heard], ["Let me look", "It runs Friday."])
+
+    def test_structured_replies_are_not_streamed(self):
+        room = self.room(self.lines()["editor"], sam=[['{"action": "reply", ', '"content": "Hi."}']])
+        heard, replies = self.stream(room, "Hello")
+        self.assertEqual(heard, [])
+        self.assertEqual([(r.text, r.spoken) for r in replies], [("Hi.", False)])
+
+    def test_a_reply_that_was_not_streamed_is_left_for_the_caller(self):
+        room = self.room(self.lines()["editor"], sam=["Whole reply."])
+        heard, replies = self.stream(room, "Hello")
+        self.assertEqual(heard, [])
+        self.assertEqual([(r.text, r.spoken) for r in replies], [("Whole reply.", False)])
 
 
 if __name__ == "__main__":

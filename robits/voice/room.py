@@ -15,7 +15,9 @@ any other session. Who answers:
 A line's ``heard_as`` words (what speech recognition writes for a name: "Psalm" for "Sam")
 are replaced by the persona's first name before any of this, so the persona hears its name too.
 
-``say()`` is synchronous (model calls block); run it off the event loop.
+``say()`` is synchronous (model calls block); run it off the event loop. With ``on_speech`` it
+also hands over each reply sentence as soon as the model has written it (see ``Speaker``), so a
+caller hears the first sentence while the rest is still being written.
 """
 import re
 import threading
@@ -29,6 +31,98 @@ class Reply:
     name: str         # what to call them ("Alex Chen")
     text: str         # speakable
     voice: str | None
+    spoken: bool = False   # already handed to on_speech, sentence by sentence
+
+
+TOOL_CUE = "Let me check."   # said once per turn when a tool runs before anything else was said
+
+_ABBREVIATIONS = {"mr", "mrs", "ms", "dr", "st", "sr", "jr", "gov", "sen", "rep", "gen", "col", "lt", "sgt",
+                  "capt", "prof", "rev", "hon", "vs", "etc", "inc", "co", "corp", "ltd", "no", "vol", "approx",
+                  "jan", "feb", "mar", "apr", "jun", "jul", "aug", "sep", "sept", "oct", "nov", "dec"}
+_SENTENCE_END = re.compile(r"[.!?]+[\"')\]]*\s+")
+
+
+def split_sentences(text):
+    """(complete sentences, the unfinished rest) of streamed text. A sentence ends at ., ! or ?
+    followed by a space, except after a short abbreviation ("Gov. Ruiz") or a single letter ("U.S.")."""
+    done, start = [], 0
+    for m in _SENTENCE_END.finditer(text):
+        before = text[start:m.start()].rsplit(None, 1)
+        word = before[-1].rstrip(".").lower() if before else ""
+        if text[m.start()] == "." and (word in _ABBREVIATIONS or len(word) == 1 or "." in word):
+            continue
+        sentence = text[start:m.end()].strip()
+        if sentence:
+            done.append(sentence)
+        start = m.end()
+    return done, text[start:]
+
+
+class Speaker:
+    """A persona's streamed reply, cut into speakable sentences for ``on_speech``.
+
+    Called by the model provider (``role.runtime_text_stream``) with ``("text", delta)`` as the
+    reply is written and ``("tool", names)`` before tools run. Replies that start like a
+    structured action, markup or code (``{``, ``[``, ``<``, a backtick) are never streamed: they
+    are handled whole after the turn, as before. The first sentence loses an opening name as
+    ``Room._unaddressed`` would, and the spoken total stays within ``speech.MAX_CHARS``.
+    """
+
+    def __init__(self, room, key, on_speech):
+        self.room, self.key, self.on_speech = room, key, on_speech
+        self.buffer = ""
+        self.mode = None          # None: undecided, True: streaming, False: not streamed
+        self.said = 0             # characters spoken
+        self.cued = False
+        self.streamed = False     # some reply text was spoken (the cue doesn't count)
+
+    def __call__(self, kind, value):
+        if kind == "text":
+            self._text(value)
+        elif kind == "tool":
+            self._flush()
+            if not self.cued and not self.said and self.mode is not False:
+                self.cued = True
+                self._say(TOOL_CUE)
+
+    def _text(self, delta):
+        if self.mode is False:
+            return
+        self.buffer += delta
+        if self.mode is None:
+            head = self.buffer.lstrip()
+            if not head:
+                return
+            self.mode = head[0] not in "{[<`"
+            if not self.mode:
+                return
+        sentences, self.buffer = split_sentences(self.buffer)
+        for sentence in sentences:
+            self._speak(sentence)
+
+    def _flush(self):
+        if self.mode and self.buffer.strip():
+            rest, self.buffer = self.buffer, ""
+            self._speak(rest)
+
+    def _speak(self, sentence):
+        text = speech.speakable(sentence)
+        if not self.streamed:
+            text = self.room._unaddressed(self.key, text)
+        if not text or self.said + len(text) > speech.MAX_CHARS:
+            return
+        self.streamed = True
+        self._say(text)
+
+    def _say(self, text):
+        self.said += len(text)
+        self.on_speech(Reply(self.key, self.room._names(self.key), text,
+                             self.room.line.voices.get(self.key), spoken=True))
+
+    def finish(self):
+        """Speak what is left; True when the reply's text was spoken here."""
+        self._flush()
+        return self.streamed
 
 
 class Caller:
@@ -110,11 +204,20 @@ class Room:
 
     # --- turns -------------------------------------------------------------------------------
 
-    def _turn(self, key, words, sender):
-        response = self.session.step(words, sender=sender, receiver_name=key)
+    def _turn(self, key, words, sender, on_speech=None):
+        role = self.session.participants[key]
+        speaker = Speaker(self, key, on_speech) if on_speech else None
+        if speaker:
+            role.runtime_text_stream = speaker
+        try:
+            response = self.session.step(words, sender=sender, receiver_name=key)
+        finally:
+            if speaker:
+                role.__dict__.pop("runtime_text_stream", None)
         self.last = key
+        spoken = bool(speaker and speaker.finish())
         return Reply(key, self._names(key), self._unaddressed(key, speech.speakable(response or "")),
-                     self.line.voices.get(key))
+                     self.line.voices.get(key), spoken)
 
     def _opening_name(self, text):
         """(persona key, the rest) when the words open with a persona's name and a comma ("Alex,",
@@ -140,14 +243,17 @@ class Room:
             return text
         return rest[:1].upper() + rest[1:]
 
-    def say(self, text):
-        """The replies to the caller's words, in order (empty words get none)."""
+    def say(self, text, on_speech=None):
+        """The replies to the caller's words, in order (empty words get none).
+
+        ``on_speech(reply)``, when given, receives each sentence as soon as it is written (from
+        this thread); replies whose text went that way come back with ``spoken=True``."""
         text = (text or "").strip()
         if not text or self.closed:
             return []
         with self._lock:
             key, words = self.pick(self._as_heard(text))
-            replies = [self._turn(key, words, self.caller)]
+            replies = [self._turn(key, words, self.caller, on_speech)]
             asked_by = None
             for _ in range(self.line.handoffs):
                 said = replies[-1]
@@ -157,7 +263,7 @@ class Room:
                 if not to or to in (said.persona, asked_by) or "?" not in rest:
                     break
                 speaker = self.session.participants[said.persona]
-                replies.append(self._turn(to, f"{said.name} asked you, on the call: {rest}", speaker))
+                replies.append(self._turn(to, f"{said.name} asked you, on the call: {rest}", speaker, on_speech))
                 asked_by = said.persona
             return [r for r in replies if r.text]
 
