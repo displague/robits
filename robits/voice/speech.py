@@ -29,11 +29,13 @@ _FENCE = re.compile(r"```.*?```", re.S)
 _LINK = re.compile(r"\[([^\]]+)\]\([^)]+\)")
 _URL = re.compile(r"https?://\S+")
 _SEG = r"\w[\w.@+%-]*"
-_PATH = re.compile(rf"(?<![\w/.@:-])(~?/|\.{{1,2}}/)?({_SEG}(?:/ ?/?{_SEG})+)")
+_PATH = re.compile(rf"(?<![\w.@+%/-:])(~?/|\.\.?/)?({_SEG}(?:/ ?/?{_SEG})*)")
 _KIND = {"drafts": "draft", "draft": "draft", "records": "record", "record": "record"}
 _DATE = re.compile(r"(?:^|(?<=[-_ ]))(?:\d{4}-\d{2}-\d{2}|\d{8})(?=$|[-_ ])")
 _EXTENSION = re.compile(r"\.[A-Za-z]\w{0,4}$")
 _DOMAIN = re.compile(r"\.[A-Za-z]{2,}$")
+_ABBREV = re.compile(r"^(?:[A-Za-z]\.)+[A-Za-z]?$")
+_EMAIL = re.compile(r"@[A-Za-z0-9.-]+\.[A-Za-z]{2,}")
 _BULLET = re.compile(r"^\s*(?:[-*+•]|\d+[.)])\s+", re.M)
 _MARKS = re.compile(r"[*_`#>|~]+")
 _TAG = re.compile(r"<[^>]{1,40}>")
@@ -44,11 +46,18 @@ def _path_words(match):
     """A file path or record key as words: "drafts/2026-11-18-vote.md" is "the vote draft". Ordinary
     slashes ("and/or", "24/7", "11/18/2026") are left alone."""
     prefix, body = match.group(1) or "", match.group(2)
-    tail = re.search(r"[.]+$", body)
-    tail = tail.group(0) if tail else ""
-    body = body[:len(body) - len(tail)]
-    parts = [x for x in re.split(r"/ ?/?", body)]
-    named = prefix or _EXTENSION.search(parts[-1]) or parts[0].lower() in _KIND
+    stripped = body.rstrip(".")
+    tail = body[len(stripped):]
+    body = stripped
+    if not body or _EMAIL.search(body):
+        return match.group(0)
+    parts = [x for x in re.split(r"/ ?/?", body) if x]
+    if not prefix and len(parts) < 2:
+        return match.group(0)
+    if not prefix and all(_ABBREV.match(p) for p in parts):
+        return match.group(0)
+    has_ext = bool(_EXTENSION.search(parts[-1]))
+    named = (has_ext or parts[0].lower() in _KIND) if len(parts) == 1 else (prefix or has_ext or parts[0].lower() in _KIND)
     if not named:
         return match.group(0)
     if not prefix and _DOMAIN.search(parts[0]) and not _KIND.get(parts[0].lower()):

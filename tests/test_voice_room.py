@@ -77,13 +77,28 @@ class SpeakableTest(unittest.TestCase):
             ("See records/budget-review-20261118 now.", "See the budget review record now."),
             ("Under drafts/ /2026-11-18.md.", "Under a draft."),
             ("`notes/plan_v2.txt`, then more!", "the plan v2 file, then more!"),
+            ("Open /report.txt now.", "Open the report file now."),
+            ("Check ./report.txt and ../report.txt.", "Check the report file and the report file."),
+            ("Read ~/report.txt please.", "Read the report file please."),
         ):
             with self.subTest(text=text):
                 self.assertEqual(speech.speakable(text), spoken)
 
-    def test_ordinary_slashes_are_left_alone(self):
-        text = "Yes and/or no, 24/7, on 11/18/2026, at 60 km/h, he/she/they, 3/4 done, 10:30 a.m., Dr. Ortiz, e.g. this."
+    def test_ordinary_slashes_and_emails_are_left_alone(self):
+        text = (
+            "Yes and/or no, 24/7, on 11/18/2026, at 60 km/h, he/she/they, "
+            "3/4 done, 10:30 a.m./p.m., Dr. Ortiz, e.g./i.e. this, sales/support@example.com."
+        )
         self.assertEqual(speech.speakable(text), text)
+
+    def test_long_adversarial_inputs_stay_linear(self):
+        import time
+
+        for pattern in ("a+" * 8000, "records/a" + "." * 16000 + "z"):
+            start = time.monotonic()
+            speech.speakable(pattern)
+            elapsed = time.monotonic() - start
+            self.assertLess(elapsed, 0.25, f"took {elapsed:.3f}s")
 
     def test_group_note_names_the_others(self):
         note = speech.call_note("", ["Sam Ortiz"])
