@@ -6,8 +6,8 @@ There is no Pipecat LLM service: robits personas are the model. The user aggrega
 caller's turn and passes its context on; ``Brain`` takes the caller's newest words from it, runs
 ``Room.say`` in a thread, and speaks each reply as a ``PersonaSpeakFrame`` in that persona's
 voice, sentence by sentence as the model writes it (``stream``, on by default), so the caller
-hears the first sentence while the rest is still being written. While the personas think (a model call, maybe tool calls) the caller hears a soft blip
-every ``CUE_EVERY_S`` seconds instead of silence.
+hears the first sentence while the rest is still being written. While the personas think (a
+model call, maybe tool calls) the caller hears a soft blip every ``CUE_EVERY_S`` seconds instead of silence.
 """
 import asyncio
 import math
