@@ -446,7 +446,8 @@ def owner(role):
 
 
 class MCPManager:
-    def __init__(self, servers, transport_factory=make_transport):
+    def __init__(self, servers, transport_factory=make_transport, store=None):
+        self.store = store      # optional TaskStore: pending operations survive a restart (issue #132)
         # redact_keys belongs to the manager, not the transport: strip it before building one.
         self.redact = {}
         for name, options in servers.items():
@@ -667,6 +668,7 @@ class MCPManager:
         if result.get("resultType") not in {"input_required", "task"} and "taskId" not in result:
             if handle:
                 self.pending.pop(handle, None)
+                self._finish(handle, role, result)
             return result
         if not handle and len(self.pending) >= 128:
             raise ValueError("MCP pending operation budget exceeded")
@@ -675,6 +677,7 @@ class MCPManager:
         self.pending[handle] = {"owner": owner(role), "server": server, "method": method,
                                 "params": params, "result": result, "rounds": rounds,
                                 "next_poll": time.monotonic() + max(0, task.get("pollIntervalMs", 0)) / 1000}
+        self._persist(handle, self.pending[handle], role)
         public = {k: v for k, v in result.items() if k != "requestState"}
         public["operation_id"] = handle
         stream = getattr(role, "runtime_event_stream", None)
@@ -684,8 +687,54 @@ class MCPManager:
                         {"agent": owner(role)[1], "server": server, **public}, visibility="private")
         return public
 
+    def _persist(self, handle, record, role):
+        """Save a pending operation. The poll time is saved as wall-clock time, since a monotonic
+        clock does not survive a restart."""
+        if self.store is None:
+            return
+        record["identity"] = self._identity(record["server"], role)
+        due = time.time() + max(0.0, record["next_poll"] - time.monotonic())
+        self.store.save_operation(handle, record["owner"], "pending", {
+            "server": record["server"], "identity": record["identity"], "method": record["method"],
+            "params": record["params"], "result": record["result"], "rounds": record["rounds"],
+            "next_poll_at": due})
+
+    def _finish(self, handle, role, final):
+        if self.store is not None:
+            self.store.save_operation(handle, owner(role), "finished", {"result": final})
+
+    def _recover(self, handle, role):
+        """The pending record for ``handle`` from the store, or the saved final result of a finished
+        operation (as a dict under "finished"), or None.
+
+        Reattaches under the original scope only: the caller must be the owner, the server must still
+        be configured and the caller's identity at that server must be the one that started the
+        operation. Nothing is re-sent here: a task is only polled, updated or cancelled by its
+        existing task ID, so recovery can never create the remote task twice.
+        """
+        saved = self.store.load_operation(handle) if self.store is not None else None
+        if saved is None or saved[0] != owner(role):
+            return None
+        _, status, body = saved
+        if status == "finished":
+            return {"finished": body["result"]}
+        if body["server"] not in self.servers:
+            raise ValueError("The MCP server for this operation is no longer configured")
+        if body["identity"] != self._identity(body["server"], role):
+            return None
+        record = {"owner": saved[0], "server": body["server"], "method": body["method"],
+                  "params": body["params"], "result": body["result"], "rounds": body["rounds"],
+                  "identity": body["identity"],
+                  "next_poll": time.monotonic() + max(0.0, body["next_poll_at"] - time.time())}
+        self.pending[handle] = record
+        return record
+
     def advance(self, handle, role, responses=None, cancel=False):
         record = self.pending.get(handle)
+        if record is None and self.store is not None:
+            record = self._recover(handle, role)
+            if record is not None and "finished" in record:
+                return record["finished"]
         if record is None or record["owner"] != owner(role):
             raise ValueError("Unknown MCP operation for this caller")
         result = record["result"]
@@ -702,7 +751,9 @@ class MCPManager:
         else:
             if cancel:
                 self.pending.pop(handle)
-                return {"resultType": "complete", "status": "cancelled"}
+                final = {"resultType": "complete", "status": "cancelled"}
+                self._finish(handle, role, final)
+                return final
             method, params = record["method"], dict(record["params"])
             self._validate_responses(result.get("inputRequests", {}), responses or {})
             params["inputResponses"] = responses or {}
@@ -716,11 +767,13 @@ class MCPManager:
             # An acknowledgement is not a new task state. Cancellation is intent,
             # and input acceptance does not imply that the task has completed.
             record["rounds"] += 1
+            self._persist(handle, record, role)
             return {"operation_id": handle, "taskId": task_id,
                     "status": task.get("status"), "status_is_last_observed": True,
                     "acknowledged": method, "next_action": "poll"}
         if state.get("status") in {"completed", "failed", "cancelled"}:
             self.pending.pop(handle)
+            self._finish(handle, role, updated)
             return updated
         return self._capture(record["server"], method, params, updated, role, handle, record["rounds"] + 1)
 
@@ -743,7 +796,9 @@ class MCPManager:
 def get_manager():
     if config.mcp_manager is None:
         servers = json.loads(Path(config.mcp_config_path).read_text(encoding="utf-8")) if config.mcp_config_path else {}
-        config.mcp_manager = MCPManager(servers)
+        from robits.runtime.task_store import shared_store
+        store = shared_store(config.subtask_db, config.subtask_retention_s) if config.subtask_db else None
+        config.mcp_manager = MCPManager(servers, store=store)
     return config.mcp_manager
 
 

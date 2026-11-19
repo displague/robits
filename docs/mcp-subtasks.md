@@ -58,9 +58,8 @@ HTTP payloads and stdio lines have a 4 MiB limit, and requests have timeouts.
 HTTP watchdogs interrupt slow response headers/bodies. Stdio writes and reads
 share a deadline; owned process trees are reaped even if their original parent
 exits first (Windows job objects or POSIX process groups).
-Pending remote operations live in process memory; restarting does not resume them.
-Persisting remote task handles is separate future work (issue #132). Local private
-subtasks can be made durable: see "Durable subtasks" below.
+Pending remote operations live in process memory unless `ROBITS_SUBTASK_DB` is set; see
+"Durable operations and subtasks" below, which also covers local private subtasks.
 
 ## Subtasks
 
@@ -118,7 +117,7 @@ Cancellation marks queued/waiting descendants cancelled. It cannot interrupt a
 synchronous model request already running. Private runtime events include
 creation, running, tool results, input requests/responses, completion and errors.
 
-## Durable subtasks
+## Durable operations and subtasks
 
 Set `ROBITS_SUBTASK_DB` to a SQLite path to checkpoint private subtasks. Each state change saves
 the task's scope (owner and root), depth, model, private message history, events, status, result,
@@ -139,7 +138,21 @@ root's tasks:
   root's saved tasks, so a restart does not reset the count (expired records do not count);
 - a record not changed for `ROBITS_SUBTASK_RETENTION_S` seconds (default 7 days) is deleted.
 
-Not covered here: remote MCP task handles and continuation state, which remain in memory.
+**Remote MCP operations** use the same file. A pending operation (a task handle, or an input-required
+continuation) is saved when it is created or advanced: the owner scope, the server's *name* (never its
+URL or credentials, which stay in trusted configuration), the method and parameters, the server's opaque
+continuation state, the round count and when the next poll is due (as wall-clock time). After a restart,
+`mcp.operation` reattaches only when:
+
+- the caller is the owner, and its identity at that server is the one that started the operation;
+- the server is still configured.
+
+Recovery never creates the remote task again: a task is only polled, updated or cancelled by its existing
+task ID, and an input-required continuation is the same call carrying its saved state, sent only when the
+caller supplies the responses. The poll interval and the 32-round budget carry over. A finished
+operation keeps its final result, so asking again returns the same outcome until the record expires.
+One window remains: a crash between the server accepting a call and the handle being saved loses the
+handle, which is why derived tools carry an idempotency key.
 
 ## Validation
 
