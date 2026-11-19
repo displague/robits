@@ -23,11 +23,22 @@ class FakeRoom:
         self.heard = []
         self.delay = delay
 
-    def say(self, text):
+    def say(self, text, on_speech=None):
         import time
         time.sleep(self.delay)
         self.heard.append(text)
         return [Reply("alex", "Alex", "Alex here.", "nova"), Reply("sam", "Sam", "And Sam.", "echo")]
+
+
+class StreamingRoom(FakeRoom):
+    """Alex's reply streams sentence by sentence; Sam's comes back whole."""
+
+    def say(self, text, on_speech=None):
+        self.heard.append(text)
+        on_speech(Reply("alex", "Alex", "Alex here.", "nova", spoken=True))
+        on_speech(Reply("alex", "Alex", "Still here.", "nova", spoken=True))
+        return [Reply("alex", "Alex", "Alex here. Still here.", "nova", spoken=True),
+                Reply("sam", "Sam", "And Sam.", "echo")]
 
 
 @unittest.skipIf(run_test is None, "pipecat is not installed")
@@ -49,6 +60,12 @@ class BrainTest(unittest.TestCase):
         self.assertEqual(spoken, [("Alex here.", "nova"), ("And Sam.", "echo")])
         self.assertEqual(room.heard, ["Who's there?"])
         self.assertFalse(any(isinstance(f, LLMContextFrame) for f in down))
+
+    def test_streamed_sentences_are_spoken_once_in_order(self):
+        from robits.voice.pipeline import PersonaSpeakFrame
+        down = self.run_brain(StreamingRoom(), [LLMContextFrame(context=self.context("Who's there?")), SleepFrame(1.2)])
+        spoken = [(f.text, f.voice) for f in down if isinstance(f, PersonaSpeakFrame)]
+        self.assertEqual(spoken, [("Alex here.", "nova"), ("Still here.", "nova"), ("And Sam.", "echo")])
 
     def test_an_already_answered_context_is_not_answered_again(self):
         room = FakeRoom()

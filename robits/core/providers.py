@@ -468,8 +468,94 @@ class ModelProvider:
         raise NotImplementedError
 
 
+def _delta_parts(delta):
+    """(reply text, reasoning text) of one streamed delta, as the non-streamed parser reads a message:
+    ``content`` may be a string or a list of typed blocks; reasoning may be in ``reasoning_content``,
+    ``reasoning`` or ``thinking``."""
+    text, thought = [], []
+    content = getattr(delta, "content", None)
+    if isinstance(content, str):
+        text.append(content)
+    elif isinstance(content, list):
+        for block in content:
+            if isinstance(block, dict):
+                kind, body, think = block.get("type"), block.get("text"), block.get("thinking")
+            else:
+                kind, body, think = (getattr(block, "type", None), getattr(block, "text", None),
+                                     getattr(block, "thinking", None))
+            if kind == "thinking":
+                thought.append(think or body or "")
+            elif isinstance(body, str):
+                text.append(body)
+    for field in ("reasoning_content", "reasoning", "thinking"):
+        value = getattr(delta, field, None)
+        if isinstance(value, str) and value:
+            thought.append(value)
+            break
+    return "".join(x for x in text if isinstance(x, str)), "".join(x for x in thought if isinstance(x, str))
+
+
+def _streamed_completion(client, kwargs, listener):
+    """One chat completion requested with ``stream=True``.
+
+    Each content delta goes to ``listener("text", delta)`` as it arrives; the return value has
+    the shape of a non-streamed response (``choices[0].message``, ``usage``), so the tool loop is
+    unchanged. A stream that fails after text was delivered is not retried: the listener has
+    already used that text (a voice call has spoken it).
+    """
+    from openai.types.chat import ChatCompletionMessage
+
+    request = dict(kwargs, stream=True, stream_options={"include_usage": True})
+    content, reasoning, calls, usage, delivered = [], [], {}, None, False
+    try:
+        for chunk in client.chat.completions.create(**request):
+            usage = getattr(chunk, "usage", None) or usage
+            for choice in getattr(chunk, "choices", None) or []:
+                delta = getattr(choice, "delta", None)
+                if delta is None:
+                    continue
+                text, thought = _delta_parts(delta)
+                if text:
+                    content.append(text)
+                    delivered = True
+                    listener("text", text)
+                if thought:
+                    reasoning.append(thought)
+                for position, call in enumerate(getattr(delta, "tool_calls", None) or []):
+                    index = getattr(call, "index", None)
+                    slot = calls.setdefault(position if index is None else index,
+                                            {"id": None, "name": "", "arguments": ""})
+                    slot["id"] = getattr(call, "id", None) or slot["id"]
+                    function = getattr(call, "function", None)
+                    if function is not None:
+                        # Fragments of a name are joined; a server that repeats it whole is not doubled.
+                        fragment = getattr(function, "name", None) or ""
+                        if fragment and fragment != slot["name"]:
+                            slot["name"] += fragment
+                        arguments = getattr(function, "arguments", None)
+                        if arguments:
+                            slot["arguments"] += arguments if isinstance(arguments, str) else json.dumps(arguments)
+    except Exception as error:
+        if delivered:
+            raise RuntimeError(f"The model stream failed after text was delivered: {error}") from error
+        raise
+    tool_calls = [{"id": slot["id"] or f"call_{uuid4().hex[:16]}", "type": "function",
+                   "function": {"name": slot["name"], "arguments": slot["arguments"] or "{}"}}
+                  for _, slot in sorted(calls.items())]
+    extra = {"reasoning_content": "".join(reasoning)} if reasoning else {}
+    message = ChatCompletionMessage(role="assistant", content="".join(content) or None,
+                                    tool_calls=tool_calls or None, **extra)
+    choice = type("StreamedChoice", (), {"message": message, "finish_reason": None})()
+    return type("StreamedCompletion", (), {"choices": [choice], "usage": usage})()
+
+
 class ChatCompletionsProvider(ModelProvider):
-    """ModelProvider backed by the OpenAI Chat Completions API."""
+    """ModelProvider backed by the OpenAI Chat Completions API.
+
+    A role with a callable ``runtime_text_stream`` gets its replies streamed: the listener is
+    called with ``("text", delta)`` for each piece of reply text as the model writes it, and with
+    ``("tool", [names])`` before the tools of a round run. Without one, nothing changes.
+    """
 
     def __init__(self, api_client, registry=None):
         self.client = api_client
@@ -506,10 +592,16 @@ class ChatCompletionsProvider(ModelProvider):
                 role.runtime_model_rounds = getattr(role, "runtime_model_rounds", 0) + 1
                 if role.runtime_model_rounds > 32:
                     return "Error: Subtask model round budget exceeded."
-            response = _with_model_retries(lambda: self.client.chat.completions.create(**kwargs))
+            listener = getattr(role, "runtime_text_stream", None)
+            if callable(listener):
+                response = _with_model_retries(lambda: _streamed_completion(self.client, kwargs, listener))
+            else:
+                response = _with_model_retries(lambda: self.client.chat.completions.create(**kwargs))
             _emit_token_usage_event(role, response)
             message = response.choices[0].message
             tool_calls = getattr(message, "tool_calls", None) or []
+            if tool_calls and callable(listener):
+                listener("tool", [call.function.name for call in tool_calls])
             content, thinking = _extract_thinking_chat(message)
             if thinking:
                 current = getattr(role, "runtime_thinking", None)
@@ -520,6 +612,8 @@ class ChatCompletionsProvider(ModelProvider):
                 if tools and "<tool_call>" in (content or ""):
                     clean_content, xml_calls = _extract_xml_tool_calls(content or "")
                     if xml_calls and employee_dict is not None:
+                        if callable(listener):
+                            listener("tool", [_normalize_xml_tool_name(self.registry, xc["name"]) for xc in xml_calls])
                         # Synthesise an assistant message with fabricated tool_calls so
                         # the model sees proper tool results on the next round.
                         synth_calls = []

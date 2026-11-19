@@ -5,8 +5,9 @@
 There is no Pipecat LLM service: robits personas are the model. The user aggregator ends the
 caller's turn and passes its context on; ``Brain`` takes the caller's newest words from it, runs
 ``Room.say`` in a thread, and speaks each reply as a ``PersonaSpeakFrame`` in that persona's
-voice. While the personas think (a model call, maybe tool calls) the caller hears a soft blip
-every ``CUE_EVERY_S`` seconds instead of silence.
+voice, sentence by sentence as the model writes it (``stream``, on by default), so the caller
+hears the first sentence while the rest is still being written. While the personas think (a
+model call, maybe tool calls) the caller hears a soft blip every ``CUE_EVERY_S`` seconds instead of silence.
 """
 import asyncio
 import math
@@ -106,12 +107,14 @@ def last_user_text(context):
 class Brain(FrameProcessor):
     """Answers each caller turn from a ``Room``; plays the thinking cue while it waits."""
 
-    def __init__(self, room, cue=True, run=None, **kwargs):
-        """``run(fn, *args)`` runs a blocking call off the event loop (default: asyncio.to_thread)."""
+    def __init__(self, room, cue=True, run=None, stream=True, **kwargs):
+        """``run(fn, *args)`` runs a blocking call off the event loop (default: asyncio.to_thread).
+        ``stream``: speak each sentence as soon as it is written rather than whole replies."""
         super().__init__(**kwargs)
         self.room = room
         self.run = run or asyncio.to_thread
         self.cue = cue
+        self.stream = stream
         self._thinking = 0
         self._cue_task = None
         self._tasks = set()
@@ -171,11 +174,23 @@ class Brain(FrameProcessor):
         self._thinking += 1
         self._start_cue()
         started = time.monotonic()
+        first = []
+        loop = asyncio.get_running_loop()
+
+        def speak(reply):
+            # Called from the thread running Room.say: wait until the frame is queued, so sentences
+            # keep their order.
+            if not first:
+                first.append(time.monotonic() - started)
+            asyncio.run_coroutine_threadsafe(self.push_frame(PersonaSpeakFrame(
+                text=reply.text, voice=reply.voice, persona=reply.persona)), loop).result()
+
         try:
-            replies = await self.run(self.room.say, text)
+            replies = await (self.run(self.room.say, text, speak) if self.stream else self.run(self.room.say, text))
             # Who answered and how long it took; never the words.
             logger.info(f"robits voice: {len(text.split())} words -> {', '.join(r.persona for r in replies) or 'no reply'} "
-                        f"in {time.monotonic() - started:.1f} s")
+                        f"in {time.monotonic() - started:.1f} s"
+                        + (f" (first words after {first[0]:.1f} s)" if first else ""))
         except Exception as exc:
             logger.error(f"robits voice: the personas failed to answer ({type(exc).__name__}: {exc})")
             replies = []
@@ -187,7 +202,8 @@ class Brain(FrameProcessor):
             if not self._thinking:
                 self._stop_cue()
         for reply in replies:
-            await self.push_frame(PersonaSpeakFrame(text=reply.text, voice=reply.voice, persona=reply.persona))
+            if not reply.spoken:
+                await self.push_frame(PersonaSpeakFrame(text=reply.text, voice=reply.voice, persona=reply.persona))
 
     def _start_cue(self):
         if self.cue and (self._cue_task is None or self._cue_task.done()):
