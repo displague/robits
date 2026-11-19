@@ -150,8 +150,9 @@ Enforce at the store boundary, not inside the agent:
   channels, channels it is a participant of, and groups it belongs to. `private` rows are not served to
   anyone but the owning agent, and the org store does not hold them in the first place.
 - Writes are checked the same way (an agent writes as itself, into scopes it belongs to).
-- `NetworkPolicy`: workers may reach the org-store, their group/work stores and the model endpoint; they
-  may not reach each other. The org-store accepts only workers and the observer.
+- `NetworkPolicy`: workers may reach the org-store, their group/work stores, cluster DNS and one named model
+  service, and nothing else; they accept no inbound connections, so they cannot reach each other. The
+  org-store accepts only workers and the observer.
 - No worker gets Kubernetes API access (`automountServiceAccountToken: false` stays, with a separately
   projected audience-bound token for the store).
 - Credentials (MCP servers, OAuth) live in the personal scope or a per-agent Secret. Nothing credential-like goes to the org store.
@@ -201,6 +202,7 @@ spec:
   template:
     metadata: {labels: {app: org-store, robits/role: org-store}}
     spec:
+      serviceAccountName: org-store
       automountServiceAccountToken: true  # the store validates worker tokens (TokenReview), so it needs the API
       securityContext: {runAsNonRoot: true, runAsUser: 10001, fsGroup: 10001, seccompProfile: {type: RuntimeDefault}}
       containers:
@@ -223,6 +225,16 @@ metadata: {name: org-store, namespace: robits-org}
 spec:
   selector: {app: org-store}
   ports: [{name: http, port: 80, targetPort: http}]
+---
+apiVersion: v1
+kind: ServiceAccount                       # the org-store's own identity; workers never get this one
+metadata: {name: org-store, namespace: robits-org}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding                   # lets the store call TokenReview, and nothing else of note
+metadata: {name: org-store-token-review}
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: "system:auth-delegator"}
+subjects: [{kind: ServiceAccount, name: org-store, namespace: robits-org}]
 ---
 apiVersion: v1
 kind: ServiceAccount
@@ -281,10 +293,24 @@ spec:
   podSelector: {matchLabels: {robits/role: worker}}
   policyTypes: [Egress]
   egress:
-    - to: [{podSelector: {matchLabels: {robits/role: org-store}}}]
+    - to: [{podSelector: {matchLabels: {robits/role: org-store}}}]      # the store, in this namespace
       ports: [{port: 8080, protocol: TCP}]
-    - ports: [{port: 53, protocol: UDP}, {port: 53, protocol: TCP}]    # DNS
-    - ports: [{port: 443, protocol: TCP}]                               # the model endpoint
+    - to:                                                               # cluster DNS only
+        - namespaceSelector: {matchLabels: {kubernetes.io/metadata.name: kube-system}}
+          podSelector: {matchLabels: {k8s-app: kube-dns}}
+      ports: [{port: 53, protocol: UDP}, {port: 53, protocol: TCP}]
+    - to:                                                               # the model endpoint: one named service
+        - namespaceSelector: {matchLabels: {kubernetes.io/metadata.name: llm}}
+          podSelector: {matchLabels: {app: ollama}}
+      ports: [{port: 8080, protocol: TCP}]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy                        # workers accept nothing: they only call out
+metadata: {name: workers-no-ingress, namespace: robits-org}
+spec:
+  podSelector: {matchLabels: {robits/role: worker}}
+  policyTypes: [Ingress]
+  ingress: []
 ---
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
@@ -298,7 +324,17 @@ spec:
 ```
 
 The store checks a worker's token with the Kubernetes `TokenReview` API (audience `org-store`) and maps the
-service account to one agent ID; that is why the org-store pod, and only that pod, keeps API access. A
+service account to one agent ID. Reading a token is not permission to review one: the org-store has its own
+ServiceAccount, bound by `ClusterRoleBinding` to the built-in `system:auth-delegator` role (which allows
+`create` on `tokenreviews`, and on `subjectaccessreviews`; a custom ClusterRole limited to `tokenreviews` is
+narrower if you prefer it). Only the org-store pod has API access; the worker ServiceAccounts have no
+bindings, so a compromised worker cannot review tokens or read anything.
+
+Egress is closed by default for workers: only the org-store, cluster DNS and the one named model service
+(here an Ollama in a namespace `llm`; an endpoint outside the cluster needs an `ipBlock` rule for its
+address, not a bare port 443 rule, which would allow every destination on that port). Workers also accept no
+inbound connections, so one worker cannot call another. `NetworkPolicy` only works on a network plugin that
+enforces it: check that the kind cluster's CNI does (or install one that does) before relying on this. A
 complete example would add group stores, the observer, and probes (`python -m robits.health`, as in
 `deploy/kubernetes/`). Never run two org-store pods on one claim.
 
