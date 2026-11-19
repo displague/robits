@@ -9,7 +9,7 @@ from uuid import uuid4
 
 from robits.core.config import _config as config
 from robits.runtime.mcp import owner
-from robits.runtime.task_store import TERMINAL, TaskStore
+from robits.runtime.task_store import FINISHED, TaskStore
 
 # The plain settings of a subtask role that a checkpoint keeps. Event streams and the employee
 # dictionary are live objects: recovery takes them from the caller instead.
@@ -178,12 +178,12 @@ def subtask_control(employee_dict, task_id, action="inspect", response=None, aft
             record["status"] = "queued"
             manager.event(task_id, "response", {"response": response})
         elif action == "cancel":
-            if record["status"] not in TERMINAL:
+            if record["status"] not in FINISHED:
                 record["status"] = "cancelled"
                 manager.event(task_id, "cancelled", {})
             for child in list(manager.tasks.values()):
                 if (manager.descends_from(child, owner(record["role"]))
-                        and child["status"] not in TERMINAL):
+                        and child["status"] not in FINISHED):
                     child["status"] = "cancelled"
                     manager.event(child["task_id"], "cancelled", {})
         elif action != "inspect":

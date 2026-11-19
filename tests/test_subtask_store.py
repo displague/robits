@@ -12,6 +12,7 @@ from unittest.mock import patch
 
 from robits.core.config import _config as config
 from robits.core.tools import ToolRegistry
+from robits.runtime.mcp import owner
 from robits.runtime.subtasks import SubtaskManager, subtask_control
 from robits.runtime.task_store import TaskStore
 from tests.test_mcp_subtasks import message, role
@@ -103,6 +104,36 @@ class DurableSubtaskTests(unittest.TestCase):
         kinds = [e["kind"] for e in json.loads(subtask_control({}, task_id, "inspect"))["events"]]
         self.assertEqual(kinds.count("interrupted"), 1)
 
+    def test_an_interrupted_task_can_be_cancelled_and_stays_cancelled(self):
+        task_id = self.spawn()
+        self.manager.tasks[task_id]["status"] = "running"
+        self.manager.event(task_id, "running", {})
+        self.boot()
+        self.assertEqual(json.loads(subtask_control({}, task_id, "inspect"))["status"], "interrupted")
+        cancelled = json.loads(subtask_control({}, task_id, "cancel"))
+        self.assertEqual(cancelled["status"], "cancelled")
+        kinds = [e["kind"] for e in json.loads(subtask_control({}, task_id, "inspect"))["events"]]
+        self.assertEqual(kinds.count("cancelled"), 1)
+        self.boot()
+        again = json.loads(subtask_control({}, task_id, "inspect"))
+        self.assertEqual(again["status"], "cancelled")
+        self.assertEqual([e["kind"] for e in again["events"]].count("interrupted"), 1)
+        self.assertEqual(json.loads(subtask_control({}, task_id, "cancel"))["status"], "cancelled")
+
+    def test_an_interrupted_parent_cancels_its_queued_children(self):
+        parent_id = self.spawn()
+        child = self.manager.tasks[parent_id]["role"]
+        child.runtime_task_depth = 1
+        with patch.multiple(config, active_tool_caller=child):
+            child_id = json.loads(self.registry.execute(
+                "agent.spawn", {"task": "nested", "defer": True}, {}, child))["task_id"]
+        self.manager.tasks[parent_id]["status"] = "running"
+        self.manager.event(parent_id, "running", {})
+        self.boot()
+        subtask_control({}, parent_id, "cancel")
+        self.assertEqual(self.manager.tasks[parent_id]["status"], "cancelled")
+        self.assertEqual(self.manager.tasks[child_id]["status"], "cancelled")
+
     def test_terminal_result_is_stable_across_restarts(self):
         task_id = self.spawn()
         client, _ = fake_client(message("Final."))
@@ -139,6 +170,20 @@ class DurableSubtaskTests(unittest.TestCase):
         self.now[0] += 3601
         self.boot()
         self.assertTrue(subtask_control({}, task_id, "inspect").startswith("Error: Unknown subtask"))
+
+    def test_an_existing_loose_file_is_tightened_and_its_rows_kept(self):
+        task_id = self.spawn()
+        self.store.close()
+        os.chmod(self.path, 0o644)
+        self.boot()
+        self.assertEqual(stat.S_IMODE(os.stat(self.path).st_mode) & 0o077, 0)
+        self.assertIn("focused work", json.dumps(self.store.load_root(owner(self.parent))))
+        # An empty file made earlier with a looser mode is tightened too.
+        fresh = os.path.join(self.dir.name, "empty.db")
+        open(fresh, "w").close()
+        os.chmod(fresh, 0o666)
+        TaskStore(fresh).close()
+        self.assertEqual(stat.S_IMODE(os.stat(fresh).st_mode), 0o600)
 
     def test_without_a_store_nothing_changes(self):
         manager = SubtaskManager()

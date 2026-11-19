@@ -14,7 +14,8 @@ import sqlite3
 import threading
 import time
 
-TERMINAL = {"completed", "failed", "cancelled", "interrupted"}
+FINISHED = {"completed", "failed", "cancelled"}      # nothing more to do or cancel
+TERMINAL = FINISHED | {"interrupted"}                  # cannot run again, but can still be cancelled
 
 
 def _encode(value):
@@ -57,9 +58,11 @@ class TaskStore:
     def __init__(self, path, retention_s=7 * 86400, clock=time.time):
         self.path, self.retention_s, self.clock = path, retention_s, clock
         self.lock = threading.Lock()
-        # Create owner-only before SQLite opens it, so the history is never world-readable.
-        if path != ":memory:" and not os.path.exists(path):
+        # Owner-only, before SQLite opens it: a new file is created 0600, and an existing one (say an
+        # empty file made with a looser umask) is tightened, so the history is never world-readable.
+        if path != ":memory:":
             os.close(os.open(path, os.O_CREAT | os.O_WRONLY, 0o600))
+            os.chmod(path, 0o600)
         self.db = sqlite3.connect(path, check_same_thread=False)
         self.db.execute("""CREATE TABLE IF NOT EXISTS subtasks (
             task_id TEXT PRIMARY KEY, root TEXT NOT NULL, owner TEXT NOT NULL,
