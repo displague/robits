@@ -22,9 +22,16 @@ class SubtaskManager:
     def __init__(self, store=None):
         self.tasks = {}
         self.store = store
+        self._recovered = set()     # roots whose saved tasks were reloaded for the budget count
 
     def create(self, role, model, messages, parent):
         scope = owner(parent)
+        root = getattr(parent, "runtime_task_root", scope)
+        if self.store is not None and root not in self._recovered:
+            # After a restart the root's saved tasks are still runnable, so they count against its
+            # budget: reload them before counting (the same recovery a lookup does).
+            self.recover(parent)
+            self._recovered.add(root)
         if sum(record["root"] == getattr(parent, "runtime_task_root", scope)
                for record in self.tasks.values()) >= config.subtask_max_tasks:
             raise ValueError("Subtask count budget exceeded")

@@ -135,6 +135,8 @@ root's tasks:
 - a task that was running becomes `interrupted` with an explicit event. It is shown and can be
   cancelled, but never re-run, because its tools may already have had side effects;
 - completed, failed and cancelled results stay stable;
+- saved tasks count against the root's `ROBITS_SUBTASK_MAX_TASKS` budget: creating a task first reloads the
+  root's saved tasks, so a restart does not reset the count (expired records do not count);
 - a record not changed for `ROBITS_SUBTASK_RETENTION_S` seconds (default 7 days) is deleted.
 
 Not covered here: remote MCP task handles and continuation state, which remain in memory.

@@ -187,6 +187,41 @@ class DurableSubtaskTests(unittest.TestCase):
         TaskStore(fresh).close()
         self.assertEqual(stat.S_IMODE(os.stat(fresh).st_mode), 0o600)
 
+    def test_saved_tasks_count_against_the_budget_after_a_restart(self):
+        with patch.object(config, "subtask_max_tasks", 1):
+            first = self.spawn()
+            self.boot()
+            with patch.object(config, "subtask_max_tasks", 1):
+                refused = self.registry.execute("agent.spawn", {"task": "second", "defer": True}, {}, self.parent)
+            self.assertIn("Subtask count budget exceeded", refused)
+            self.assertEqual(list(self.manager.tasks), [first])        # reloaded, and no second task
+            self.assertEqual(json.loads(subtask_control({}, first, "inspect"))["status"], "queued")
+            # The count is per root: another caller's saved tasks are not counted against this one.
+            self.boot(parent=role(name="Other", session="other-session"))
+            with patch.object(config, "subtask_max_tasks", 1):
+                other = self.registry.execute("agent.spawn", {"task": "x", "defer": True}, {}, self.parent)
+            self.assertIn("task_id", other)
+
+    def test_expired_saved_tasks_do_not_count_against_the_budget(self):
+        with patch.object(config, "subtask_max_tasks", 1):
+            self.spawn()
+            self.now[0] += 3601
+            self.boot()
+            with patch.object(config, "subtask_max_tasks", 1):
+                again = self.registry.execute("agent.spawn", {"task": "later", "defer": True}, {}, self.parent)
+            self.assertIn("task_id", again)
+
+    def test_finished_saved_tasks_still_count(self):
+        with patch.object(config, "subtask_max_tasks", 1):
+            task_id = self.spawn()
+            client, _ = fake_client(message("Done."))
+            with patch.object(config, "client", client):
+                subtask_control({}, task_id, "run")
+            self.boot()
+            with patch.object(config, "subtask_max_tasks", 1):
+                refused = self.registry.execute("agent.spawn", {"task": "more", "defer": True}, {}, self.parent)
+            self.assertIn("Subtask count budget exceeded", refused)
+
     def test_without_a_store_nothing_changes(self):
         manager = SubtaskManager()
         with patch.object(config, "subtask_manager", manager):
