@@ -138,24 +138,23 @@ root's tasks:
   root's saved tasks, so a restart does not reset the count (expired records do not count);
 - a record not changed for `ROBITS_SUBTASK_RETENTION_S` seconds (default 7 days) is deleted.
 
-**Remote MCP operations** use the same file, and keep only what is needed to resume or to report:
+**Remote MCP operations** use the same file, and keep only structured fields, never free text. Free
+text (result content, status messages, the questions a task asks, a continuation's opaque state, and
+call arguments) can hold secrets and cannot be shown to be free of them, so none of it is written, and
+secret-looking field names are not the test:
 
 - A **task** is saved as its handle: the owner scope, the server's *name* (never its URL or credentials),
-  the method name, the task ID, status, poll interval, any questions waiting for an answer, the round
-  count and when the next poll is due (as wall-clock time). Its call arguments are not saved, and
-  neither are other fields of the server's answer.
-- An **input-required continuation** must re-send the original call, so its arguments are saved along
-  with the server's opaque continuation state. If an argument name looks like a secret (token, secret,
-  password, authorization, API key, credential, cookie, bearer) or is one of the server's `redact_keys`,
-  the operation is not saved at all: it works in this process only, and after a restart asking about it
-  is an unknown operation. It fails closed rather than keeping the secret or resuming with a blanked value.
-  Ordinary arguments of a continuation are stored in the owner-only file, so the file still holds
-  private material and is covered by the same retention.
-- A **finished** operation keeps a bounded copy of its final result so a repeated ask returns the same
-  outcome: values under secret-looking keys and the server's `redact_keys` are replaced with
-  `[redacted]` (at any depth), and a result over 16 KiB is replaced by its status with a note. Redaction
-  works on field names: a secret written inside free text is not detected, so treat the stored result as
-  private as well.
+  the method name, the task ID, the status and result type, the poll interval, the round count and when
+  the next poll is due (as wall-clock time). Its call arguments, status text and waiting questions are not
+  saved. After a restart the first ask polls at once (even inside the saved interval), which fetches the
+  questions again from the server; answering before that is refused with a message saying so.
+- An **input-required continuation** (a call that must be re-sent with the server's opaque state and its
+  arguments) is never saved. It works in this process; after a restart it is an unknown operation, which
+  fails closed rather than keeping state that may hold a secret.
+- A **finished** operation keeps its result type, task ID, status and error flag, with a note that the
+  result text is not kept across a restart. A repeated ask in the same process returns the whole result as
+  before; after a restart it returns that summary, and the caller asks the server again if it needs the
+  content.
 
 After a restart, `mcp.operation` reattaches, for finished operations as for pending ones, only when:
 
@@ -163,8 +162,7 @@ After a restart, `mcp.operation` reattaches, for finished operations as for pend
 - the server is still configured.
 
 Recovery never creates the remote task again: a task is only polled, updated or cancelled by its existing
-task ID, and an input-required continuation is the same call carrying its saved state, sent only when the
-caller supplies the responses. The poll interval and the 32-round budget carry over.
+task ID. The 32-round budget carries over.
 One window remains: a crash between the server accepting a call and the handle being saved loses the
 handle, which is why derived tools carry an idempotency key.
 

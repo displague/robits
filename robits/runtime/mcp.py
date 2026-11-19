@@ -445,35 +445,27 @@ def owner(role):
             getattr(role, "runtime_role_name", None) or getattr(role, "name", "unknown"))
 
 
-# Field names whose values are never written to the durable store, whatever a server's own
-# ``redact_keys`` say: a pending operation that would need one to resume is simply not saved.
-_SECRET_NAME = re.compile(r"token|secret|passw|authoriz|api[_-]?key|credential|cookie|bearer", re.I)
-# What a saved pending operation keeps of the server's last answer: the handle, the state, the poll
-# interval and the questions to answer, and the opaque continuation state. Nothing else.
-_RESUME_KEYS = {"resultType", "taskId", "status", "statusMessage", "pollIntervalMs", "ttl",
-                "inputRequests", "requestState"}
-_FINAL_LIMIT = 16 * 1024      # bytes of a finished result kept for a repeated ask
+# What the durable store may hold of a remote operation: scalar, structured fields only. Free text
+# (result content, status messages, the questions a task asks, a continuation's opaque state and its
+# call arguments) can hold secrets and cannot be proven free of them, so none of it is written.
+_TASK_KEYS = {"resultType": 32, "taskId": 256, "status": 32}       # field -> longest string kept
+_TASK_NUMBERS = {"pollIntervalMs", "ttl"}
+_FINAL_KEYS = {"resultType": 32, "taskId": 256, "status": 32}
+UNAVAILABLE = ("The result text is not kept across a restart; ask the server again if it is needed.")
 
 
-def _names(value):
-    """Every mapping key under ``value``, lower-cased."""
-    if isinstance(value, dict):
-        for key, item in value.items():
-            yield str(key).lower()
-            yield from _names(item)
-    elif isinstance(value, list):
-        for item in value:
-            yield from _names(item)
-
-
-def _scrub(value, extra=frozenset()):
-    """A copy of ``value`` with the value of every secret-looking or configured key replaced."""
-    if isinstance(value, dict):
-        return {key: "[redacted]" if _SECRET_NAME.search(str(key)) or str(key).lower() in extra
-                else _scrub(item, extra) for key, item in value.items()}
-    if isinstance(value, list):
-        return [_scrub(item, extra) for item in value]
-    return value
+def _scalars(source, strings, numbers=frozenset()):
+    """The listed fields of ``source``, only when they are short strings, numbers or booleans."""
+    kept = {}
+    for key, limit in strings.items():
+        value = source.get(key)
+        if isinstance(value, str) and len(value) <= limit:
+            kept[key] = value
+    for key in numbers:
+        value = source.get(key)
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            kept[key] = value
+    return kept
 
 
 class MCPManager:
@@ -719,47 +711,46 @@ class MCPManager:
         return public
 
     def _persist(self, handle, record, role):
-        """Save what is needed to resume a pending operation, and no more. The poll time is saved as
-        wall-clock time, since a monotonic clock does not survive a restart.
+        """Save a pending *task* by its handle, and nothing that could hold a secret.
 
-        A task is resumed by its task ID, so its call arguments are not saved at all. An
-        input-required continuation re-sends the original call, so its arguments are needed; if any
-        argument name looks like a secret or is one of the server's configured ``redact_keys``, the
-        operation is not saved (it stays in memory only, as without a store) rather than written
-        with the secret or resumed with a blanked value."""
+        A task is resumed by its task ID, so only the ID, its state and poll interval are kept, with
+        the server name, the method name, the round count and when the next poll is due (wall-clock
+        time, since a monotonic clock does not survive a restart). Not saved: call arguments, result
+        or status text, the questions the task asks (the server gives them again when polled) and
+        any answer. An input-required *continuation* (no task ID) must re-send its call with an
+        opaque state from the server, which cannot be shown to be free of secrets, so it is never
+        saved: it works in this process and is an unknown operation after a restart."""
         if self.store is None:
             return
         result = record["result"]
         task = result.get("task", result)
-        is_task = bool(task.get("taskId"))
-        params = {}
-        if not is_task:
-            sensitive = set(self.redact.get(record["server"], ())) | {n for n in _names(record["params"])
-                                                                       if _SECRET_NAME.search(n)}
-            if sensitive & set(_names(record["params"])):
-                return
-            params = record["params"]
-        record["identity"] = self._identity(record["server"], role)
-        kept = {k: v for k, v in result.items() if k in _RESUME_KEYS}
+        if not task.get("taskId"):
+            return
+        kept = _scalars(result, _TASK_KEYS, _TASK_NUMBERS)
         if "task" in result:
-            kept["task"] = {k: v for k, v in task.items() if k in _RESUME_KEYS}
+            kept["task"] = _scalars(task, _TASK_KEYS, _TASK_NUMBERS)
+        else:
+            kept.update(_scalars(task, _TASK_KEYS, _TASK_NUMBERS))
+        record["identity"] = self._identity(record["server"], role)
         due = time.time() + max(0.0, record["next_poll"] - time.monotonic())
         self.store.save_operation(handle, record["owner"], "pending", {
             "server": record["server"], "identity": record["identity"], "method": record["method"],
-            "params": params, "result": kept, "rounds": record["rounds"], "next_poll_at": due})
+            "params": {}, "result": kept, "rounds": record["rounds"], "next_poll_at": due})
 
     def _finish(self, handle, role, final, server, identity=None):
-        """Keep a bounded, redacted copy of a finished operation's result, so a repeated ask after a
-        restart returns the same outcome. Secret-looking and configured field names are replaced; a
-        result still over the size limit is replaced by its status. The server and identity are kept
-        so a finished operation reattaches under the same checks as a pending one."""
+        """Remember that an operation finished, and how, but not what it returned: only the result
+        type, task ID and status are kept, plus a note that the text is unavailable. A repeated ask
+        after a restart returns that, not the content, so a secret in a result never reaches the
+        file. The server and identity are kept so a finished operation reattaches under the same
+        checks as a pending one."""
         if self.store is None:
             return
-        copy = _scrub(final, self.redact.get(server, frozenset()))
-        if len(json.dumps(copy, default=str)) > _FINAL_LIMIT:
-            task = final.get("task", final) if isinstance(final, dict) else {}
-            copy = {"resultType": "complete", "status": task.get("status"),
-                    "note": "The full result was not kept (too large); ask the server again if it is needed."}
+        task = final.get("task", final) if isinstance(final, dict) else {}
+        copy = _scalars(final if isinstance(final, dict) else {}, _FINAL_KEYS)
+        copy.update(_scalars(task, _FINAL_KEYS))
+        if isinstance(task.get("isError"), bool):
+            copy["isError"] = task["isError"]
+        copy["note"] = UNAVAILABLE
         self.store.save_operation(handle, owner(role), "finished", {
             "server": server, "identity": self._identity(server, role) if identity is None else identity,
             "result": copy})
@@ -772,7 +763,8 @@ class MCPManager:
         caller must be the owner, the server must still be configured and the caller's identity at
         that server must be the one that started the operation. Nothing is re-sent here: a task is
         only polled, updated or cancelled by its existing task ID, so recovery can never create the
-        remote task twice.
+        remote task twice. The first ask after a restart polls at once, to fetch what was not kept
+        (the questions a task is waiting on).
         """
         saved = self.store.load_operation(handle) if self.store is not None else None
         if saved is None or saved[0] != owner(role):
@@ -786,7 +778,7 @@ class MCPManager:
             return {"finished": body["result"]}
         record = {"owner": saved[0], "server": body["server"], "method": body["method"],
                   "params": body["params"], "result": body["result"], "rounds": body["rounds"],
-                  "identity": body["identity"],
+                  "identity": body["identity"], "repoll": True,
                   "next_poll": time.monotonic() + max(0.0, body["next_poll_at"] - time.time())}
         self.pending[handle] = record
         return record
@@ -803,7 +795,10 @@ class MCPManager:
         task = result.get("task", result)
         task_id = task.get("taskId")
         if task_id:
-            if not cancel and responses is None and time.monotonic() < record["next_poll"]:
+            if responses is not None and record.get("repoll"):
+                raise ValueError("This operation was reattached after a restart: ask for its status "
+                                 "first to fetch its questions, then respond")
+            if not cancel and responses is None and not record.get("repoll") and time.monotonic() < record["next_poll"]:
                 return {k: v for k, v in result.items() if k != "requestState"} | {"operation_id": handle}
             method = "tasks/cancel" if cancel else "tasks/update" if responses is not None else "tasks/get"
             params = {"taskId": task_id}
@@ -823,6 +818,7 @@ class MCPManager:
                 params["requestState"] = result["requestState"]
         if record["rounds"] >= 32 and not cancel:
             raise ValueError("MCP continuation budget exceeded")
+        record.pop("repoll", None)
         updated = self.rpc(record["server"], method, params, role)
         state = updated.get("task", updated)
         if task_id and method in {"tasks/update", "tasks/cancel"} and "status" not in state:
