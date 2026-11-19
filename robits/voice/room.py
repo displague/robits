@@ -74,6 +74,7 @@ class Speaker:
         self.mode = None          # None: undecided, True: streaming, False: not streamed
         self.said = 0             # characters spoken
         self.cued = False
+        self.cut = False          # an inline <tool_call> began: the rest of this round is not speech
         self.streamed = False     # some reply text was spoken (the cue doesn't count)
 
     def __call__(self, kind, value):
@@ -81,14 +82,18 @@ class Speaker:
             self._text(value)
         elif kind == "tool":
             self._flush()
+            self.mode, self.buffer, self.cut = None, "", False   # the next round is a new reply
             if not self.cued and not self.said and self.mode is not False:
                 self.cued = True
                 self._say(TOOL_CUE)
 
     def _text(self, delta):
-        if self.mode is False:
+        if self.mode is False or self.cut:
             return
         self.buffer += delta
+        marker = self.buffer.find("<tool_call")
+        if marker >= 0:
+            self.buffer, self.cut = self.buffer[:marker], True
         if self.mode is None:
             head = self.buffer.lstrip()
             if not head:

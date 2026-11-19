@@ -234,6 +234,18 @@ class StreamingRoomTest(RoomBase):
         heard, _ = self.stream(room, "When?")
         self.assertEqual([h.text for h in heard], ["Let me look", "It runs Friday."])
 
+    def test_an_inline_tool_call_is_never_spoken(self):
+        xml = '<tool_call>{"name": "read", "arguments": {}}</tool_call>'
+        room = self.room(self.lines()["editor"], sam=[["Let me look. ", "One sec ", xml, ("tool", ["read"]), "It runs Friday."]])
+        heard, _ = self.stream(room, "When?")
+        self.assertEqual([h.text for h in heard], ["Let me look.", "One sec", "It runs Friday."])
+
+    def test_a_reply_that_is_only_an_inline_tool_call_still_gets_the_cue(self):
+        xml = '<tool_call>{"name": "read", "arguments": {}}</tool_call>'
+        room = self.room(self.lines()["editor"], sam=[[xml, ("tool", ["read"]), "It runs Friday."]])
+        heard, _ = self.stream(room, "When?")
+        self.assertEqual([h.text for h in heard], [TOOL_CUE, "It runs Friday."])
+
     def test_structured_replies_are_not_streamed(self):
         room = self.room(self.lines()["editor"], sam=[['{"action": "reply", ', '"content": "Hi."}']])
         heard, replies = self.stream(room, "Hello")

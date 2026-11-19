@@ -468,6 +468,33 @@ class ModelProvider:
         raise NotImplementedError
 
 
+def _delta_parts(delta):
+    """(reply text, reasoning text) of one streamed delta, as the non-streamed parser reads a message:
+    ``content`` may be a string or a list of typed blocks; reasoning may be in ``reasoning_content``,
+    ``reasoning`` or ``thinking``."""
+    text, thought = [], []
+    content = getattr(delta, "content", None)
+    if isinstance(content, str):
+        text.append(content)
+    elif isinstance(content, list):
+        for block in content:
+            if isinstance(block, dict):
+                kind, body, think = block.get("type"), block.get("text"), block.get("thinking")
+            else:
+                kind, body, think = (getattr(block, "type", None), getattr(block, "text", None),
+                                     getattr(block, "thinking", None))
+            if kind == "thinking":
+                thought.append(think or body or "")
+            elif isinstance(body, str):
+                text.append(body)
+    for field in ("reasoning_content", "reasoning", "thinking"):
+        value = getattr(delta, field, None)
+        if isinstance(value, str) and value:
+            thought.append(value)
+            break
+    return "".join(x for x in text if isinstance(x, str)), "".join(x for x in thought if isinstance(x, str))
+
+
 def _streamed_completion(client, kwargs, listener):
     """One chat completion requested with ``stream=True``.
 
@@ -487,13 +514,12 @@ def _streamed_completion(client, kwargs, listener):
                 delta = getattr(choice, "delta", None)
                 if delta is None:
                     continue
-                text = getattr(delta, "content", None)
-                if isinstance(text, str) and text:
+                text, thought = _delta_parts(delta)
+                if text:
                     content.append(text)
                     delivered = True
                     listener("text", text)
-                thought = getattr(delta, "reasoning_content", None) or getattr(delta, "reasoning", None)
-                if isinstance(thought, str) and thought:
+                if thought:
                     reasoning.append(thought)
                 for position, call in enumerate(getattr(delta, "tool_calls", None) or []):
                     index = getattr(call, "index", None)
@@ -502,8 +528,10 @@ def _streamed_completion(client, kwargs, listener):
                     slot["id"] = getattr(call, "id", None) or slot["id"]
                     function = getattr(call, "function", None)
                     if function is not None:
-                        # Servers send the name once (OpenAI) or whole in one chunk (Ollama).
-                        slot["name"] = slot["name"] or (getattr(function, "name", None) or "")
+                        # Fragments of a name are joined; a server that repeats it whole is not doubled.
+                        fragment = getattr(function, "name", None) or ""
+                        if fragment and fragment != slot["name"]:
+                            slot["name"] += fragment
                         arguments = getattr(function, "arguments", None)
                         if arguments:
                             slot["arguments"] += arguments if isinstance(arguments, str) else json.dumps(arguments)
@@ -584,6 +612,8 @@ class ChatCompletionsProvider(ModelProvider):
                 if tools and "<tool_call>" in (content or ""):
                     clean_content, xml_calls = _extract_xml_tool_calls(content or "")
                     if xml_calls and employee_dict is not None:
+                        if callable(listener):
+                            listener("tool", [_normalize_xml_tool_name(self.registry, xc["name"]) for xc in xml_calls])
                         # Synthesise an assistant message with fabricated tool_calls so
                         # the model sees proper tool results on the next round.
                         synth_calls = []

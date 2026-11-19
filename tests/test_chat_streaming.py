@@ -10,9 +10,9 @@ from robits.core.config import _config as config
 from robits.core.providers import ChatCompletionsProvider, _streamed_completion
 
 
-def chunk(content=None, calls=None, usage=None):
-    delta = SimpleNamespace(content=content, tool_calls=calls)
-    return SimpleNamespace(choices=[SimpleNamespace(delta=delta)] if content or calls else [], usage=usage)
+def chunk(content=None, calls=None, usage=None, **extra):
+    delta = SimpleNamespace(content=content, tool_calls=calls, **extra)
+    return SimpleNamespace(choices=[SimpleNamespace(delta=delta)] if content or calls or extra else [], usage=usage)
 
 
 def call_delta(index, id=None, name=None, arguments=None):
@@ -50,6 +50,33 @@ class StreamedCompletionTest(unittest.TestCase):
         message = _streamed_completion(client, {}, lambda *e: None).choices[0].message
         calls = [(c.id, c.function.name, c.function.arguments) for c in message.tool_calls]
         self.assertEqual(calls, [("c1", "lookup", '{"q": "vote"}'), ("c2", "clock", "{}")])
+
+    def test_split_tool_names_are_joined_and_whole_repeats_are_not_doubled(self):
+        client, _ = stream_client([[chunk(calls=[call_delta(0, id="c1", name="agent__", arguments="{}")]),
+                                    chunk(calls=[call_delta(0, name="think")]),
+                                    chunk(calls=[call_delta(1, id="c2", name="clock", arguments="{")]),
+                                    chunk(calls=[call_delta(1, name="clock", arguments="}")])]])
+        message = _streamed_completion(client, {}, lambda *e: None).choices[0].message
+        self.assertEqual([c.function.name for c in message.tool_calls], ["agent__think", "clock"])
+        self.assertEqual(message.tool_calls[1].function.arguments, "{}")
+
+    def test_reasoning_is_kept_from_any_of_its_field_names(self):
+        for field in ("reasoning_content", "reasoning", "thinking"):
+            with self.subTest(field=field):
+                client, _ = stream_client([[chunk(**{field: "Let me "}), chunk(**{field: "think."}), chunk("Hi.")]])
+                message = _streamed_completion(client, {}, lambda *e: None).choices[0].message
+                self.assertEqual(message.reasoning_content, "Let me think.")
+                self.assertEqual(message.content, "Hi.")
+
+    def test_typed_content_deltas_are_read_like_a_whole_message(self):
+        heard = []
+        blocks = [[{"type": "thinking", "thinking": "hmm"}, {"type": "text", "text": "Typed "}],
+                  [SimpleNamespace(type="text", text="reply.", thinking=None)]]
+        client, _ = stream_client([[chunk(b) for b in blocks]])
+        message = _streamed_completion(client, {}, lambda *e: heard.append(e)).choices[0].message
+        self.assertEqual(heard, [("text", "Typed "), ("text", "reply.")])
+        self.assertEqual(message.content, "Typed reply.")
+        self.assertEqual(message.reasoning_content, "hmm")
 
     def test_a_stream_that_fails_after_text_is_not_retryable(self):
         class Dropped(Exception):
@@ -93,6 +120,19 @@ class StreamingGenerateTest(unittest.TestCase):
         self.assertEqual(heard, [("tool", ["agent__think"]), ("text", "Done"), ("text", ".")])
         self.assertEqual(len(requests), 2)
         self.assertEqual(requests[1]["messages"][-1]["role"], "tool")
+
+    def test_an_xml_tool_round_reaches_the_listener_too(self):
+        role = self.role()
+        heard = []
+        role.runtime_text_stream = lambda *event: heard.append(event)
+        xml = "<tool_call>\n<function=agent__think>\n<parameter=content>plan</parameter>\n</function>\n</tool_call>"
+        client, requests = stream_client([[chunk("Let me look. "), chunk(xml)], [chunk("Done.")]])
+        with redirect_stdout(StringIO()):
+            reply = ChatCompletionsProvider(client, main.tool_registry).generate(
+                role, "fake", "CEO", [{"role": "user", "content": "hello"}])
+        self.assertEqual(reply, "Done.")
+        self.assertEqual([e for e in heard if e[0] == "tool"], [("tool", ["agent.think"])])
+        self.assertEqual(len(requests), 2)
 
     def test_without_a_listener_nothing_is_streamed(self):
         role = self.role()
