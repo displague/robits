@@ -162,7 +162,9 @@ After a restart, `mcp.operation` reattaches, for finished operations as for pend
 - the server is still configured.
 
 Recovery never creates the remote task again: a task is only polled, updated or cancelled by its existing
-task ID. The 32-round budget carries over.
+task ID. A task ID is saved whole (up to 4,096 characters) or the task is not saved at all; one that is longer,
+or not a string, keeps the task in this process only, and a saved record that lacks its ID is refused after a
+restart. The call is never sent again as a fallback. The 32-round budget carries over.
 One window remains: a crash between the server accepting a call and the handle being saved loses the
 handle, which is why derived tools carry an idempotency key.
 

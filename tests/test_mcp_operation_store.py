@@ -175,6 +175,38 @@ class DurableMCPTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "no longer configured"):
             self.manager.advance(handle, self.role)
 
+    def test_a_long_task_id_is_stored_whole_and_resumed_by_polling(self):
+        long_id = "task-" + "x" * 300
+        self.transport.results = [{"resultType": "task", "taskId": long_id, "status": "working"}]
+        handle = self.manager.call("example", "slow", {}, self.role)["operation_id"]
+        self.boot()
+        self.transport.results = [{"resultType": "complete", "taskId": long_id, "status": "completed", "result": {}}]
+        self.assertEqual(self.manager.advance(handle, self.role)["status"], "completed")
+        self.assertEqual([m for m, _ in self.transport.calls], ["tasks/get"])      # never tools/call again
+        self.assertEqual(self.transport.calls[0][1]["taskId"], long_id)
+
+    def test_a_task_id_that_cannot_be_saved_whole_is_not_saved_and_never_resends_the_call(self):
+        for task_id in ("t" * 5000, 12345):
+            with self.subTest(task_id=type(task_id).__name__):
+                self.transport.results = [{"resultType": "task", "taskId": task_id, "status": "working"}]
+                handle = self.manager.call("example", "slow", {"a": 1}, self.role)["operation_id"]
+                self.boot()
+                with self.assertRaisesRegex(ValueError, "Unknown MCP operation"):
+                    self.manager.advance(handle, self.role)
+                self.assertEqual(self.transport.calls, [])
+
+    def test_a_saved_record_without_a_task_id_is_refused_and_never_resends_the_call(self):
+        handle = self.start_task()
+        saved = self.store.load_operation(handle)
+        body = saved[2]
+        body["result"].pop("taskId", None)
+        self.store.save_operation(handle, saved[0], "pending", body)
+        self.boot()
+        with self.assertRaisesRegex(ValueError, "cannot be resumed after a restart"):
+            self.manager.advance(handle, self.role)
+        self.assertEqual(self.transport.calls, [])
+        self.assertNotIn(handle, self.manager.pending)
+
     def test_only_the_server_name_is_stored_no_url_or_credentials(self):
         self.start_task()
         with open(self.path, "rb") as stream:

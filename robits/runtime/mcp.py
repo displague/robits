@@ -448,9 +448,10 @@ def owner(role):
 # What the durable store may hold of a remote operation: scalar, structured fields only. Free text
 # (result content, status messages, the questions a task asks, a continuation's opaque state and its
 # call arguments) can hold secrets and cannot be proven free of them, so none of it is written.
-_TASK_KEYS = {"resultType": 32, "taskId": 256, "status": 32}       # field -> longest string kept
+_TASK_ID_LIMIT = 4096        # a task ID is stored whole or the task is not saved; never cut
+_TASK_KEYS = {"resultType": 32, "status": 32}       # field -> longest string kept
 _TASK_NUMBERS = {"pollIntervalMs", "ttl"}
-_FINAL_KEYS = {"resultType": 32, "taskId": 256, "status": 32}
+_FINAL_KEYS = {"resultType": 32, "status": 32}
 UNAVAILABLE = ("The result text is not kept across a restart; ask the server again if it is needed.")
 
 
@@ -724,12 +725,18 @@ class MCPManager:
             return
         result = record["result"]
         task = result.get("task", result)
-        if not task.get("taskId"):
+        task_id = task.get("taskId")
+        if not task_id:
+            return
+        if not isinstance(task_id, str) or len(task_id) > _TASK_ID_LIMIT:
+            # An ID that cannot be saved whole must not be saved cut: a record without it would be
+            # resumed as a continuation and re-send the call. Keep it in memory only (fail closed).
             return
         kept = _scalars(result, _TASK_KEYS, _TASK_NUMBERS)
         if "task" in result:
-            kept["task"] = _scalars(task, _TASK_KEYS, _TASK_NUMBERS)
+            kept["task"] = {**_scalars(task, _TASK_KEYS, _TASK_NUMBERS), "taskId": task_id}
         else:
+            kept["taskId"] = task_id
             kept.update(_scalars(task, _TASK_KEYS, _TASK_NUMBERS))
         record["identity"] = self._identity(record["server"], role)
         due = time.time() + max(0.0, record["next_poll"] - time.monotonic())
@@ -748,6 +755,8 @@ class MCPManager:
         task = final.get("task", final) if isinstance(final, dict) else {}
         copy = _scalars(final if isinstance(final, dict) else {}, _FINAL_KEYS)
         copy.update(_scalars(task, _FINAL_KEYS))
+        if isinstance(task.get("taskId"), str) and len(task["taskId"]) <= _TASK_ID_LIMIT:
+            copy["taskId"] = task["taskId"]
         if isinstance(task.get("isError"), bool):
             copy["isError"] = task["isError"]
         copy["note"] = UNAVAILABLE
@@ -776,6 +785,10 @@ class MCPManager:
             return None
         if status == "finished":
             return {"finished": body["result"]}
+        saved_task = body["result"].get("task", body["result"])
+        if not isinstance(saved_task.get("taskId"), str) or not saved_task["taskId"]:
+            # Without the task ID the only way forward would be to send the call again. Never.
+            raise ValueError("This operation cannot be resumed after a restart")
         record = {"owner": saved[0], "server": body["server"], "method": body["method"],
                   "params": body["params"], "result": body["result"], "rounds": body["rounds"],
                   "identity": body["identity"], "repoll": True,
