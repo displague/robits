@@ -240,6 +240,21 @@ class StreamingRoomTest(RoomBase):
         heard, _ = self.stream(room, "When?")
         self.assertEqual([h.text for h in heard], ["Let me look.", "One sec", "It runs Friday."])
 
+    def test_the_start_of_an_inline_tool_call_cut_off_by_the_end_is_not_spoken(self):
+        for tail, expected in (("<tool_", ["Let me look."]), ("<tool_c", ["Let me look."]),
+                               ("<", ["Let me look."])):
+            with self.subTest(tail=tail):
+                room = self.room(self.lines()["editor"], sam=[["Let me look. ", tail, ("tool", ["read"]), ]])
+                heard, _ = self.stream(room, "When?")
+                self.assertEqual([h.text for h in heard], expected)
+        room = self.room(self.lines()["editor"], sam=[["One sec ", "<tool_c"]])
+        heard, _ = self.stream(room, "When?")
+        self.assertEqual([h.text for h in heard], ["One sec"])
+        # An ordinary less-than sign is still spoken.
+        room = self.room(self.lines()["editor"], sam=[["Under 5 <", " 6 minutes."]])
+        heard, _ = self.stream(room, "How long?")
+        self.assertEqual([h.text for h in heard], ["Under 5 < 6 minutes."])
+
     def test_a_reply_that_is_only_an_inline_tool_call_still_gets_the_cue(self):
         xml = '<tool_call>{"name": "read", "arguments": {}}</tool_call>'
         room = self.room(self.lines()["editor"], sam=[[xml, ("tool", ["read"]), "It runs Friday."]])

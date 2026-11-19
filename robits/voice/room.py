@@ -83,7 +83,7 @@ class Speaker:
         elif kind == "tool":
             self._flush()
             self.mode, self.buffer, self.cut = None, "", False   # the next round is a new reply
-            if not self.cued and not self.said and self.mode is not False:
+            if not self.cued and not self.said:
                 self.cued = True
                 self._say(TOOL_CUE)
 
@@ -108,6 +108,10 @@ class Speaker:
     def _flush(self):
         if self.mode and self.buffer.strip():
             rest, self.buffer = self.buffer, ""
+            # A stream can end inside the opening of an inline call ("... <tool_"): that is not speech.
+            tag = rest.rfind("<")
+            if tag >= 0 and "<tool_call".startswith(rest[tag:]):
+                rest = rest[:tag]
             self._speak(rest)
 
     def _speak(self, sentence):
