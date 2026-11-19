@@ -177,7 +177,9 @@ class DurableSubtaskTests(unittest.TestCase):
         os.chmod(self.path, 0o644)
         self.boot()
         self.assertEqual(stat.S_IMODE(os.stat(self.path).st_mode) & 0o077, 0)
-        self.assertIn("focused work", json.dumps(self.store.load_root(owner(self.parent))))
+        rows = self.store.load_root(owner(self.parent))
+        self.assertEqual([r["task_id"] for r in rows], [task_id])
+        self.assertEqual(rows[0]["messages"][-1]["content"], "focused work")
         # An empty file made earlier with a looser mode is tightened too.
         fresh = os.path.join(self.dir.name, "empty.db")
         open(fresh, "w").close()
