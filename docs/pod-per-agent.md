@@ -17,8 +17,13 @@ worker, with scoped storage, and about what has to be decided before code commit
   calls, memory entries and digests, and runtime events. Every message, thought and event carries a
   `visibility` (`public` or `private`), and channels carry visibility, social distance and memory
   policy.
-- Events go through the in-process `RuntimeEventStream` (`emit`, `subscribe`, `events(visibility)`); the
-  TUI is a subscriber.
+- Events are emitted into the in-process `RuntimeEventStream` (`emit`, `subscribe`, `events(visibility)`,
+  with a per-stream counter as `sequence`) and persisted by `append_runtime_event` into `runtime_events`,
+  where `sequence` is nullable and not unique and `event_id` is the table's autoincrement key. The TUI does
+  not subscribe to the stream: `RobitsDbReader` opens the database file read-only and polls
+  `runtime_events` for the selected session, ordered by `COALESCE(sequence, event_id)`, remembering what it
+  has shown by `event_id`. It also filters `private` events itself, per its own policy.
+- `append_message` and `append_runtime_event` have no idempotency key: a replayed call inserts again.
 - Scheduling is in-process: `RoundRobinScheduler` and the headless due-time loop.
 - SQLite is opened with WAL and a busy timeout (`async_sqlite.open`), which is right for one writer
   process and wrong for several machines (see below).
@@ -97,14 +102,42 @@ remote implementations:
 | Name | Today | Pod mode |
 |---|---|---|
 | `MemoryStore` / `MessageStore` | `MemoryStoreProtocol`, SQLite | a composite that routes by scope: personal store (local SQLite) and org/group store (HTTP client of the org-store, same method names) |
-| `EventBus` | `RuntimeEventStream` (emit, subscribe, `events(visibility)`) | same interface; events carry a monotonically increasing sequence and a source agent ID; the remote implementation follows the org event log from a cursor and replays after a reconnect |
+| `EventBus` (writer side) | `RuntimeEventStream` (emit, subscribe), whose subscriber persists events with `append_runtime_event_object` | unchanged inside a worker; the persisting subscriber appends to the personal store and ships to the org-store (see "Ordering and idempotency") |
+| `EventSource` (reader side, new) | none: the TUI reads SQLite directly (`RobitsDbReader.get_runtime_events`) | one read interface, `events(after_cursor, filters) -> (events, next_cursor)`; a SQLite implementation (today's polling, cursor = `event_id`) and a remote one (`GET /events?after=` on the org-store) |
 | `AgentIdentity` | agent ID, role and metadata rows | adds org ID and the list of scopes the agent may use; derived from the pod's identity (below), never from a request field |
 | `ConversationScope` | channel type and visibility on the channel row | maps a channel to the store that owns it (personal, org, group, work) |
 | `AgentRuntime` | the headless loop and `RoundRobinScheduler` | a worker entry point that runs the loop for one `AgentIdentity`; it takes its turns when something addressed to it is due, from the follow stream, instead of from a global round-robin |
 
-Cross-agent turn order: in one process the scheduler gives a deterministic order. Across pods, order is
-the org event log's sequence. Messages are idempotent (each append carries a key from agent ID and local
-sequence), so a restart that replays a turn does not duplicate it.
+## Ordering and idempotency
+
+The current APIs do not give either, so this is a contract the org-store adds (additive; local mode keeps
+today's behaviour):
+
+- **Who assigns the org order.** The org-store, at commit. The cursor of the org event log is the org
+  database's own autoincrement `event_id`; it is monotonic and may have gaps (a rolled-back insert), which
+  readers must tolerate. The worker-supplied `sequence` stays what it is today, a source-local counter, so
+  order *within one agent and session* is by that sequence and order *across agents* is by org `event_id`
+  (commit order). There is no clock-based ordering.
+- **Conflict key.** `append_message` and `append_runtime_event` gain an optional `source_key`, and the org
+  tables gain nullable `source_agent` and `source_key` columns with a unique index on the pair
+  (`WHERE source_key IS NOT NULL`, so existing callers that pass none are unaffected). For events the key
+  is `<session>:<local sequence>`; for messages it is a client message ID the worker generates and saves in
+  its personal store *before* sending (a counter or UUID), never derived from content.
+- **Duplicate handling.** An append with a key that exists returns the stored row's `event_id` and a
+  `duplicate: true` flag, with status 200 (idempotent). If the key exists but a hash of the payload differs,
+  it answers 409 (a reused key), and nothing is stored.
+- **Replay after a restart.** The personal store is the source of truth: the worker records a `shipped_through`
+  marker per stream, and after a restart re-sends everything past it. The keys make a re-send harmless, so
+  delivery is at least once and storage is exactly once.
+- **Cursor semantics.** `GET /events?after=<event_id>&limit=N` returns visible events with `event_id > after`
+  in ascending order and `next_cursor` = the last returned `event_id` (or the same `after` when empty).
+  Visibility filtering is server-side, so a filtered row leaves a gap the client never sees. A client keeps
+  the last cursor (and, like the TUI today, may also dedupe by `event_id`); on a reconnect it resumes from
+  that cursor.
+- **Turn order across pods.** A worker takes its turn when a message addressed to it, or on a channel it
+  belongs to, appears past its cursor. Two agents answering at once is ordinary: both appends commit, in
+  some order, and both see the other's on their next read. The deterministic round-robin stays the local,
+  single-process mode used by tests.
 
 ## Visibility across pods
 
@@ -125,87 +158,164 @@ Enforce at the store boundary, not inside the agent:
 
 ## Observing a pod-backed runtime
 
-- The TUI reads the same `EventBus` interface. In pod mode its implementation follows the org event
-  log; it needs no Kubernetes API access.
-- Discovery uses the registry, not the cluster: each worker upserts its agent row and refreshes a
-  heartbeat in the org store (the existing agent lifecycle state plus a last-seen time). The TUI lists agents
-  from there. Kubernetes labels (`org`, `agent-id`, `role`, `lifecycle`) are for operators and for
-  capacity queries, as in `kind-sandbox-runtime.md`.
+- Today the TUI opens the database file read-only and polls it (see "What exists today"). That cannot work
+  across pods: each personal file is on a volume only its agent mounts, and the org file belongs to the
+  org-store. The bridge is the `EventSource` read interface above: the TUI's `RobitsDbReader` is wrapped
+  as its SQLite implementation (same query, cursor = `event_id`, so no behaviour change), and the remote
+  implementation calls the org-store's `GET /events`. `RuntimeEventStream` stays the writer-side bus inside
+  a process; the TUI is never a subscriber of it, in either mode.
+- The `private` filter moves to the server for the remote source (the TUI's own `public-only` policy stays
+  as a display option on top).
+- No Kubernetes API access is needed for events. Discovery uses the registry, not the cluster: each worker
+  upserts its agent row and refreshes a heartbeat in the org store (the existing agent lifecycle state plus
+  a last-seen time); the TUI lists agents from there. Kubernetes labels (`org`, `agent-id`, `role`,
+  `lifecycle`) are for operators and for capacity queries, as in `kind-sandbox-runtime.md`.
 - Liveness stays the existing heartbeat-file probe inside each worker.
 
 ## Minimal kind sketch (illustrative; the environment variables are proposed, not implemented)
+
+One namespace, one org-store with its claim and Service, one worker with its identity token, and the
+policies that select them by label. Image names and the entry points are placeholders. The YAML parses
+and its Service, NetworkPolicy and volume references were checked against the pod labels and volume
+names; it has not been applied to a cluster, so validate it there first.
 
 ```yaml
 apiVersion: v1
 kind: Namespace
 metadata: {name: robits-org}
 ---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata: {name: org, namespace: robits-org}
+spec:
+  accessModes: [ReadWriteOnce]
+  resources: {requests: {storage: 1Gi}}
+---
 apiVersion: apps/v1
 kind: Deployment
-metadata: {name: org-store, namespace: robits-org}
+metadata: {name: org-store, namespace: robits-org, labels: {app: org-store}}
 spec:
   replicas: 1
   strategy: {type: Recreate}              # one writer on the org SQLite file
   selector: {matchLabels: {app: org-store}}
   template:
-    metadata: {labels: {app: org-store}}
+    metadata: {labels: {app: org-store, robits/role: org-store}}
     spec:
+      automountServiceAccountToken: true  # the store validates worker tokens (TokenReview), so it needs the API
+      securityContext: {runAsNonRoot: true, runAsUser: 10001, fsGroup: 10001, seccompProfile: {type: RuntimeDefault}}
       containers:
         - name: org-store
           image: robits                    # proposed entry point: python -m robits.org_store
-          env: [{name: ROBITS_MEMORY_DB, value: /data/org.db}]
-          volumeMounts: [{name: org, mountPath: /data}]
-      volumes: [{name: org, persistentVolumeClaim: {claimName: org}}]
+          ports: [{name: http, containerPort: 8080}]
+          env:
+            - {name: ROBITS_MEMORY_DB, value: /data/org.db}
+            - {name: ROBITS_ORG_STORE_AUDIENCE, value: org-store}      # proposed
+          securityContext: {allowPrivilegeEscalation: false, readOnlyRootFilesystem: true, capabilities: {drop: [ALL]}}
+          resources: {requests: {cpu: 50m, memory: 128Mi}, limits: {memory: 512Mi}}
+          volumeMounts: [{name: org, mountPath: /data}, {name: tmp, mountPath: /tmp}]
+      volumes:
+        - {name: org, persistentVolumeClaim: {claimName: org}}
+        - {name: tmp, emptyDir: {sizeLimit: 64Mi}}
+---
+apiVersion: v1
+kind: Service
+metadata: {name: org-store, namespace: robits-org}
+spec:
+  selector: {app: org-store}
+  ports: [{name: http, port: 80, targetPort: http}]
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata: {name: agent-alex, namespace: robits-org}
+automountServiceAccountToken: false
+---
+apiVersion: v1
+kind: Service                              # the StatefulSet's governing (headless) service
+metadata: {name: agent-alex, namespace: robits-org}
+spec:
+  clusterIP: None
+  selector: {robits/agent-id: alex}
+  ports: [{name: none, port: 1}]
 ---
 apiVersion: apps/v1
 kind: StatefulSet
-metadata: {name: agent-alex, namespace: robits-org, labels: {robits/agent-id: alex}}
+metadata: {name: agent-alex, namespace: robits-org, labels: {robits/agent-id: alex, robits/role: worker}}
 spec:
   serviceName: agent-alex
   replicas: 1
   selector: {matchLabels: {robits/agent-id: alex}}
   template:
-    metadata: {labels: {robits/agent-id: alex}}
+    metadata: {labels: {robits/agent-id: alex, robits/role: worker}}
     spec:
-      automountServiceAccountToken: false
+      serviceAccountName: agent-alex
+      automountServiceAccountToken: false  # no API access; the store token below is the only credential
+      securityContext: {runAsNonRoot: true, runAsUser: 10001, fsGroup: 10001, seccompProfile: {type: RuntimeDefault}}
       containers:
         - name: agent
           image: robits
           env:
-            - {name: ROBITS_AGENT_ID, value: alex}            # proposed
-            - {name: ROBITS_ORG_STORE_URL, value: "http://org-store"}   # proposed
-            - {name: ROBITS_MEMORY_DB, value: /data/alex.db}  # the personal store
-          volumeMounts: [{name: personal, mountPath: /data}]
+            - {name: ROBITS_AGENT_ID, value: alex}                          # proposed
+            - {name: ROBITS_ORG_STORE_URL, value: "http://org-store"}       # proposed
+            - {name: ROBITS_ORG_STORE_TOKEN_FILE, value: /var/run/org-store/token}   # proposed
+            - {name: ROBITS_MEMORY_DB, value: /data/alex.db}                # the personal store
+          securityContext: {allowPrivilegeEscalation: false, readOnlyRootFilesystem: true, capabilities: {drop: [ALL]}}
+          resources: {requests: {cpu: 50m, memory: 128Mi}, limits: {memory: 512Mi}}
+          volumeMounts:
+            - {name: personal, mountPath: /data}
+            - {name: org-store-token, mountPath: /var/run/org-store, readOnly: true}
+            - {name: tmp, mountPath: /tmp}
+      volumes:
+        - name: org-store-token            # audience-bound, short-lived, refreshed by the kubelet
+          projected:
+            sources:
+              - serviceAccountToken: {audience: org-store, expirationSeconds: 3600, path: token}
+        - {name: tmp, emptyDir: {sizeLimit: 64Mi}}
   volumeClaimTemplates:
     - metadata: {name: personal}
       spec: {accessModes: [ReadWriteOnce], resources: {requests: {storage: 1Gi}}}
 ---
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
-metadata: {name: workers-only-to-org-store, namespace: robits-org}
+metadata: {name: workers-egress, namespace: robits-org}
 spec:
   podSelector: {matchLabels: {robits/role: worker}}
   policyTypes: [Egress]
   egress:
-    - to: [{podSelector: {matchLabels: {app: org-store}}}]
-    - ports: [{port: 443, protocol: TCP}, {port: 53, protocol: UDP}]   # model endpoint and DNS
+    - to: [{podSelector: {matchLabels: {robits/role: org-store}}}]
+      ports: [{port: 8080, protocol: TCP}]
+    - ports: [{port: 53, protocol: UDP}, {port: 53, protocol: TCP}]    # DNS
+    - ports: [{port: 443, protocol: TCP}]                               # the model endpoint
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: {name: org-store-ingress, namespace: robits-org}
+spec:
+  podSelector: {matchLabels: {robits/role: org-store}}
+  policyTypes: [Ingress]
+  ingress:
+    - from: [{podSelector: {matchLabels: {robits/role: worker}}}]       # add the observer's label here
+      ports: [{port: 8080, protocol: TCP}]
 ```
 
-A complete example would add group stores, the observer, resource limits and the probes from
-`deploy/kubernetes/`.
+The store checks a worker's token with the Kubernetes `TokenReview` API (audience `org-store`) and maps the
+service account to one agent ID; that is why the org-store pod, and only that pod, keeps API access. A
+complete example would add group stores, the observer, and probes (`python -m robits.health`, as in
+`deploy/kubernetes/`). Never run two org-store pods on one claim.
 
 ## Phasing
 
 Each step is testable without a cluster, using fake transports and temporary SQLite files.
 
-1. Name the interfaces (`EventBus`, scope routing in a composite store, `AgentIdentity`) with the
-   current in-process implementations. No behaviour change.
+1. Name the interfaces (`EventSource` over today's SQLite polling, scope routing in a composite store,
+   `AgentIdentity`) with the current in-process implementations. No behaviour change.
 2. Local async mode: several agents in one process, each with its own personal store and a separate
    org store object. This proves scope routing and visibility filtering.
 3. The org-store service and its HTTP client (same method names as the protocol), with the
-   authorization rules above and idempotent appends; tests use a loopback server.
-4. A remote `EventBus` that follows the org log from a cursor, with replay after a reconnect.
-5. The worker entry point and registry heartbeat; the TUI against the remote bus.
+   authorization rules above and the `source_key` / org `event_id` contract from "Ordering and
+   idempotency" (additive columns and a partial unique index); tests use a loopback server, duplicate
+   and conflicting keys, and a replay from a `shipped_through` marker.
+4. The remote `EventSource` that follows the org log from a cursor, with resume after a reconnect.
+5. The worker entry point and registry heartbeat; the TUI over the remote `EventSource`.
 6. Manifests under `deploy/` and a kind smoke test.
 
 ## Decisions for the maintainer
