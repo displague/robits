@@ -30,6 +30,7 @@ LINES_FILE = os.environ.get("ROBITS_VOICE_LINES", "lines.yaml")
 MAX_CALLS = int(os.environ.get("ROBITS_VOICE_MAX_CALLS", "1"))
 STT_URL = os.environ.get("ROBITS_VOICE_STT_URL") or os.environ.get("OPENAI_BASE_URL")
 STT_MODEL = os.environ.get("ROBITS_VOICE_STT_MODEL", "whisper-1")
+STT_TERMS = os.environ.get("ROBITS_VOICE_STT_TERMS", "")   # extra words for speech recognition, comma-separated
 TTS_URL = os.environ.get("ROBITS_VOICE_TTS_URL") or os.environ.get("OPENAI_BASE_URL")
 TTS_MODEL = os.environ.get("ROBITS_VOICE_TTS_MODEL", "tts-1")
 TTS_VOICE = os.environ.get("ROBITS_VOICE_TTS_VOICE", "alloy")
@@ -127,16 +128,18 @@ async def run_call(key, conn, line):
 
     from robits.voice.pipeline import Brain, PersonaTTS
     from robits.voice.room import Room
+    from robits.voice.speech import parse_terms, stt_prompt
 
     room = await in_robits(Room, line)
     CALLS[key]["room"] = room
-    # Speech recognition hints: the personas' names, full and first (a short first name alone is easy to mishear).
+    # Speech recognition hints: the personas' names, full and first (a short first name alone is easy to
+    # mishear), then ROBITS_VOICE_STT_TERMS.
     full = [getattr(room.session.participants[k], "full_name", None) or k for k in line.personas]
     names = sorted(set(full) | {n.split()[0] for n in full})
     transport = SmallWebRTCTransport(webrtc_connection=conn,
                                      params=TransportParams(audio_in_enabled=True, audio_out_enabled=True))
     stt = OpenAISTTService(base_url=STT_URL, api_key=API_KEY,
-                           settings=OpenAISTTService.Settings(model=STT_MODEL, prompt=", ".join(names) or None))
+                           settings=OpenAISTTService.Settings(model=STT_MODEL, prompt=stt_prompt(names, parse_terms(STT_TERMS))))
     tts = PersonaTTS(base_url=TTS_URL, api_key=API_KEY, sample_rate=TTS_RATE,
                      settings=PersonaTTS.Settings(model=TTS_MODEL, voice=TTS_VOICE))
     user_aggregator, _ = LLMContextAggregatorPair(
