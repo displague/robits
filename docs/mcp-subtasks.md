@@ -58,8 +58,9 @@ HTTP payloads and stdio lines have a 4 MiB limit, and requests have timeouts.
 HTTP watchdogs interrupt slow response headers/bodies. Stdio writes and reads
 share a deadline; owned process trees are reaped even if their original parent
 exits first (Windows job objects or POSIX process groups).
-Pending operations and local tasks live in process memory; restarting does not
-resume them. Persisting and reattaching work is separate future work.
+Pending remote operations live in process memory; restarting does not resume them.
+Persisting remote task handles is separate future work (issue #132). Local private
+subtasks can be made durable: see "Durable subtasks" below.
 
 ## Subtasks
 
@@ -116,6 +117,27 @@ of 32 model rounds across resumes, and each generate call permits 8 tool rounds
 Cancellation marks queued/waiting descendants cancelled. It cannot interrupt a
 synchronous model request already running. Private runtime events include
 creation, running, tool results, input requests/responses, completion and errors.
+
+## Durable subtasks
+
+Set `ROBITS_SUBTASK_DB` to a SQLite path to checkpoint private subtasks. Each state change saves
+the task's scope (owner and root), depth, model, private message history, events, status, result,
+outstanding input request and the role's plain settings. The file holds private working history, so
+it is created owner-only (0600). Nothing is stored for credentials, event streams or live objects.
+Without the setting nothing is written and behaviour is unchanged.
+
+After a restart, a caller that asks about a task it does not hold in memory reattaches its own
+root's tasks:
+
+- the task's tools are cut down to what the caller may use now; grants are revalidated, not restored;
+- only the same root (session and persona) can reattach; others get the usual "Unknown subtask";
+- queued and input-required tasks continue as they were (respond, then run);
+- a task that was running becomes `interrupted` with an explicit event. It is shown and can be
+  cancelled, but never re-run, because its tools may already have had side effects;
+- completed, failed and cancelled results stay stable;
+- a record not changed for `ROBITS_SUBTASK_RETENTION_S` seconds (default 7 days) is deleted.
+
+Not covered here: remote MCP task handles and continuation state, which remain in memory.
 
 ## Validation
 
