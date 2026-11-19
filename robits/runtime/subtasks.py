@@ -9,7 +9,7 @@ from uuid import uuid4
 
 from robits.core.config import _config as config
 from robits.runtime.mcp import owner
-from robits.runtime.task_store import FINISHED, TaskStore
+from robits.runtime.task_store import FINISHED, shared_store
 
 # The plain settings of a subtask role that a checkpoint keeps. Event streams and the employee
 # dictionary are live objects: recovery takes them from the caller instead.
@@ -166,7 +166,7 @@ class SubtaskManager:
 
 def get_manager():
     if config.subtask_manager is None:
-        store = TaskStore(config.subtask_db, config.subtask_retention_s) if config.subtask_db else None
+        store = shared_store(config.subtask_db, config.subtask_retention_s) if config.subtask_db else None
         config.subtask_manager = SubtaskManager(store)
     return config.subtask_manager
 

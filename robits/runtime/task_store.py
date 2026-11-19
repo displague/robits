@@ -1,9 +1,14 @@
-"""Durable checkpoints for private subtask records (issue #132, first slice).
+"""Durable checkpoints for private subtask records and remote MCP operations (issue #132).
 
 One SQLite file holds a JSON snapshot per private subtask: scope (owner and root), depth, model,
 private message history, events, status, result, outstanding input request and the role's plain
 settings. No credentials, no live objects and no model or tool handles are stored; on recovery the
 role is rebuilt under the caller's *current* authority (see ``SubtaskManager.recover``).
+
+A second table keeps pending remote MCP operations (task handles and MRTR continuations): the
+owner scope, server *name* (never its credentials or URL), method, parameters, the server's opaque
+continuation state, the round count and when the next poll is due; a finished operation keeps its
+final result so a repeated ask returns the same outcome.
 
 The file holds private working history, so it is created owner-only (0600). It is opt-in
 (``ROBITS_SUBTASK_DB``) and rows expire ``ROBITS_SUBTASK_RETENTION_S`` after their last change.
@@ -67,7 +72,27 @@ class TaskStore:
         self.db.execute("""CREATE TABLE IF NOT EXISTS subtasks (
             task_id TEXT PRIMARY KEY, root TEXT NOT NULL, owner TEXT NOT NULL,
             status TEXT NOT NULL, updated REAL NOT NULL, body TEXT NOT NULL)""")
+        self.db.execute("""CREATE TABLE IF NOT EXISTS mcp_operations (
+            handle TEXT PRIMARY KEY, owner TEXT NOT NULL, status TEXT NOT NULL,
+            updated REAL NOT NULL, body TEXT NOT NULL)""")
         self.db.commit()
+
+    def save_operation(self, handle, owner, status, body):
+        with self.lock:
+            self.db.execute(
+                "INSERT INTO mcp_operations (handle, owner, status, updated, body) VALUES (?,?,?,?,?) "
+                "ON CONFLICT(handle) DO UPDATE SET owner=excluded.owner, status=excluded.status, "
+                "updated=excluded.updated, body=excluded.body",
+                (handle, _encode(owner), status, self.clock(), _encode(body)))
+            self.db.commit()
+
+    def load_operation(self, handle):
+        """(owner, status, body) of a saved operation, or None (expired rows are purged first)."""
+        self.purge()
+        with self.lock:
+            row = self.db.execute("SELECT owner, status, body FROM mcp_operations WHERE handle = ?",
+                                  (handle,)).fetchone()
+        return None if row is None else (_decode(row[0]), row[1], _decode(row[2]))
 
     def save(self, snapshot):
         with self.lock:
@@ -82,9 +107,11 @@ class TaskStore:
     def purge(self):
         """Drop rows not changed within the retention window; returns how many."""
         with self.lock:
-            cursor = self.db.execute("DELETE FROM subtasks WHERE updated < ?", (self.clock() - self.retention_s,))
+            cutoff = self.clock() - self.retention_s
+            count = self.db.execute("DELETE FROM subtasks WHERE updated < ?", (cutoff,)).rowcount
+            count += self.db.execute("DELETE FROM mcp_operations WHERE updated < ?", (cutoff,)).rowcount
             self.db.commit()
-            return cursor.rowcount
+            return count
 
     def load_root(self, root):
         """Snapshots of one root's tasks, oldest first (expired rows are purged first)."""
@@ -99,3 +126,14 @@ class TaskStore:
                 self.db.close()
             except sqlite3.Error:
                 pass
+
+
+_SHARED = {}
+
+
+def shared_store(path, retention_s):
+    """One store per file in this process, so subtasks and MCP operations share a connection."""
+    key = os.path.abspath(path)
+    if key not in _SHARED:
+        _SHARED[key] = TaskStore(path, retention_s)
+    return _SHARED[key]
