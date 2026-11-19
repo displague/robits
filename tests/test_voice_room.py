@@ -70,6 +70,21 @@ class SpeakableTest(unittest.TestCase):
         self.assertLessEqual(len(out), 100)
         self.assertTrue(out.endswith("."))
 
+    def test_file_paths_and_record_keys_become_words(self):
+        for text, spoken in (
+            ("Read drafts/2026-11-18-vote.md for it.", "Read the vote draft for it."),
+            ("It is at /var/lib/x/y.json.", "It is at a file."),
+            ("See records/budget-review-20261118 now.", "See the budget review record now."),
+            ("Under drafts/ /2026-11-18.md.", "Under a draft."),
+            ("`notes/plan_v2.txt`, then more!", "the plan v2 file, then more!"),
+        ):
+            with self.subTest(text=text):
+                self.assertEqual(speech.speakable(text), spoken)
+
+    def test_ordinary_slashes_are_left_alone(self):
+        text = "Yes and/or no, 24/7, on 11/18/2026, at 60 km/h, he/she/they, 3/4 done, 10:30 a.m., Dr. Ortiz, e.g. this."
+        self.assertEqual(speech.speakable(text), text)
+
     def test_group_note_names_the_others(self):
         note = speech.call_note("", ["Sam Ortiz"])
         self.assertIn("Others on the call: Sam Ortiz", note)
