@@ -445,6 +445,37 @@ def owner(role):
             getattr(role, "runtime_role_name", None) or getattr(role, "name", "unknown"))
 
 
+# Field names whose values are never written to the durable store, whatever a server's own
+# ``redact_keys`` say: a pending operation that would need one to resume is simply not saved.
+_SECRET_NAME = re.compile(r"token|secret|passw|authoriz|api[_-]?key|credential|cookie|bearer", re.I)
+# What a saved pending operation keeps of the server's last answer: the handle, the state, the poll
+# interval and the questions to answer, and the opaque continuation state. Nothing else.
+_RESUME_KEYS = {"resultType", "taskId", "status", "statusMessage", "pollIntervalMs", "ttl",
+                "inputRequests", "requestState"}
+_FINAL_LIMIT = 16 * 1024      # bytes of a finished result kept for a repeated ask
+
+
+def _names(value):
+    """Every mapping key under ``value``, lower-cased."""
+    if isinstance(value, dict):
+        for key, item in value.items():
+            yield str(key).lower()
+            yield from _names(item)
+    elif isinstance(value, list):
+        for item in value:
+            yield from _names(item)
+
+
+def _scrub(value, extra=frozenset()):
+    """A copy of ``value`` with the value of every secret-looking or configured key replaced."""
+    if isinstance(value, dict):
+        return {key: "[redacted]" if _SECRET_NAME.search(str(key)) or str(key).lower() in extra
+                else _scrub(item, extra) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_scrub(item, extra) for item in value]
+    return value
+
+
 class MCPManager:
     def __init__(self, servers, transport_factory=make_transport, store=None):
         self.store = store      # optional TaskStore: pending operations survive a restart (issue #132)
@@ -668,7 +699,7 @@ class MCPManager:
         if result.get("resultType") not in {"input_required", "task"} and "taskId" not in result:
             if handle:
                 self.pending.pop(handle, None)
-                self._finish(handle, role, result)
+                self._finish(handle, role, result, server)
             return result
         if not handle and len(self.pending) >= 128:
             raise ValueError("MCP pending operation budget exceeded")
@@ -688,40 +719,71 @@ class MCPManager:
         return public
 
     def _persist(self, handle, record, role):
-        """Save a pending operation. The poll time is saved as wall-clock time, since a monotonic
-        clock does not survive a restart."""
+        """Save what is needed to resume a pending operation, and no more. The poll time is saved as
+        wall-clock time, since a monotonic clock does not survive a restart.
+
+        A task is resumed by its task ID, so its call arguments are not saved at all. An
+        input-required continuation re-sends the original call, so its arguments are needed; if any
+        argument name looks like a secret or is one of the server's configured ``redact_keys``, the
+        operation is not saved (it stays in memory only, as without a store) rather than written
+        with the secret or resumed with a blanked value."""
         if self.store is None:
             return
+        result = record["result"]
+        task = result.get("task", result)
+        is_task = bool(task.get("taskId"))
+        params = {}
+        if not is_task:
+            sensitive = set(self.redact.get(record["server"], ())) | {n for n in _names(record["params"])
+                                                                       if _SECRET_NAME.search(n)}
+            if sensitive & set(_names(record["params"])):
+                return
+            params = record["params"]
         record["identity"] = self._identity(record["server"], role)
+        kept = {k: v for k, v in result.items() if k in _RESUME_KEYS}
+        if "task" in result:
+            kept["task"] = {k: v for k, v in task.items() if k in _RESUME_KEYS}
         due = time.time() + max(0.0, record["next_poll"] - time.monotonic())
         self.store.save_operation(handle, record["owner"], "pending", {
             "server": record["server"], "identity": record["identity"], "method": record["method"],
-            "params": record["params"], "result": record["result"], "rounds": record["rounds"],
-            "next_poll_at": due})
+            "params": params, "result": kept, "rounds": record["rounds"], "next_poll_at": due})
 
-    def _finish(self, handle, role, final):
-        if self.store is not None:
-            self.store.save_operation(handle, owner(role), "finished", {"result": final})
+    def _finish(self, handle, role, final, server, identity=None):
+        """Keep a bounded, redacted copy of a finished operation's result, so a repeated ask after a
+        restart returns the same outcome. Secret-looking and configured field names are replaced; a
+        result still over the size limit is replaced by its status. The server and identity are kept
+        so a finished operation reattaches under the same checks as a pending one."""
+        if self.store is None:
+            return
+        copy = _scrub(final, self.redact.get(server, frozenset()))
+        if len(json.dumps(copy, default=str)) > _FINAL_LIMIT:
+            task = final.get("task", final) if isinstance(final, dict) else {}
+            copy = {"resultType": "complete", "status": task.get("status"),
+                    "note": "The full result was not kept (too large); ask the server again if it is needed."}
+        self.store.save_operation(handle, owner(role), "finished", {
+            "server": server, "identity": self._identity(server, role) if identity is None else identity,
+            "result": copy})
 
     def _recover(self, handle, role):
         """The pending record for ``handle`` from the store, or the saved final result of a finished
         operation (as a dict under "finished"), or None.
 
-        Reattaches under the original scope only: the caller must be the owner, the server must still
-        be configured and the caller's identity at that server must be the one that started the
-        operation. Nothing is re-sent here: a task is only polled, updated or cancelled by its
-        existing task ID, so recovery can never create the remote task twice.
+        Reattaches under the original scope only, for finished and pending operations alike: the
+        caller must be the owner, the server must still be configured and the caller's identity at
+        that server must be the one that started the operation. Nothing is re-sent here: a task is
+        only polled, updated or cancelled by its existing task ID, so recovery can never create the
+        remote task twice.
         """
         saved = self.store.load_operation(handle) if self.store is not None else None
         if saved is None or saved[0] != owner(role):
             return None
         _, status, body = saved
-        if status == "finished":
-            return {"finished": body["result"]}
         if body["server"] not in self.servers:
             raise ValueError("The MCP server for this operation is no longer configured")
         if body["identity"] != self._identity(body["server"], role):
             return None
+        if status == "finished":
+            return {"finished": body["result"]}
         record = {"owner": saved[0], "server": body["server"], "method": body["method"],
                   "params": body["params"], "result": body["result"], "rounds": body["rounds"],
                   "identity": body["identity"],
@@ -752,7 +814,7 @@ class MCPManager:
             if cancel:
                 self.pending.pop(handle)
                 final = {"resultType": "complete", "status": "cancelled"}
-                self._finish(handle, role, final)
+                self._finish(handle, role, final, record["server"], record.get("identity"))
                 return final
             method, params = record["method"], dict(record["params"])
             self._validate_responses(result.get("inputRequests", {}), responses or {})
@@ -773,7 +835,7 @@ class MCPManager:
                     "acknowledged": method, "next_action": "poll"}
         if state.get("status") in {"completed", "failed", "cancelled"}:
             self.pending.pop(handle)
-            self._finish(handle, role, updated)
+            self._finish(handle, role, updated, record["server"], record.get("identity"))
             return updated
         return self._capture(record["server"], method, params, updated, role, handle, record["rounds"] + 1)
 

@@ -127,6 +127,76 @@ class DurableMCPTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "no longer configured"):
             self.manager.advance(handle, self.role)
 
+    def finish_one(self, **kwargs):
+        handle = self.start_task()
+        self.transport.results = [{"resultType": "complete", "taskId": "t", "status": "completed", **kwargs}]
+        self.manager.advance(handle, self.role)
+        return handle
+
+    def test_a_finished_operation_is_reattached_under_the_same_checks(self):
+        self.boot(AuthTransport)
+        handle = self.finish_one(result={"content": ["kept"]})
+        self.boot(AuthTransport)
+        self.transport.ident = "identity-b"
+        with self.assertRaisesRegex(ValueError, "Unknown MCP operation"):
+            self.manager.advance(handle, self.role)
+        with self.assertRaisesRegex(ValueError, "Unknown MCP operation"):
+            self.manager.advance(handle, role(name="Other", session="other"))
+        self.transport.ident = "identity-a"
+        self.assertEqual(self.manager.advance(handle, self.role)["result"], {"content": ["kept"]})
+        del self.manager.servers["example"]
+        with self.assertRaisesRegex(ValueError, "no longer configured"):
+            self.manager.advance(handle, self.role)
+
+    def test_a_task_is_saved_without_its_call_arguments_and_still_resumes(self):
+        self.transport.results = [{"resultType": "task", "taskId": "t", "status": "working",
+                                   "debug": "SERVER-EXTRA-FIELD"}]
+        handle = self.manager.call("example", "slow", {"note": "PRIVATE-ARGUMENT"}, self.role)["operation_id"]
+        with open(self.path, "rb") as stream:
+            raw = stream.read()
+        self.assertNotIn(b"PRIVATE-ARGUMENT", raw)       # a task is resumed by its ID, not its arguments
+        self.assertNotIn(b"SERVER-EXTRA-FIELD", raw)     # only the resume fields of the answer are kept
+        self.boot()
+        self.transport.results = [{"resultType": "complete", "taskId": "t", "status": "completed", "result": {}}]
+        self.assertEqual(self.manager.advance(handle, self.role)["status"], "completed")
+
+    def test_a_continuation_that_needs_a_secret_argument_is_not_saved(self):
+        self.transport.results = [{"resultType": "input_required", "requestState": "s", "inputRequests": {}}]
+        handle = self.manager.call("example", "pay", {"api_key": "SECRET-VALUE-9", "amount": 3}, self.role)["operation_id"]
+        with open(self.path, "rb") as stream:
+            self.assertNotIn(b"SECRET-VALUE-9", stream.read())
+        self.assertIn(handle, self.manager.pending)      # still works in this process
+        self.boot()
+        with self.assertRaisesRegex(ValueError, "Unknown MCP operation"):
+            self.manager.advance(handle, self.role)      # fails closed after a restart
+
+    def test_configured_redact_keys_also_keep_a_continuation_out_of_the_store(self):
+        servers = {"example": {"url": "http://localhost/mcp", "redact_keys": ["Account"]}}
+        self.boot(servers=servers)
+        self.transport.results = [{"resultType": "input_required", "requestState": "s", "inputRequests": {}}]
+        self.manager.call("example", "pay", {"account": "ACCT-4455", "amount": 3}, self.role)
+        with open(self.path, "rb") as stream:
+            self.assertNotIn(b"ACCT-4455", stream.read())
+
+    def test_a_finished_result_is_redacted_and_bounded(self):
+        servers = {"example": {"url": "http://localhost/mcp", "redact_keys": ["balance"]}}
+        self.boot(servers=servers)
+        handle = self.finish_one(result={"content": ["ok"], "balance": 120, "session_token": "TOKEN-VALUE-7",
+                                         "nested": [{"password": "PW-VALUE-3", "city": "Paris"}]})
+        with open(self.path, "rb") as stream:
+            raw = stream.read()
+        for secret in (b"TOKEN-VALUE-7", b"PW-VALUE-3", b"120"):
+            self.assertNotIn(secret, raw)
+        self.boot(servers=servers)
+        kept = self.manager.advance(handle, self.role)["result"]
+        self.assertEqual(kept["balance"], "[redacted]")
+        self.assertEqual(kept["session_token"], "[redacted]")
+        self.assertEqual(kept["nested"], [{"password": "[redacted]", "city": "Paris"}])
+        self.assertEqual(kept["content"], ["ok"])
+        big = self.finish_one(result={"content": ["x" * 20000]})
+        self.boot(servers=servers)
+        self.assertIn("not kept", self.manager.advance(big, self.role)["note"])
+
     def test_only_the_server_name_is_stored_no_url_or_credentials(self):
         self.start_task()
         with open(self.path, "rb") as stream:
