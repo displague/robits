@@ -78,6 +78,30 @@ Every prompt on a call starts with a short note that the persona is on a phone c
 one to three spoken sentences and, on a group line, names the others. Replies are cleaned for
 speech: no markdown, links or code, and at most 600 characters.
 
+### Spoken as it is written
+
+On a call, a persona's reply is spoken sentence by sentence while the model is still writing it, so
+the caller hears the first sentence after its first full stop instead of after the whole reply. This
+needs a model server that streams chat completions; roles without a call listener never stream.
+
+- A sentence ends at `.`, `!` or `?` followed by a space, except after a short abbreviation ("Gov.
+  Ruiz", "Dr. Lee") or an initial ("U.S."). The unfinished tail is spoken when the reply, or the text
+  before a tool call, ends.
+- When the persona runs a tool before it has said anything, the caller hears "Let me check." once
+  for that turn, in the persona's voice. After a tool call the persona goes on in the same turn, and
+  its next round is streamed the same way.
+- A reply that starts like a structured action, markup or code (`{`, `[`, `<` or a backtick) is not
+  streamed: it is handled whole at the end of the turn, as before. Inline `<tool_call>` text from
+  models that write calls in their reply is never spoken, though the sentences before it are.
+- An opening name on the first sentence is dropped (as in "Alex Chen, ..."), and the whole spoken
+  reply stays within the 600-character limit; a sentence that would pass it is not spoken.
+- A hand-off to another persona (`handoffs`) still happens after the first persona's turn; each
+  persona's sentences are spoken in its own voice, in order.
+- Texts (`/api/text`) are not streamed: the answer is returned whole.
+- The server logs how long the personas took and, when it streamed, how soon the first words came:
+  `robits voice: 12 words -> alex_chen in 4.2 s (first words after 1.9 s)`. Words and names of
+  callers are not logged.
+
 ## Server
 
 `python -m robits.voice` listens on `ROBITS_VOICE_HOST:ROBITS_VOICE_PORT` (default
