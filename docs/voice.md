@@ -108,6 +108,7 @@ is the one call at the default `ROBITS_VOICE_MAX_CALLS=1`.
 | `ROBITS_VOICE_MAX_CALLS` | `1` | calls at once; more get `429` |
 | `ROBITS_VOICE_STT_URL` | `OPENAI_BASE_URL` | OpenAI-compatible `/v1/audio/transcriptions` |
 | `ROBITS_VOICE_STT_MODEL` | `whisper-1` | its model |
+| `ROBITS_VOICE_STT_TERMS` | none | extra vocabulary for speech recognition, comma-separated (`Agent Hub, newsroom`). Sent after the persona names as the transcription prompt; each word once, at most about 400 characters in all (names are always kept) |
 | `ROBITS_VOICE_TTS_URL` | `OPENAI_BASE_URL` | OpenAI-compatible `/v1/audio/speech` (raw PCM) |
 | `ROBITS_VOICE_TTS_MODEL` / `ROBITS_VOICE_TTS_VOICE` | `tts-1` / `alloy` | its model and default voice |
 | `ROBITS_VOICE_TTS_SAMPLE_RATE` | `24000` | the PCM rate the TTS returns |

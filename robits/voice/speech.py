@@ -25,6 +25,31 @@ def call_note(caller="", others=(), handoffs=False):
     return note
 
 
+STT_PROMPT_CHARS = 400   # speech recognition reads a short prompt (Whisper: about 224 tokens)
+
+
+def stt_prompt(names, terms=(), limit=STT_PROMPT_CHARS):
+    """The speech-recognition prompt: the persona names first, then extra vocabulary ("Agent Hub"),
+    each once (case aside), stopping before the prompt would pass ``limit`` characters. Names are
+    always kept whole, even past the limit."""
+    chosen, size = [], 0
+    for position, word in enumerate([*names, *terms]):
+        word = " ".join(str(word).split())
+        if not word or word.lower() in {c.lower() for c in chosen}:
+            continue
+        add = len(word) + (2 if chosen else 0)
+        if position >= len(names) and size + add > limit:
+            continue
+        chosen.append(word)
+        size += add
+    return ", ".join(chosen) or None
+
+
+def parse_terms(value):
+    """Extra vocabulary from a comma-separated setting."""
+    return [t for t in (" ".join(part.split()) for part in (value or "").split(",")) if t]
+
+
 _FENCE = re.compile(r"```.*?```", re.S)
 _LINK = re.compile(r"\[([^\]]+)\]\([^)]+\)")
 _URL = re.compile(r"https?://\S+")

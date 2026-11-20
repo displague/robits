@@ -114,6 +114,20 @@ class SpeakableTest(unittest.TestCase):
             elapsed = time.monotonic() - start
             self.assertLess(elapsed, 0.25, f"took {elapsed:.3f}s")
 
+    def test_stt_prompt_lists_names_then_terms_within_a_limit(self):
+        names = ["Alex Chen", "Sam Ortiz", "Alex", "Sam"]
+        self.assertEqual(speech.stt_prompt(names), "Alex Chen, Sam Ortiz, Alex, Sam")
+        self.assertEqual(speech.stt_prompt(names, ["Agent Hub", "alex", " newsroom "]),
+                         "Alex Chen, Sam Ortiz, Alex, Sam, Agent Hub, newsroom")
+        self.assertEqual(speech.stt_prompt(["Alex Chen"], ["one two", "three"], limit=20), "Alex Chen, one two")
+        self.assertEqual(speech.stt_prompt(["Alex Chen"], ["x" * 50], limit=20), "Alex Chen")
+        self.assertEqual(speech.stt_prompt(["A" * 30], [], limit=10), "A" * 30)
+        self.assertIsNone(speech.stt_prompt([], []))
+
+    def test_terms_setting_is_comma_separated(self):
+        self.assertEqual(speech.parse_terms(" Agent  Hub, newsroom,, "), ["Agent Hub", "newsroom"])
+        self.assertEqual(speech.parse_terms(None), [])
+
     def test_group_note_names_the_others(self):
         note = speech.call_note("", ["Sam Ortiz"])
         self.assertIn("Others on the call: Sam Ortiz", note)
